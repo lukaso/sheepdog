@@ -433,7 +433,9 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 - **P3-F4 TERM and root exit together give different codes per OS** (Linux checks the root first, macOS TERM first). Assert: one stated order, the same on both.
 - **Also:** a non-ESRCH `kevent` failure falls into a blocking `waitpid` that ignores TERM for the root's lifetime; use the blocking wait only on ESRCH, and poll otherwise.
 
-**Carried into phase 1** (not measured in phase 0): the supervisor's HUP (and INT) handling, which must not leak the tree (ignored cell `a_forwarded_hup_does_not_leak_the_tree`); the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
+**Phase-3 checklist addition (phase-1 plan review round 3):** the macOS bundle's `CFBundleExecutable` is `sheepdog`, and every Linux install names the binary `sheepdog` (`kill <pid>` recognises a supervisor by that basename).
+
+**Carried into phase 1** (not measured in phase 0): the supervisor's HUP (and INT) handling, which must not leak the tree (ignored cell `a_forwarded_hup_does_not_leak_the_tree`); the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (moved to phase 2 with PLAN §7; facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 
 ## 8. Open questions for the operator
 
