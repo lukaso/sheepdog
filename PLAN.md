@@ -1,6 +1,6 @@
 # sheepdog — plan
 
-**Status:** DRAFT r11, 2026-09-25. All §8 questions answered; review round 7 folded in. Renamed to sheepdog; DevEx review done (§10); §3.0 no-setup modes and the DevEx additions are not yet adversarially reviewed. Review rounds 1–6 done (7 P1s in rounds 1–3, **none in rounds 4–6**; all P1s re-measured by the planner and folded in; see §10). Nothing built.
+**Status:** r12, 2026-09-25. Phase 0 gate PASSED on macOS and Linux (§7.1). All §8 questions answered. Renamed to sheepdog; DevEx review done (§10); §3.0 no-setup modes and the DevEx additions are not yet adversarially reviewed. Review rounds 1–6 done (7 P1s in rounds 1–3, **none in rounds 4–6**; all P1s re-measured by the planner and folded in; see §10). Nothing built.
 
 **One sentence:** a small static binary that runs a command and, when the command ends, times out, uses too much memory, or you ask, kills **every process the command started**, including those that called `setsid`, double-forked, or were reparented to PID 1 or launchd. It works on macOS, on Linux, and inside a default Docker container, with no root, no cgroups and no systemd.
 
@@ -377,6 +377,19 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 | **2. Caps + journal + registration + orphans** | caps, `--status-fd`, journal, registration, `sweep`, `ps`, `kill <job>`, suspects and the hand-over in `kill <pid>`, `strays`, `doctor`, `--inherit-terminal-permissions`; cells 13–15, 17, 19, 25, 26, 28 (suspects), 29–31; safety cells: registration spoof, a non-member registers, `--inherit-terminal-permissions` other tab, the journal cells (wrong identity, other boot, other pid namespace) | as above (registration cells and mutants are macOS-only) |
 | **3. Ship** | releases (Linux: 2 static binaries; macOS: `Sheepdog.app`, universal, Developer ID-signed + notarized; checksums), `install.sh`, a Homebrew **cask** in `lukaso/tap`, npm `@lukaso/sheepdog` installing its own bundle copy and a PATH link whose process is the bundle executable (cell 18), the README with the agent snippet (§10.6), the agent first-use eval (§10.9) | clean container, clean Mac user, the distribution cell; a grant survives an upgrade (install v1, grant, install v2, protected read works); the first-use eval passes |
 | **4. Adopt** (each its own plan) | 1: the ccwho harness. 2: liveapp `check.sh`, the pty runner, the vitest gate. 3: a `sheepdog` backend in `reap-detect.ts` between cgroupfs and `none`. 4: `sweep --owner liveapp` at startup. 5: a **standard install for the liveapp fleet** (the container image and `liveapp init` provision sheepdog). | each adoption proves its own escape cell red before and green after |
+
+### 7.1 Phase 0 result (2026-09-25): gate PASSED
+
+| Check | Result |
+|---|---|
+| **Gate, macOS arm64** (macOS 26.6): cell 3, 10,000 iterations | **0 survivors** (39 min; fixture v1, ≥90% creation guard). Re-confirmed with the final fixture (root records via a pipe, ≥99% guard): 1,000 iterations, 0 survivors |
+| **Gate, Linux** (Docker Desktop, Alpine/musl, aarch64): cell 3, 10,000 iterations | **0 survivors** (19 min; final fixture, ≥99% guard). Debian/glibc: 300 iterations, 0 survivors |
+| Controls in the same suite | no sheepdog: every escapee survives; macOS round-2 design (root disclaims): survivors; Linux without the subreaper: survivors |
+| Mutants | macOS without the self re-exec: 20/20 survive; without the one-attempt guard: re-execs forever (caught at 5 s) |
+| Developer ID grant across a rebuild | kept (§4.4); a same-ID mismatching build revokes it, hence the `.dev` bundle ID |
+| Defects the spike found in itself | the uniqueid SPI **returns** the id (no out-parameter); a failed self re-exec looped (now at most once); a fixture recorder that sheepdog can kill undercounted creation (the root records now) |
+
+**Carried into phase 1** (not measured in phase 0): the TERM grace and the identity re-check before each signal (§3.3); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 
 ## 8. Open questions for the operator
 
