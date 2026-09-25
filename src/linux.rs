@@ -15,7 +15,7 @@ use std::os::unix::fs::MetadataExt;
 /// (ppid, state) from /proc/<pid>/stat; the command name may contain spaces or ')'.
 fn stat(pid: i32) -> Option<(i32, char)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let rest = &s[s.rfind(')')? + 2..];
+    let rest = s.get(s.rfind(')')? + 2..)?;
     let mut f = rest.split_whitespace();
     let state = f.next()?.chars().next()?;
     let ppid = f.next()?.parse().ok()?;
@@ -90,7 +90,10 @@ extern "C" {
 /// and passes no SETSIGDEF/SETSIGMASK. posix_spawn also avoids running Rust code in a forked
 /// child.
 fn spawn(cmd: &[OsString]) -> i32 {
-    let argv: Vec<CString> = cstrings(cmd);
+    let argv: Vec<CString> = cstrings(cmd).unwrap_or_else(|e| {
+        say!("sheepdog: {e}");
+        std::process::exit(125)
+    });
     let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: libc::pid_t = 0;
@@ -104,7 +107,64 @@ fn spawn(cmd: &[OsString]) -> i32 {
     pid
 }
 
+/// Children this process already has (for example a shell's background job before it
+/// `exec`ed sheepdog). They are not part of the command's tree.
+fn preexisting_children() -> Vec<i32> {
+    let me = unsafe { libc::getpid() };
+    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dir.flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&p| stat(p).map_or(false, |(ppid, _)| ppid == me))
+        .collect()
+}
+
+/// Review round 3: if sheepdog starts with children it did not create, it must not become
+/// their subreaper, or it adopts them and their orphans as members. So it forks once, before
+/// anything else: the child is a fresh supervisor with no children, and this process only
+/// relays TERM, INT and HUP to it and returns its exit code. Returns Some(code) in the relay,
+/// None in the supervisor.
+fn relay_if_needed() -> Option<i32> {
+    if preexisting_children().is_empty() {
+        return None;
+    }
+    unsafe {
+        let mut fwd: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut fwd);
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::sigaddset(&mut fwd, s);
+        }
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigprocmask(libc::SIG_BLOCK, &fwd, &mut old);
+        match libc::fork() {
+            0 => {
+                // the supervisor: restore the caller's mask, so the root inherits it
+                libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                None
+            }
+            -1 => {
+                libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
+                Some(125)
+            }
+            sup => loop {
+                let mut st = 0;
+                if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
+                    return Some(code_of(st));
+                }
+                let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000_000 };
+                let sig = libc::sigtimedwait(&fwd, std::ptr::null_mut(), &ts);
+                if sig > 0 {
+                    libc::kill(sup, sig);
+                }
+            },
+        }
+    }
+}
+
 pub fn run(a: &Args) -> i32 {
+    if let Some(code) = relay_if_needed() {
+        return code;
+    }
     let subreaper = match a.mode.as_deref() {
         None | Some("subreaper") => true,
         Some("none") => false,
@@ -113,7 +173,8 @@ pub fn run(a: &Args) -> i32 {
             return 125;
         }
     };
-    if subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+    let is_subreaper = subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
+    if subreaper && !is_subreaper {
         say!("sheepdog: cannot become a subreaper; tracking is degraded");
     }
     let me = unsafe { libc::getpid() };
@@ -130,7 +191,13 @@ pub fn run(a: &Args) -> i32 {
             break;
         }
     }
-    let result = kill_tree(|| descendants(me), reap, tree_empty);
+    // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
+    let opts = crate::KillOpts::from_env();
+    let result = if is_subreaper {
+        kill_tree(&opts, || descendants(me), reap, tree_empty, crate::signal)
+    } else {
+        kill_tree(&opts, || descendants(me), reap, || None, crate::signal)
+    };
     reap();
     match result {
         Ok(()) => code,

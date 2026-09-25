@@ -68,6 +68,7 @@ fn a_failing_self_reexec_falls_back_instead_of_looping() {
 }
 
 // ---- cell 23 (PLAN.md §3.1): the root gets the caller's signal state ------------------
+// (SIGCHLD excepted: the root always gets it at default; see PLAN.md §3.1)
 
 /// Run `script` under `sh -c`, with the given signals ignored by the caller, then
 /// `exec sheepdog run -- sh -c <inner>`. Returns (exit code, stderr).
@@ -111,6 +112,8 @@ fn fixture() -> &'static str {
 
 /// P1-B: a caller that ignores SIGCHLD makes the kernel reap children automatically. The
 /// supervisor must still wait for the root, kill the tree and return the root's code promptly.
+/// Linux only: on macOS the no-reset mutant stays green (the defect never existed there).
+#[cfg(target_os = "linux")]
 #[test]
 fn a_caller_that_ignores_sigchld_does_not_break_the_supervisor() {
     let marker = format!("29.{}999001", std::process::id());
@@ -217,4 +220,61 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
             .unwrap()
     };
     assert_eq!(st.code(), Some(125));
+}
+
+/// Review round 3: a shell that starts a background job and then execs sheepdog leaves that
+/// job as sheepdog's child. It is not part of the command's tree and must survive (it did not
+/// on Linux: the subreaper supervisor killed it as a member).
+#[test]
+fn a_background_job_started_before_sheepdog_is_not_killed() {
+    let marker = format!("28.{}777001", std::process::id());
+    let script = format!("/bin/sleep {marker} & exec \"$0\" run -- true");
+    let st = Command::new("sh").args(["-c", &script, sheepdog()]).status().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
+    assert!(out.status.success());
+    let alive: Vec<i32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == marker))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect();
+    for &p in &alive {
+        unsafe { libc::kill(p, libc::SIGKILL) };
+    }
+    assert_eq!(st.code(), Some(0));
+    assert_eq!(alive.len(), 1, "the caller's background job was killed");
+}
+
+/// Review round 3, F7: a panic after the freeze must not leave members stopped. Debug seam
+/// SHEEPDOG_TEST_PANIC_AFTER_STOP=1 panics right after the first SIGSTOP pass.
+#[test]
+fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
+    let marker = format!("29.{}777002", std::process::id());
+    let rec = std::env::temp_dir().join(format!("sd-panic-{}", std::process::id()));
+    let _ = std::fs::remove_file(&rec);
+    let st = Command::new(sheepdog())
+        .args(["run", "--", fixture(), "escape", &marker])
+        .arg(&rec)
+        .env("SHEEPDOG_TEST_PANIC_AFTER_STOP", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let out = Command::new("ps").args(["-Ao", "pid=,stat=,args="]).output().expect("ps");
+    assert!(out.status.success());
+    let left: Vec<(i32, String)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == marker))
+        .filter_map(|l| {
+            let mut w = l.split_whitespace();
+            Some((w.next()?.parse().ok()?, w.next()?.to_string()))
+        })
+        .collect();
+    for (p, _) in &left {
+        unsafe { libc::kill(*p, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_file(&rec);
+    assert_eq!(st.code(), Some(125), "a panic must exit 125");
+    assert!(left.is_empty(), "members were left behind after a panic: {left:?}");
 }

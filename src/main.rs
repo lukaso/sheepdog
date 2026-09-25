@@ -47,9 +47,13 @@ pub struct Args {
     pub cmd: Vec<OsString>,
 }
 
-/// Arguments as C strings, byte for byte (non-UTF-8 arguments pass unchanged).
-pub fn cstrings(v: &[OsString]) -> Vec<CString> {
-    v.iter().map(|s| CString::new(s.as_bytes()).unwrap_or_default()).collect()
+/// Arguments as C strings, byte for byte (non-UTF-8 arguments pass unchanged). An argument
+/// with an interior NUL cannot come from a C argv; if one ever arrives it is an error, never a
+/// silently different argv (review round 3, F6).
+pub fn cstrings(v: &[OsString]) -> Result<Vec<CString>, String> {
+    v.iter()
+        .map(|s| CString::new(s.as_bytes()).map_err(|_| format!("argument {:?} contains a NUL byte", s)))
+        .collect()
 }
 
 fn usage() -> i32 {
@@ -94,10 +98,10 @@ pub fn code_of(status: c_int) -> i32 {
 
 /// Send `sig` only if `pid` is still the process with identity `id` (PLAN.md §3.3; the
 /// remaining window is the time between this check and the kill call).
-fn signal(pid: i32, id: u64, sig: c_int) {
+pub fn signal(pid: i32, id: u64, sig: c_int) {
     // Test seam (debug builds only): SHEEPDOG_TEST_NOKILL=1 makes every signal fail, as EPERM
     // would after a member's setuid exec (cells 20 and 24-lite).
-    if cfg!(debug_assertions) && std::env::var("SHEEPDOG_TEST_NOKILL").as_deref() == Ok("1") {
+    if seam("SHEEPDOG_TEST_NOKILL") {
         return;
     }
     if same(pid, id) {
@@ -109,41 +113,86 @@ fn seam(name: &str) -> bool {
     cfg!(debug_assertions) && std::env::var(name).as_deref() == Ok("1")
 }
 
+/// Options of the kill loop. Production: `KillOpts::from_env()` (10 s, no seams). The debug
+/// seams exist only in debug builds.
+pub struct KillOpts {
+    pub deadline: Duration,
+    /// hide every member from all scans after the first one that reported it (cell 24-lite)
+    pub forget: bool,
+    /// every emptiness check answers "not empty" (the deadline-bound test)
+    pub never_empty: bool,
+    /// panic right after the first SIGSTOP pass (the panic-safety test)
+    pub panic_after_stop: bool,
+}
+
+impl KillOpts {
+    pub fn from_env() -> Self {
+        KillOpts {
+            deadline: std::env::var("SHEEPDOG_TEST_DEADLINE_MS")
+                .ok()
+                .filter(|_| cfg!(debug_assertions))
+                .and_then(|v| v.parse().ok())
+                .map(Duration::from_millis)
+                .unwrap_or(Duration::from_secs(10)),
+            forget: seam("SHEEPDOG_TEST_FORGET"),
+            never_empty: seam("SHEEPDOG_TEST_NEVER_EMPTY"),
+            panic_after_stop: seam("SHEEPDOG_TEST_PANIC_AFTER_STOP"),
+        }
+    }
+}
+
 /// PLAN.md §3.3 steps 2-6 (the spike still omits the TERM grace).
 ///
 /// - `members` returns the live members right now as (pid, identity).
 /// - `reap` runs every pass (Linux reaps adopted orphans).
-/// - `tree_empty` is an AUTHORITATIVE emptiness check where the platform has one: Linux
-///   answers Some(no children left) (the subreaper is the parent of the topmost live member,
-///   so ECHILD means the tree is empty; a scan of /proc is not atomic and can miss a tree that
-///   moves faster than the scan: phase-0 fix review, P1-A). macOS has none and answers None;
-///   the scan-based rule applies there (a stated residual, PLAN.md §7.1).
+/// - `tree_empty` is an authoritative emptiness check where the platform has one: Linux with
+///   the subreaper set answers Some(no children left) (a scan of /proc is not atomic and can
+///   miss a tree that moves faster than the scan: review round 2, P1-A). Otherwise None, and
+///   the scan-based rule applies (a stated residual, PLAN.md §7.1).
+/// - `send` delivers a signal (production: `signal`, which re-checks identity first).
 ///
 /// Membership is sticky: once seen, a process stays in `known` until it is confirmed dead.
-/// Without an authoritative check, two consecutive passes with nothing known alive end it.
-/// The deadline is checked at the top of EVERY pass, so it bounds the runtime whatever the
-/// tree does. Returns the pids still alive at the deadline, if any (possibly none that a scan
-/// can list, when only the authoritative check says the tree is not empty).
+/// Without an authoritative check, it takes two consecutive passes with nothing known alive,
+/// both at the end of the loop and at the deadline (review round 3, F2). The deadline is
+/// checked at the top of EVERY pass. If the loop panics, every known member is killed, so
+/// none is left stopped (review round 3, F7).
 pub fn kill_tree(
+    opts: &KillOpts,
     members: impl FnMut() -> Vec<(i32, u64)>,
+    reap: impl FnMut(),
+    tree_empty: impl FnMut() -> Option<bool>,
+    send: impl FnMut(i32, u64, c_int),
+) -> Result<(), Vec<i32>> {
+    let known: std::cell::RefCell<HashMap<i32, u64>> = Default::default();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        kill_loop(opts, members, reap, tree_empty, send, &known)
+    }));
+    match r {
+        Ok(result) => result,
+        Err(_) => {
+            let known = known.borrow();
+            for (&p, &id) in known.iter() {
+                if same(p, id) {
+                    unsafe { libc::kill(p, libc::SIGKILL) };
+                }
+            }
+            say!("sheepdog: internal error while killing the tree; killed the {} member(s) it knew", known.len());
+            Err(known.keys().copied().filter(|&p| known.get(&p).map_or(false, |&id| same(p, id))).collect())
+        }
+    }
+}
+
+fn kill_loop(
+    opts: &KillOpts,
+    mut members: impl FnMut() -> Vec<(i32, u64)>,
     mut reap: impl FnMut(),
     mut tree_empty: impl FnMut() -> Option<bool>,
+    mut send: impl FnMut(i32, u64, c_int),
+    known: &std::cell::RefCell<HashMap<i32, u64>>,
 ) -> Result<(), Vec<i32>> {
-    // Test seam (debug builds only): SHEEPDOG_TEST_DEADLINE_MS shortens the 10 s deadline.
-    let limit = std::env::var("SHEEPDOG_TEST_DEADLINE_MS")
-        .ok()
-        .filter(|_| cfg!(debug_assertions))
-        .and_then(|v| v.parse().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(10));
-    let deadline = Instant::now() + limit;
-    // Test seams (debug builds only): SHEEPDOG_TEST_FORGET=1 hides every member from all scans
-    // after the first one that reported it (cell 24-lite); SHEEPDOG_TEST_NEVER_EMPTY=1 makes
-    // every emptiness check answer "not empty" (the deadline-bound test).
-    let forget = seam("SHEEPDOG_TEST_FORGET");
-    let never_empty = seam("SHEEPDOG_TEST_NEVER_EMPTY");
+    let deadline = Instant::now() + opts.deadline;
     let mut seen: std::collections::HashSet<(i32, u64)> = std::collections::HashSet::new();
-    let mut members = members;
+    let forget = opts.forget;
     let mut scan = move || -> Vec<(i32, u64)> {
         let found = members();
         if !forget {
@@ -153,10 +202,9 @@ pub fn kill_tree(
         seen.extend(fresh.iter().copied());
         fresh
     };
+    let never_empty = opts.never_empty;
     let mut empty_check = move || if never_empty { Some(false) } else { tree_empty() };
-
-    let mut known: HashMap<i32, u64> = HashMap::new();
-    let add = |known: &mut HashMap<i32, u64>, found: Vec<(i32, u64)>| {
+    let refresh = |known: &mut HashMap<i32, u64>, found: Vec<(i32, u64)>| {
         for (p, id) in found {
             match known.get(&p) {
                 Some(&old) if same(p, old) => {}
@@ -165,29 +213,39 @@ pub fn kill_tree(
                 }
             }
         }
+        known.retain(|&p, &mut id| same(p, id));
     };
     let mut empty = 0;
     loop {
         reap();
-        add(&mut known, scan());
-        known.retain(|&p, &mut id| same(p, id));
+        refresh(&mut known.borrow_mut(), scan());
         if Instant::now() > deadline {
-            // give SIGKILLs sent in the last pass a moment to take effect, then decide
+            // let the last SIGKILLs take effect, then require the same evidence as the normal
+            // end: authoritative empty, or two consecutive passes with nothing known alive
             std::thread::sleep(Duration::from_millis(100));
-            reap();
-            let alive: Vec<i32> = known.iter().filter(|(&p, &id)| same(p, id)).map(|(&p, _)| p).collect();
-            return match (alive.is_empty(), empty_check()) {
-                (true, Some(true)) | (true, None) => Ok(()),
-                _ => Err(alive),
-            };
+            let mut empties = 0;
+            for _ in 0..2 {
+                reap();
+                refresh(&mut known.borrow_mut(), scan());
+                match empty_check() {
+                    Some(true) => return Ok(()),
+                    Some(false) => {}
+                    None if known.borrow().is_empty() => empties += 1,
+                    None => {}
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if empties == 2 {
+                return Ok(());
+            }
+            return Err(known.borrow().keys().copied().collect());
         }
         let authoritative = empty_check();
         if authoritative == Some(true) {
             return Ok(());
         }
-        if known.is_empty() {
-            // no authoritative answer: two consecutive empty passes; an authoritative
-            // "not empty" never counts as empty (members exist that this scan did not see)
+        if known.borrow().is_empty() {
+            // an authoritative "not empty" never counts as empty
             empty = if authoritative.is_none() { empty + 1 } else { 0 };
             if empty >= 2 {
                 return Ok(());
@@ -197,18 +255,22 @@ pub fn kill_tree(
         }
         empty = 0;
         // freeze what we know, then close over members created meanwhile, then kill all
-        for (&p, &id) in &known {
-            signal(p, id, libc::SIGSTOP);
+        let before: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+        for &(p, id) in &before {
+            send(p, id, libc::SIGSTOP);
         }
-        let before: Vec<i32> = known.keys().copied().collect();
-        add(&mut known, scan());
-        for (&p, &id) in &known {
-            if !before.contains(&p) {
-                signal(p, id, libc::SIGSTOP);
+        if opts.panic_after_stop {
+            panic!("test seam: panic after the freeze");
+        }
+        refresh(&mut known.borrow_mut(), scan());
+        let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+        for &(p, id) in &all {
+            if !before.iter().any(|&(b, _)| b == p) {
+                send(p, id, libc::SIGSTOP);
             }
         }
-        for (&p, &id) in &known {
-            signal(p, id, libc::SIGKILL);
+        for &(p, id) in &all {
+            send(p, id, libc::SIGKILL);
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -251,4 +313,35 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
         .collect();
     // a panic must not unwind out of an extern "C" fn (undefined behaviour before Rust 1.81)
     std::panic::catch_unwind(|| run(argv)).unwrap_or(125)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review round 3, F2: with no authoritative check, the deadline must not call the tree
+    /// clean after ONE empty scan. The scan misses a live member in the pass that reaches the
+    /// deadline and in the first deadline scan, then sees it in the second: the result must be
+    /// Err. (Calling it clean after one empty scan returns Ok here.)
+    #[test]
+    fn the_deadline_needs_two_empty_scans_without_an_authoritative_check() {
+        let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let pid = child.id() as i32;
+        let id = sheepdog::ident::identity(pid).unwrap();
+        let mut calls = 0;
+        let opts = KillOpts { deadline: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false };
+        let r = kill_tree(
+            &opts,
+            || {
+                calls += 1;
+                if calls <= 2 { vec![] } else { vec![(pid, id)] } // missed twice, then seen
+            },
+            || {},
+            || None,
+            |_, _, _| {}, // never signal: the member stays alive
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(r, Err(vec![pid]));
+    }
 }

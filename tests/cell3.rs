@@ -59,16 +59,14 @@ impl Iteration {
             })
             .collect()
     }
+    /// Live pids carrying the marker. Panics if `ps` cannot run or fails: a checker that
+    /// looked at nothing must never report "no survivors" (review round 3, F1).
     fn marked(&self) -> Vec<i32> {
-        // no unwrap: this also runs inside Drop, where a panic would abort the suite
-        let Ok(out) = Command::new("ps").args(["-Ao", "pid=,args="]).output() else {
-            return Vec::new();
-        };
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| l.split_whitespace().any(|w| w == self.marker))
-            .filter_map(|l| l.split_whitespace().next()?.parse().ok())
-            .collect()
+        with_marker(&self.marker).expect("the survivor checker could not run ps")
+    }
+    /// For Drop only: a panic there would abort the suite, so failures mean "nothing found".
+    fn marked_quiet(&self) -> Vec<i32> {
+        with_marker(&self.marker).unwrap_or_default()
     }
     /// Survivors by identity, and in total by identity or marker (counted once).
     fn survivors(&self) -> (usize, usize) {
@@ -91,13 +89,26 @@ impl Drop for Iteration {
                 unsafe { libc::kill(p, libc::SIGKILL) };
             }
         }
-        for p in self.marked() {
-            if self.marked().contains(&p) {
+        for p in self.marked_quiet() {
+            if self.marked_quiet().contains(&p) {
                 unsafe { libc::kill(p, libc::SIGKILL) };
             }
         }
         let _ = std::fs::remove_file(&self.rec);
     }
+}
+
+/// Live pids whose argv contains `marker` as a whole word; Err if `ps` is missing or fails.
+fn with_marker(marker: &str) -> Result<Vec<i32>, String> {
+    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("ps exited {:?}", out.status.code()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == marker))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect())
 }
 
 #[derive(Default)]
@@ -138,6 +149,19 @@ fn escape(mode: Option<&'static str>, shape: &'static str) -> impl Fn(&Iteration
 }
 
 // ---- controls -------------------------------------------------------------------------
+
+/// The marker checker must find a live process that carries a known marker (review round 3,
+/// F1: without `ps` the checker used to report "no survivors" having looked at nothing).
+#[test]
+fn control_the_marker_checker_finds_a_marked_process() {
+    let it = Iteration::new();
+    let mut c = Command::new("/bin/sleep").arg(&it.marker).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let found = it.marked();
+    let _ = c.kill();
+    let _ = c.wait();
+    assert_eq!(found, vec![c.id() as i32]);
+}
 
 #[test]
 fn control_without_sheepdog_every_escapee_survives() {

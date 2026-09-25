@@ -126,7 +126,10 @@ fn become_responsible(argv0: &[OsString]) -> bool {
     }
     path.truncate(n as usize);
     let path = CString::new(path).unwrap();
-    let argv = cstrings(argv0);
+    let argv = match cstrings(argv0) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
     unsafe {
@@ -144,7 +147,10 @@ fn become_responsible(argv0: &[OsString]) -> bool {
 /// (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs), and a spawn
 /// without SETSIGDEF/SETSIGMASK inherits them.
 fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
-    let argv = cstrings(cmd);
+    let argv = cstrings(cmd).unwrap_or_else(|e| {
+        say!("sheepdog: {e}");
+        std::process::exit(125)
+    });
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: pid_t = 0;
@@ -190,7 +196,7 @@ pub fn run(a: &Args) -> i32 {
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             let root = spawn(&a.cmd, false);
             let code = wait(root);
-            match kill_tree(|| responsible_to(me), || {}, || None) {
+            match kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal) {
                 Ok(()) => code,
                 Err(alive) => deadline_missed(&alive),
             }
@@ -199,7 +205,7 @@ pub fn run(a: &Args) -> i32 {
             let root = spawn(&a.cmd, true);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let code = wait(root);
-            match kill_tree(|| responsible_to(r), || {}, || None) {
+            match kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal) {
                 Ok(()) => code,
                 Err(alive) => deadline_missed(&alive),
             }
