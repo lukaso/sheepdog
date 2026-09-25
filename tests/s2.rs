@@ -340,41 +340,45 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
     }
 }
 
-/// Review S2 A-P2-1 (macOS): a caller that is responsible for itself (a launchd job, an app
-/// helper) runs `bg & exec sheepdog run -- ...`. sheepdog keeps the caller's uniqueid across the
-/// exec, so the background job is responsible to it; it was not started by the job and must
-/// survive. Control: the same from a plain shell.
+/// Review S2 A-P2-1 (macOS): a caller runs `bg & exec sheepdog run -- ...`. sheepdog keeps the
+/// caller's uniqueid across the exec, so when the caller is responsible for itself (a launchd
+/// job, an app helper), everything it started earlier is responsible to sheepdog's uniqueid:
+/// a live child, and an orphan whose parent is gone. Neither was started by the job; both must
+/// survive. Each shape runs from a plain shell and from a self-responsible one.
 #[cfg(target_os = "macos")]
 #[test]
-fn s2_a_self_responsible_callers_background_job_survives() {
+fn s2_a_callers_earlier_processes_survive() {
     for disclaimed in [false, true] {
-        let pidf = std::env::temp_dir().join(format!("sd-s2-bg-{}-{disclaimed}", std::process::id()));
-        let _ = std::fs::remove_file(&pidf);
-        let script = format!("/bin/sleep 30 & echo $! > '{}'; exec \"{}\" run -- true", pidf.display(), sheepdog());
-        let mut c = if disclaimed {
-            let mut c = Command::new(fixture());
-            c.args(["dspawn", "wait", "/bin/sh", "-c", &script]);
-            c
-        } else {
-            let mut c = Command::new("/bin/sh");
-            c.args(["-c", &script]);
-            c
-        };
-        let st = c.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
-        let _ = std::fs::remove_file(&pidf);
-        let t = Instant::now();
-        let mut alive = true;
-        while t.elapsed() < Duration::from_millis(500) {
-            alive = unsafe { libc::kill(pid, 0) } == 0;
-            if !alive {
-                break;
+        for (shape, bg) in [("child", "/bin/sleep 30 & echo $! >"), ("orphan", "(/bin/sleep 30 & echo $! >")] {
+            let pidf = std::env::temp_dir().join(format!("sd-s2-bg-{}-{disclaimed}-{shape}", std::process::id()));
+            let _ = std::fs::remove_file(&pidf);
+            let close = if shape == "orphan" { ")" } else { "" };
+            let script = format!("{bg} '{}'{close}; exec \"{}\" run -- true", pidf.display(), sheepdog());
+            let mut c = if disclaimed {
+                let mut c = Command::new(fixture());
+                c.args(["dspawn", "wait", "/bin/sh", "-c", &script]);
+                c
+            } else {
+                let mut c = Command::new("/bin/sh");
+                c.args(["-c", &script]);
+                c
+            };
+            let st = c.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
+            let _ = std::fs::remove_file(&pidf);
+            let t = Instant::now();
+            let mut alive = true;
+            while t.elapsed() < Duration::from_millis(500) {
+                alive = unsafe { libc::kill(pid, 0) } == 0;
+                if !alive {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            assert_eq!(st.code(), Some(0), "disclaimed caller={disclaimed}, {shape}: the fixture or sheepdog failed");
+            assert!(alive, "disclaimed caller={disclaimed}: the caller's earlier {shape} was killed");
         }
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        assert_eq!(st.code(), Some(0), "disclaimed caller={disclaimed}");
-        assert!(alive, "disclaimed caller={disclaimed}: the caller's background job was killed");
     }
 }
 
@@ -392,6 +396,92 @@ fn s2_a_fast_roots_disclaimed_child_is_killed() {
         let alive = j.alive();
         assert!(alive.is_empty(), "run {i}: the fast root's disclaimed child survived: {alive:?}");
     }
+}
+
+/// Review S2 round 2, B-P2-1 (macOS): the root is suspended until its identity is read. A
+/// debug seam delays that read by 300 ms; without the suspension the root would run, start its
+/// disclaimed child and exit meanwhile, and the child's only fact would be lost.
+#[cfg(target_os = "macos")]
+#[test]
+fn s2_the_root_is_known_before_it_runs() {
+    for i in 0..3 {
+        let j = Job::new();
+        let st = Command::new(sheepdog())
+            .args(["run", "--", fixture(), "dspawn", "/bin/sleep", &j.marker])
+            .env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "300")
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(0), "run {i}: the fixture failed");
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = j.alive();
+        assert!(alive.is_empty(), "run {i}: the root ran before sheepdog knew it: {alive:?}");
+    }
+}
+
+/// Review S2 round 2, A-P3-1: sheepdog never sends the root a signal its caller did not send.
+/// With the caller blocking SIGCONT, a root resumed by a SIGCONT would start with it pending.
+#[test]
+fn s2_the_root_starts_with_no_signal_pending() {
+    use std::os::unix::process::CommandExt;
+    let run = |via_sheepdog: bool| -> String {
+        let mut c = if via_sheepdog {
+            let mut c = Command::new(sheepdog());
+            c.args(["run", "--", fixture(), "print-pending"]);
+            c
+        } else {
+            let mut c = Command::new(fixture());
+            c.arg("print-pending");
+            c
+        };
+        let out = unsafe {
+            c.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGCONT);
+                libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                Ok(())
+            })
+            .output()
+            .unwrap()
+        };
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let direct = run(false);
+    let supervised = run(true);
+    assert_eq!(supervised, direct, "the root started with a signal pending that its caller never sent");
+}
+
+/// Review S2 round 2, A-P3-2: a `SHEEPDOG_RELAY_PID` inherited from the environment (a stale
+/// value, or a relayed sheepdog's) never makes sheepdog believe its relay died. The inherited
+/// value names a relay that is gone (a reaped child's pid), so trusting it would end the job.
+#[test]
+fn s2_an_inherited_relay_variable_is_ignored() {
+    let mut gone = Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    let out = Command::new(sheepdog())
+        .args(["run", "--", "/bin/echo", "ran"])
+        .env("SHEEPDOG_RELAY_PID", format!("{gone_pid}:1"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran", "the command never ran");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// A sheepdog inside a relayed sheepdog's job runs normally (a sanity check: the inherited
+/// variable names the outer relay, which is alive, so no mutant of the check can fail here).
+#[test]
+fn s2_a_nested_sheepdog_under_a_relay_runs() {
+    let job = format!("35.{}001", std::process::id());
+    let st = Command::new(fixture())
+        .args(["bg-then-exec", &job, sheepdog(), "run", "--", sheepdog(), "run", "--", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    let _ = Command::new("pkill").args(["-f", &format!("^/bin/sleep {job}$")]).status();
+    assert_eq!(st.code(), Some(0), "the nested sheepdog failed");
 }
 
 /// A stated limit (PLAN.md §3.2), not a guarantee: a member that re-disclaims and dies within

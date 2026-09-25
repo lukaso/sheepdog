@@ -235,23 +235,41 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &l
     pid
 }
 
-/// Env var that carries the relay's pid across the supervisor's re-exec; removed before the root
-/// is spawned.
+/// Env var that carries `<relay pid>:<supervisor pid>` across the supervisor's re-exec; removed
+/// before the root is spawned. Honoured only when the supervisor pid is this process, so a value
+/// inherited from anywhere else (a relayed sheepdog's job, a stale environment) is ignored.
 const RELAY_PID: &str = "SHEEPDOG_RELAY_PID";
 
-/// If sheepdog starts with children it did not create, it forks once, first: the child is a
-/// fresh supervisor, and this process becomes the relay. The reason on macOS is identity: a
-/// shell's `bg & exec sheepdog` keeps the shell's uniqueid, so a background job the caller
-/// started is responsible to (or a child of) that uniqueid and would count as a member. The
-/// fresh supervisor has a uniqueid nothing else refers to (S2 review, A-P2-1). Returns
-/// Some(code) in the relay, None in the supervisor.
+/// The relay this process was forked by, if the environment says so for this very process.
+fn my_relay() -> Option<pid_t> {
+    let v = std::env::var(RELAY_PID).ok()?;
+    let (relay, sup) = v.split_once(':')?;
+    (sup.parse::<pid_t>().ok()? == unsafe { libc::getpid() }).then(|| relay.parse().ok()).flatten()
+}
+
+/// If sheepdog starts with a history, it forks once, first: the child is a fresh supervisor,
+/// and this process becomes the relay. The reason on macOS is identity: a shell's
+/// `bg & exec sheepdog` keeps the shell's uniqueid, so what the caller started earlier refers to
+/// that uniqueid. Two ways (S2 review, A-P2-1 and round 2):
+/// - it has children: they are children of (`puniq`) that uniqueid;
+/// - it is already responsible for itself (the caller was a launchd job or an app helper, and
+///   this is not sheepdog's own re-exec): everything the caller started, orphans included, is
+///   responsible to that uniqueid, which would be R.
+/// The fresh supervisor has a uniqueid nothing else refers to. Returns Some(code) in the relay,
+/// None in the supervisor.
 ///
 /// The relay, as on Linux (PLAN.md §3.1): forwards TERM; forwards HUP only when it is the
 /// session leader; never forwards INT (a terminal INT reaches the whole group); dies the way
 /// the supervisor died. macOS has no PDEATHSIG, so the supervisor watches the relay itself and
 /// raises TERM when it dies (`relay_gone`).
 fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
-    if !crate::has_children() {
+    if my_relay().is_some() {
+        return None; // the supervisor a relay forked, after its re-exec
+    }
+    let me = unsafe { libc::getpid() };
+    let own_reexec = std::env::var(REEXEC_MARK).ok().as_deref() == Some(me.to_string().as_str());
+    let self_responsible = !own_reexec && uniq(me).map(|u| u.0).is_some_and(|u| resp_uniq(me) == Some(u));
+    if !crate::has_children() && !self_responsible {
         return None;
     }
     // a TERM pending now would stay in the relay (pending signals are not inherited across fork)
@@ -269,7 +287,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
         libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old);
         match libc::fork() {
             0 => {
-                std::env::set_var(RELAY_PID, relay.to_string());
+                std::env::set_var(RELAY_PID, format!("{relay}:{}", libc::getpid()));
                 libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
                 None
             }
@@ -331,14 +349,12 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
     }
 }
 
-/// The supervisor under a relay: if the relay has died (this process was reparented), raise
-/// TERM, as Linux's PR_SET_PDEATHSIG does; the TERM paths then end the job.
-fn relay_gone(relay: Option<pid_t>) {
-    if let Some(r) = relay {
-        if unsafe { libc::getppid() } != r {
-            unsafe { libc::raise(libc::SIGTERM) };
-        }
-    }
+/// The supervisor under a relay: the relay has died, so raise TERM, as Linux's
+/// PR_SET_PDEATHSIG does; the TERM paths then end the job. The death is seen as the relay's
+/// NOTE_EXIT (or ESRCH when registering it). The parent pid is a fallback only when kqueue is
+/// unusable: a debugger's attach also changes it.
+fn relay_died() {
+    unsafe { libc::raise(libc::SIGTERM) };
 }
 
 /// The event loop's wait (PHASE1.md §1): returns the root's exit code, or None if the job
@@ -363,6 +379,7 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
         // review, P3-b). Debug seam SHEEPDOG_TEST_KQ_EINVAL=1 forces an EINVAL failure of the
         // NOTE_EXIT registration only (TERM still registers: the hazardous combination).
         let mut proc_exiting = false;
+        let mut relay_by_ppid = polling && relay.is_some();
         let force_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_EINVAL");
         // debug seam: fail only the TERM registration (S1 fix review, P3-2)
         let force_sig_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_SIG_EINVAL");
@@ -399,22 +416,32 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
                     polling = true;
                 }
             }
-            // the relay's exit only wakes the loop (relay_gone decides); if it cannot be
-            // watched, the 250 ms tick bounds the delay
+            // the relay's exit: ESRCH means it is already gone; any other failure falls back to
+            // the parent-pid check on each tick
             if let Some(r) = relay {
                 let mut ev: libc::kevent = zeroed();
                 ev.ident = r as usize;
                 ev.filter = libc::EVFILT_PROC;
-                ev.flags = libc::EV_ADD;
+                ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
                 ev.fflags = libc::NOTE_EXIT;
-                libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+                if libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) != 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                        relay_died();
+                    } else {
+                        relay_by_ppid = true;
+                    }
+                }
             }
         }
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
         let mut exited: Option<i32> = None;
         let result = loop {
-            relay_gone(relay);
+            // polling never reads kqueue events, so it checks the parent pid instead
+            if (relay_by_ppid || polling) && relay.is_some_and(|r| libc::getppid() != r) {
+                relay_died();
+                relay_by_ppid = false;
+            }
             let term = watch_term && crate::consume(libc::SIGTERM);
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(code_of(st));
@@ -441,7 +468,9 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
             let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
             track(); // membership while running (a tick or an event)
-            if r > 0 && ev.filter == libc::EVFILT_PROC && ev.ident == pid as usize {
+            if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {
+                relay_died(); // taken as TERM on the next pass
+            } else if r > 0 && ev.filter == libc::EVFILT_PROC && ev.ident == pid as usize {
                 // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit).
                 // Only the root's event: the relay's exit is also an EVFILT_PROC event, and a
                 // blocking wait for a root that still runs would hang the loop.
@@ -466,9 +495,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             let ok = become_responsible(&a.argv, &sig.caller_mask);
             std::env::remove_var(REEXEC_MARK);
-            let relay: Option<pid_t> = std::env::var(RELAY_PID).ok().and_then(|v| v.parse().ok());
+            let relay = my_relay();
             std::env::remove_var(RELAY_PID);
-            relay_gone(relay); // the relay died before this point: TERM is now pending
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
@@ -481,11 +509,18 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             tracker.borrow_mut().ever.insert(me);
             // the root's identity is known from its birth: a child it starts with the disclaim
             // has only `puniq` = the root as its fact, even if the root exits before any scan
-            let root = spawn(&a.cmd, false, true, &sig.caller_mask);
+            // Suspended, unless the caller blocks SIGCONT: then the resuming CONT would stay
+            // pending in the root, a signal its caller never sent. That case keeps the race of
+            // a root that exits before its identity is read (PLAN.md §3.2).
+            let cont_blocked = unsafe { libc::sigismember(&sig.caller_mask, libc::SIGCONT) } == 1;
+            let root = spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask);
+            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS");
             if let Some((u, _)) = uniq(root) {
                 tracker.borrow_mut().ever.insert(u);
             }
-            unsafe { libc::kill(root, libc::SIGCONT) };
+            if !cont_blocked {
+                unsafe { libc::kill(root, libc::SIGCONT) };
+            }
             let mut track = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);

@@ -262,6 +262,14 @@ fn main() {
             if rc != 0 {
                 libc::_exit(3);
             }
+            // the disclaim must have taken effect, or a cell would pass for another reason
+            type RespUniq = unsafe extern "C" fn(libc::pid_t) -> u64;
+            let rn = CString::new("responsibility_get_uniqueid_responsible_for_pid").unwrap();
+            let rf = libc::dlsym(libc::RTLD_DEFAULT, rn.as_ptr());
+            if rf.is_null() || identity(pid).map_or(true, |u| (std::mem::transmute::<_, RespUniq>(rf))(pid) != u) {
+                libc::kill(pid, libc::SIGKILL);
+                libc::_exit(4);
+            }
             if wait {
                 let mut st = 0;
                 libc::waitpid(pid, &mut st, 0);
@@ -356,6 +364,19 @@ fn main() {
             }
             libc::_exit(0);
         }
+    }
+    if mode == "print-pending" {
+        // the pending signals of this process, one number per line
+        unsafe {
+            let mut p: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut p);
+            for sig in 1..32 {
+                if libc::sigismember(&p, sig) == 1 {
+                    println!("{sig}");
+                }
+            }
+        }
+        std::process::exit(0);
     }
     if mode == "print-mask" {
         // the blocked signals of this process, one number per line (for cell 23's mask check)

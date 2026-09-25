@@ -314,7 +314,7 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
 /// Review S2 A-P3: a duration that is not finite or too large is a usage error, not a panic.
 #[test]
 fn an_unrepresentable_grace_is_a_usage_error() {
-    for v in ["inf", "NaN", "1e30", "-1"] {
+    for v in ["inf", "NaN", "1e30", "-1", "86401", "86400001ms"] {
         let out = Command::new(sheepdog()).args(["run", "--grace", v, "--", "true"]).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(125), "--grace {v}: {err}");
@@ -447,7 +447,7 @@ mod relay {
         assert_eq!(r.signal(), Some(libc::SIGTERM), "the relay turned death-by-signal into {r:?}");
     }
 
-    /// P3-1: the relay adds no polling delay to the exit (median of 9, within 10 ms).
+    /// P3-1: the relay adds no polling delay to the exit (median of 9, within 50 ms).
     #[test]
     fn the_relay_adds_no_exit_latency() {
         let job = m(4);
@@ -465,7 +465,9 @@ mod relay {
         let direct = time(None);
         let relayed = time(Some(&job));
         kill_marked(&[&job]);
-        assert!(relayed <= direct + 10, "relay median {relayed} ms vs direct {direct} ms");
+        // the defect this guards: a relay that notices the supervisor's exit only at a
+        // 250 ms (Linux: 1 s) tick. 50 ms leaves room for the fixture's own start-up.
+        assert!(relayed <= direct + 50, "relay median {relayed} ms vs direct {direct} ms");
     }
 
     /// P3-2 / review round 5 P2-A: if the relay is killed, the job still ends: the root and an
@@ -496,6 +498,36 @@ mod relay {
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
         assert_eq!(before, (1, 1), "the job did not start");
         assert_eq!(after, (0, 0), "killing the relay leaked the job (root, escapee)");
+    }
+
+    /// S2 review round 2: a dead relay still ends the job when the supervisor's wait has fallen
+    /// back to polling (debug seam: the root's exit cannot be watched), where kqueue events are
+    /// not read.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dead_relay_still_ends_the_job_while_polling() {
+        let (job, root, esc) = (m(13), m(14), m(15));
+        let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
+        let mut relayed = start(Some(&job), &["sh", "-c", &inner]).env("SHEEPDOG_TEST_KQ_EINVAL", "1").spawn().unwrap();
+        wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
+        let sups = supervisors_of(relayed.id() as i32);
+        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        let _ = relayed.wait();
+        let deadline = Instant::now() + Duration::from_secs(11);
+        let mut after = (1, 1);
+        while Instant::now() < deadline {
+            after = (sleeps(&root), sleeps(&esc));
+            if after == (0, 0) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        kill_marked(&[&job, &root, &esc]);
+        for s in &sups {
+            unsafe { libc::kill(*s, libc::SIGKILL) };
+        }
+        assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
+        assert_eq!(after, (0, 0), "killing the relay leaked the job while polling (root, escapee)");
     }
 
     /// P3-4 / review round 5 P2-B: on the relay path the root gets the caller's signal mask.
