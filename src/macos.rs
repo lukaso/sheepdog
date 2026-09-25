@@ -1,6 +1,6 @@
 //! macOS: responsibility-based membership (PLAN.md §2, §3.1, §3.2).
 
-use crate::{code_of, cstrings, deadline_missed, kill_tree, say, Args};
+use crate::{code_of, cstrings, kill_tree, say, Args};
 use std::io::Write;
 use std::ffi::OsString;
 use sheepdog::ident::identity;
@@ -198,7 +198,7 @@ pub fn run(a: &Args) -> i32 {
             let code = wait(root);
             match kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal) {
                 Ok(()) => code,
-                Err(alive) => deadline_missed(&alive),
+                Err(e) => crate::kill_failed(e),
             }
         }
         Some("root-disclaim") => {
@@ -207,7 +207,7 @@ pub fn run(a: &Args) -> i32 {
             let code = wait(root);
             match kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal) {
                 Ok(()) => code,
-                Err(alive) => deadline_missed(&alive),
+                Err(e) => crate::kill_failed(e),
             }
         }
         Some(m) => {

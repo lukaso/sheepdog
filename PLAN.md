@@ -123,7 +123,13 @@ It **lists**; it kills nothing unless asked.
 - **Linux:** it sets the subreaper flag, then forks and execs the root.
 - **The root gets the caller's signal state:** the dispositions and mask sheepdog was started with. sheepdog changes none of them itself (its own C `main`, so Rust's runtime does not ignore SIGPIPE), and it spawns the root without `SETSIGDEF`/`SETSIGMASK` (cell 23).
   - **One exception, SIGCHLD:** sheepdog sets SIGCHLD to default before anything else, because a supervisor whose children are reaped automatically cannot wait for them (a caller that ignores SIGCHLD made the Linux supervisor wait out the escapees and never kill: review round 2, P1-B). `posix_spawn` cannot give the child an ignored SIGCHLD while the parent has the default, so **the root gets SIGCHLD at default**. **Consequence:** a job that relied on an inherited ignored SIGCHLD (so that it never has to wait for its children) collects zombies until it exits.
-  - **Linux, children sheepdog did not create:** a shell that runs `job & exec sheepdog run -- …` leaves `job` as sheepdog's child. A subreaper supervisor would adopt it and its orphans as members and kill them (measured, review round 3). So if sheepdog starts with children, it forks once, before anything else: the child is a fresh supervisor, and the original process only relays TERM, INT and HUP to it and returns its exit code.
+  - **Linux, children sheepdog did not create:** a shell that runs `job & exec sheepdog run -- …` leaves `job` as sheepdog's child. A subreaper supervisor would adopt it and its orphans as members and kill them (measured, review round 3). So if sheepdog starts with children (checked atomically with `waitid(…WNOWAIT)`), it forks once, before anything else: the child is a fresh supervisor, and the original process becomes a **relay**:
+    - it forwards **TERM** (a TERM that also reached the supervisor through the process group only means "end the job" twice);
+    - it forwards **HUP only when it is the session leader** (then only it gets HUP when the terminal closes);
+    - it **never forwards INT**: a terminal INT already reaches the whole process group, and forwarding would deliver it twice (review round 4). It consumes INT, so it does not die of it. An INT sent to the relay's pid only therefore reaches nothing: the stated pid-only limit, stricter on this path;
+    - it waits on SIGCHLD (no polling delay) and **dies the way the supervisor died** (death by signal N stays death by signal N, which shells rely on);
+    - the supervisor has `PR_SET_PDEATHSIG(SIGTERM)`: if the relay is killed, the supervisor is told to end the job rather than run on unseen.
+    - Measured (Alpine): the relay path's exit latency equals the direct path's; the root's signal mask is identical on both paths.
 - **After that the supervisor never forks again,** so it can still kill at pid exhaustion. It is single-threaded.
 - **Reaping:** `waitpid(-1, WNOHANG)` in the event loop reaps every adopted orphan on Linux. Only the root's exit sets the exit code.
 - **INT and HUP: forward only to members outside the supervisor's own process group** (the escapees), whatever the terminal state.
@@ -412,6 +418,8 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 | P3 a panic unwinding out of the C `main` (UB before Rust 1.81); cleanup double-panic | errors written with ignored results, body under `catch_unwind`; the checker never unwraps `ps` | closed stderr with SIGPIPE ignored: exit 125 | both layers removed (M9b): red |
 
 **macOS residual (named):** macOS has no atomic "tree empty" check (no subreaper, no enumeration of responsible processes), so it still ends on two empty scans. The fast chain is green there (fork is slow enough), which is luck, not proof. A process chain that hops faster than a scan can outrun it on macOS.
+
+**Round 4 (review of the round-3 fixes): no P1; 2 P2 + 5 P3 in the new Linux relay, fixed test-first (death by signal preserved, no double INT by design, no exit latency, a dead relay takes the supervisor with it, the relay path keeps the caller's mask, atomic child check, a distinct panic message). Mutants MR1–MR4 red. The no-double-INT rule has no test until phase 1 gives the supervisor INT handling (cell 22, relay variant).**
 
 **Carried into phase 1** (not measured in phase 0): the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 

@@ -141,6 +141,23 @@ impl KillOpts {
     }
 }
 
+/// Why the kill did not end clean.
+#[derive(Debug, PartialEq)]
+pub enum KillError {
+    /// members still alive at the deadline (possibly none that a scan could list)
+    Deadline(Vec<i32>),
+    /// the kill loop panicked; the known members were sent SIGKILL and a message was printed
+    Internal,
+}
+
+/// Exit code for a kill that did not end clean (PLAN.md §3.3 step 6: 125).
+pub fn kill_failed(e: KillError) -> i32 {
+    match e {
+        KillError::Deadline(alive) => deadline_missed(&alive),
+        KillError::Internal => 125,
+    }
+}
+
 /// PLAN.md §3.3 steps 2-6 (the spike still omits the TERM grace).
 ///
 /// - `members` returns the live members right now as (pid, identity).
@@ -162,13 +179,13 @@ pub fn kill_tree(
     reap: impl FnMut(),
     tree_empty: impl FnMut() -> Option<bool>,
     send: impl FnMut(i32, u64, c_int),
-) -> Result<(), Vec<i32>> {
+) -> Result<(), KillError> {
     let known: std::cell::RefCell<HashMap<i32, u64>> = Default::default();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         kill_loop(opts, members, reap, tree_empty, send, &known)
     }));
     match r {
-        Ok(result) => result,
+        Ok(result) => result.map_err(KillError::Deadline),
         Err(_) => {
             let known = known.borrow();
             for (&p, &id) in known.iter() {
@@ -176,8 +193,8 @@ pub fn kill_tree(
                     unsafe { libc::kill(p, libc::SIGKILL) };
                 }
             }
-            say!("sheepdog: internal error while killing the tree; killed the {} member(s) it knew", known.len());
-            Err(known.keys().copied().filter(|&p| known.get(&p).map_or(false, |&id| same(p, id))).collect())
+            say!("sheepdog: internal error while killing the tree; sent SIGKILL to the {} member(s) it knew. The tree may NOT be clean.", known.len());
+            Err(KillError::Internal)
         }
     }
 }
@@ -342,6 +359,6 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(r, Err(vec![pid]));
+        assert_eq!(r, Err(KillError::Deadline(vec![pid])));
     }
 }

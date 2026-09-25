@@ -278,3 +278,129 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     assert_eq!(st.code(), Some(125), "a panic must exit 125");
     assert!(left.is_empty(), "members were left behind after a panic: {left:?}");
 }
+
+// ---- the Linux relay (review round 4) ---------------------------------------------------
+// The relay exists only on Linux, when sheepdog starts with children it did not create.
+
+#[cfg(target_os = "linux")]
+mod relay {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    fn by_marker(marker: &str) -> Vec<i32> {
+        let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
+        assert!(out.status.success(), "ps failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.split_whitespace().any(|w| w == marker))
+            .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+            .collect()
+    }
+    fn kill_marked(markers: &[&str]) {
+        for m in markers {
+            for p in by_marker(m) {
+                unsafe { libc::kill(p, libc::SIGKILL) };
+            }
+        }
+    }
+    /// `sh -c '[job &] exec sheepdog run -- <root...>'`; returns the child (sheepdog's pid).
+    fn start(job: Option<&str>, root: &str) -> std::process::Child {
+        let pre = job.map(|j| format!("/bin/sleep {j} & ")).unwrap_or_default();
+        let script = format!("{pre}exec \"$0\" run -- {root}");
+        Command::new("sh").args(["-c", &script, sheepdog()]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+    }
+
+    /// P2-1: death by a signal stays death by that signal through the relay.
+    #[test]
+    fn the_relay_preserves_death_by_signal() {
+        let (job, r1, r2) = (format!("28.{}555001", std::process::id()), format!("27.{}555002", std::process::id()), format!("27.{}555003", std::process::id()));
+        let mut direct = start(None, &format!("/bin/sleep {r1}"));
+        let mut relayed = start(Some(&job), &format!("/bin/sleep {r2}"));
+        std::thread::sleep(Duration::from_millis(400));
+        unsafe {
+            libc::kill(direct.id() as i32, libc::SIGTERM);
+            libc::kill(relayed.id() as i32, libc::SIGTERM);
+        }
+        let (d, r) = (direct.wait().unwrap(), relayed.wait().unwrap());
+        kill_marked(&[&job, &r1, &r2]);
+        assert_eq!(d.signal(), Some(libc::SIGTERM), "control: without the relay, sheepdog dies of SIGTERM");
+        assert_eq!(r.signal(), Some(libc::SIGTERM), "the relay turned death-by-signal into {r:?}");
+    }
+
+    /// P3-1: the relay adds no polling delay to the exit.
+    #[test]
+    fn the_relay_adds_no_exit_latency() {
+        let job = format!("28.{}555004", std::process::id());
+        let time = |j: Option<&str>| {
+            let mut v: Vec<u128> = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    start(j, "true").wait().unwrap();
+                    t.elapsed().as_millis()
+                })
+                .collect();
+            v.sort();
+            v[2]
+        };
+        let direct = time(None);
+        let relayed = time(Some(&job));
+        kill_marked(&[&job]);
+        assert!(relayed <= direct + 20, "relay median {relayed} ms vs direct {direct} ms");
+    }
+
+    /// P3-2: if the relay dies, the supervisor does not keep running on its own.
+    #[test]
+    fn a_dead_relay_takes_the_supervisor_with_it() {
+        let (job, root) = (format!("28.{}555005", std::process::id()), format!("27.{}555006", std::process::id()));
+        let mut relayed = start(Some(&job), &format!("/bin/sleep {root}"));
+        std::thread::sleep(Duration::from_millis(400));
+        let relay = relayed.id() as i32;
+        let sup: Vec<i32> = std::fs::read_dir("/proc").unwrap().flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|&p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok()
+                .and_then(|s| s.get(s.rfind(')')? + 2..).map(|r| r.split_whitespace().nth(1) == Some(&relay.to_string())))
+                .unwrap_or(false)
+                && std::fs::read_to_string(format!("/proc/{p}/cmdline")).map_or(false, |c| c.contains("sheepdog")))
+            .collect();
+        assert_eq!(sup.len(), 1, "expected one supervisor child of the relay, found {sup:?}");
+        unsafe { libc::kill(relay, libc::SIGKILL) };
+        let _ = relayed.wait();
+        std::thread::sleep(Duration::from_millis(500));
+        let alive = std::path::Path::new(&format!("/proc/{}", sup[0])).exists()
+            && !std::fs::read_to_string(format!("/proc/{}/stat", sup[0])).map_or(true, |s| s.contains(") Z "));
+        kill_marked(&[&job, &root]);
+        if alive {
+            unsafe { libc::kill(sup[0], libc::SIGKILL) };
+        }
+        assert!(!alive, "the supervisor kept running after its relay was killed");
+    }
+
+    /// P3-4: on the relay path the root still gets the caller's signal mask.
+    #[test]
+    fn the_relay_path_keeps_the_callers_mask() {
+        use std::os::unix::process::CommandExt;
+        let job = format!("28.{}555007", std::process::id());
+        let read = |j: Option<&str>| -> String {
+            let pre = j.map(|j| format!("/bin/sleep {j} & ")).unwrap_or_default();
+            let script = format!("{pre}exec \"$0\" run -- sh -c 'grep SigBlk /proc/$$/status'");
+            let out = unsafe {
+                Command::new("sh").args(["-c", &script, sheepdog()])
+                    .pre_exec(|| {
+                        let mut set: libc::sigset_t = std::mem::zeroed();
+                        libc::sigemptyset(&mut set);
+                        libc::sigaddset(&mut set, libc::SIGUSR1);
+                        libc::sigaddset(&mut set, libc::SIGWINCH);
+                        libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                        Ok(())
+                    })
+                    .output().unwrap()
+            };
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let direct = read(None);
+        let relayed = read(Some(&job));
+        kill_marked(&[&job]);
+        assert!(direct.starts_with("SigBlk:"), "control failed: {direct:?}");
+        assert_eq!(relayed, direct, "the relay path changed the root's signal mask");
+    }
+}

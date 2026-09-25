@@ -4,7 +4,7 @@
 //! (measured in round 1, also as non-root in a default container), so the tree is exactly
 //! this process's live descendants. The supervisor must reap what it adopts (round 1, F5).
 
-use crate::{code_of, cstrings, deadline_missed, kill_tree, say, Args};
+use crate::{code_of, cstrings, kill_tree, say, Args};
 use std::ffi::OsString;
 use std::io::Write;
 use sheepdog::ident::identity;
@@ -107,36 +107,69 @@ fn spawn(cmd: &[OsString]) -> i32 {
     pid
 }
 
-/// Children this process already has (for example a shell's background job before it
-/// `exec`ed sheepdog). They are not part of the command's tree.
-fn preexisting_children() -> Vec<i32> {
-    let me = unsafe { libc::getpid() };
-    let Ok(dir) = std::fs::read_dir("/proc") else { return Vec::new() };
-    dir.flatten()
-        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-        .filter(|&p| stat(p).map_or(false, |(ppid, _)| ppid == me))
-        .collect()
+/// Does this process already have children (for example a shell's background job before it
+/// `exec`ed sheepdog)? waitid with WNOWAIT answers atomically without /proc and without reaping
+/// anything (review round 4, P3-3).
+fn has_children() -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    r == 0
 }
 
-/// Review round 3: if sheepdog starts with children it did not create, it must not become
-/// their subreaper, or it adopts them and their orphans as members. So it forks once, before
-/// anything else: the child is a fresh supervisor with no children, and this process only
-/// relays TERM, INT and HUP to it and returns its exit code. Returns Some(code) in the relay,
-/// None in the supervisor.
+/// Die the way the supervisor died: death by signal N stays death by signal N for our caller,
+/// which shells rely on (for example to stop a loop on ctrl-C: review round 4, P2-1).
+fn die_like(status: libc::c_int) -> i32 {
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        unsafe {
+            let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+            libc::signal(sig, libc::SIG_DFL);
+            let mut one: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut one);
+            libc::sigaddset(&mut one, sig);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+    }
+    code_of(status)
+}
+
+/// If sheepdog starts with children it did not create, it must not become their subreaper, or
+/// it adopts them and their orphans as members (review round 3). So it forks once, before
+/// anything else: the child is a fresh supervisor with no children; this process becomes the
+/// relay. Returns Some(code) in the relay, None in the supervisor.
+///
+/// The relay (PLAN.md §3.1):
+/// - forwards TERM to the supervisor (a TERM that also reached the supervisor through the
+///   process group is harmless: it means "end the job" twice);
+/// - forwards HUP only when it is the session leader (then only it gets HUP when the terminal
+///   closes); otherwise the terminal's HUP reaches the supervisor directly;
+/// - never forwards INT: a terminal INT reaches the whole process group, so forwarding would
+///   deliver it twice (review round 4, P2-2). INT is consumed, so the relay does not die of it;
+/// - waits on SIGCHLD, so the exit costs no polling delay (review round 4, P3-1);
+/// - dies the way the supervisor died (P2-1).
+/// The supervisor gets PR_SET_PDEATHSIG(SIGTERM): if the relay is killed, the supervisor is
+/// told to end the job instead of running on unseen (review round 4, P3-2).
 fn relay_if_needed() -> Option<i32> {
-    if preexisting_children().is_empty() {
+    if !has_children() {
         return None;
     }
     unsafe {
-        let mut fwd: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut fwd);
-        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
-            libc::sigaddset(&mut fwd, s);
+        let relay = libc::getpid();
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
+            libc::sigaddset(&mut set, s);
         }
         let mut old: libc::sigset_t = std::mem::zeroed();
-        libc::sigprocmask(libc::SIG_BLOCK, &fwd, &mut old);
+        libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old);
         match libc::fork() {
             0 => {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
+                if libc::getppid() != relay {
+                    libc::raise(libc::SIGTERM); // the relay died before PDEATHSIG was set
+                }
                 // the supervisor: restore the caller's mask, so the root inherits it
                 libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
                 None
@@ -149,12 +182,17 @@ fn relay_if_needed() -> Option<i32> {
             sup => loop {
                 let mut st = 0;
                 if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
-                    return Some(code_of(st));
+                    return Some(die_like(st));
                 }
-                let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000_000 };
-                let sig = libc::sigtimedwait(&fwd, std::ptr::null_mut(), &ts);
-                if sig > 0 {
-                    libc::kill(sup, sig);
+                let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+                match libc::sigtimedwait(&set, std::ptr::null_mut(), &ts) {
+                    libc::SIGTERM => {
+                        libc::kill(sup, libc::SIGTERM);
+                    }
+                    libc::SIGHUP if libc::getsid(0) == relay => {
+                        libc::kill(sup, libc::SIGHUP);
+                    }
+                    _ => {} // SIGCHLD, INT, a HUP we are not the leader for, timeout, EINTR
                 }
             },
         }
@@ -201,6 +239,6 @@ pub fn run(a: &Args) -> i32 {
     reap();
     match result {
         Ok(()) => code,
-        Err(alive) => deadline_missed(&alive),
+        Err(e) => crate::kill_failed(e),
     }
 }
