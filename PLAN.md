@@ -117,7 +117,7 @@ It **lists**; it kills nothing unless asked.
 ### 3.1 Shape
 
 - **macOS:** `sheepdog run` first re-execs itself with `SETEXEC` + disclaim. Measured (round 3): this keeps the pid, uniqueid, ppid, pgid, sid, foreground-tty status and non-CLOEXEC fds, and the caller's `waitpid` still gets the exit code.
-  - **Already re-exec'd?** It is if `responsible_uniqueid(self) == uniqueid(self)`. There is at most one attempt. No env marker is used, so a nested sheepdog still disclaims.
+  - **Already re-exec'd?** It is if `responsible_uniqueid(self) == uniqueid(self)`. There is at most one attempt: the re-exec carries `SHEEPDOG_REEXEC_PID=<own pid>`, and if that mark is present but the check still fails, sheepdog falls back instead of re-exec'ing again. The mark is removed before the root starts (measured: it never reaches the job), so a nested sheepdog still disclaims.
   - **Re-exec path:** the kernel's own (`proc_pidpath`), never `argv[0]`, which may be a bare `sheepdog` from a PATH lookup.
   - It then `posix_spawn`s the root **without** disclaim.
 - **Linux:** it sets the subreaper flag, then forks and execs the root.
@@ -382,14 +382,24 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 
 | Check | Result |
 |---|---|
-| **Gate, macOS arm64** (macOS 26.6): cell 3, 10,000 iterations | **0 survivors** (39 min; fixture v1, ≥90% creation guard). Re-confirmed with the final fixture (root records via a pipe, ≥99% guard): 1,000 iterations, 0 survivors |
+| **Gate, macOS arm64** (macOS 26.6): cell 3, 10,000 iterations | **0 survivors** (39 min; fixture v1, root exits at once, ≥90% creation guard). Re-confirmed with fixture v2 (root records via a pipe, ≥99% guard): 1,000 iterations, 0 survivors |
 | **Gate, Linux** (Docker Desktop, Alpine/musl, aarch64): cell 3, 10,000 iterations | **0 survivors** (19 min; final fixture, ≥99% guard). Debian/glibc: 300 iterations, 0 survivors |
 | Controls in the same suite | no sheepdog: every escapee survives; macOS round-2 design (root disclaims): survivors; Linux without the subreaper: survivors |
 | Mutants | macOS without the self re-exec: 20/20 survive; without the one-attempt guard: re-execs forever (caught at 5 s) |
 | Developer ID grant across a rebuild | kept (§4.4); a same-ID mismatching build revokes it, hence the `.dev` bundle ID |
 | Defects the spike found in itself | the uniqueid SPI **returns** the id (no out-parameter); a failed self re-exec looped (now at most once); a fixture recorder that sheepdog can kill undercounted creation (the root records now) |
 
-**Carried into phase 1** (not measured in phase 0): the TERM grace and the identity re-check before each signal (§3.3); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
+**What the gate does and does not prove (phase-0 review, 2026-09-25).** In cell 3 the escapee stays responsible to the live supervisor (macOS) or comes back to it (Linux), so the outcome does not depend on timing: 10,000 iterations confirm the mechanism, they do not measure a race margin. The round-2 control lost 20/20 by design, not by chance. The race-sensitive parts are covered by their own cells after the review fixes:
+
+| Rule | Cell | Mutant | Result |
+|---|---|---|---|
+| repeat until nothing is known alive | cell 7 (breeder), cell 3 | one pass, no repeat (M2) | **red** |
+| sticky membership; empty only when every known member is confirmed dead; report at the deadline | cell 24-lite / cell 20 (seams: forget, no-kill, short deadline) | not sticky (M4) | **red** |
+| the root keeps the caller's signal state | cell 23 (HUP, INT, TERM ignored; SIGPIPE default and ignored) | reset all to default (M1a); normal Rust `main` (M1b) | **red** |
+| identity checker (not only argv markers) | control: an escapee with no marker is found by identity | — | green (5/5 found) |
+| freeze (SIGSTOP) before kill | cell 7 (breeder, chain) | no freeze (M3) | **green: not load-bearing in any safe test.** A bounded tree converges by repeat alone; only unbounded fast growth (a fork bomb) separates them, which is not run on a workstation. **Named residual.** |
+
+**Carried into phase 1** (not measured in phase 0): the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 
 ## 8. Open questions for the operator
 

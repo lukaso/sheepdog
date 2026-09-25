@@ -4,7 +4,8 @@
 //! (measured in round 1, also as non-root in a default container), so the tree is exactly
 //! this process's live descendants. The supervisor must reap what it adopts (round 1, F5).
 
-use crate::{code_of, kill_tree, Args};
+use crate::{code_of, deadline_missed, kill_tree, Args};
+use sheepdog::ident::identity;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::fs::MetadataExt;
@@ -19,8 +20,8 @@ fn stat(pid: i32) -> Option<(i32, char)> {
     Some((ppid, state))
 }
 
-/// Live (not zombie) same-uid descendants of `root`.
-fn descendants(root: i32) -> Vec<i32> {
+/// Live (not zombie) same-uid descendants of `root`, with their identities.
+fn descendants(root: i32) -> Vec<(i32, u64)> {
     let uid = unsafe { libc::getuid() };
     let mut kids: HashMap<i32, Vec<i32>> = HashMap::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
@@ -48,7 +49,7 @@ fn descendants(root: i32) -> Vec<i32> {
             }
         }
     }
-    out
+    out.into_iter().filter_map(|p| Some((p, identity(p)?))).collect()
 }
 
 /// Reap every adopted orphan that has exited.
@@ -57,30 +58,27 @@ fn reap() {
     while unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) } > 0 {}
 }
 
-/// Fork and exec the root with default signal dispositions and an empty mask (PLAN.md §3.1).
+extern "C" {
+    static environ: *const *mut libc::c_char;
+}
+
+/// Spawn the root with posix_spawnp. Its signal dispositions and mask are left exactly as the
+/// caller set them (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs)
+/// and passes no SETSIGDEF/SETSIGMASK. posix_spawn also avoids running Rust code in a forked
+/// child.
 fn spawn(cmd: &[String]) -> i32 {
     let argv: Vec<CString> = cmd.iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
-    let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
-    ptrs.push(std::ptr::null());
-    unsafe {
-        let pid = libc::fork();
-        if pid == 0 {
-            for sig in 1..32 {
-                libc::signal(sig, libc::SIG_DFL);
-            }
-            let mut none: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut none);
-            libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
-            libc::execvp(ptrs[0], ptrs.as_ptr());
-            let e = *libc::__errno_location();
-            libc::_exit(if e == libc::ENOENT { 127 } else { 126 });
-        }
-        if pid < 0 {
-            eprintln!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
-            std::process::exit(125);
-        }
-        pid
+    let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
+    ptrs.push(std::ptr::null_mut());
+    let mut pid: libc::pid_t = 0;
+    let rc = unsafe {
+        libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), std::ptr::null(), ptrs.as_ptr(), environ)
+    };
+    if rc != 0 {
+        eprintln!("sheepdog: cannot run {}: {}", cmd[0], std::io::Error::from_raw_os_error(rc));
+        std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
     }
+    pid
 }
 
 pub fn run(a: &Args) -> i32 {
@@ -109,9 +107,10 @@ pub fn run(a: &Args) -> i32 {
             break;
         }
     }
-    if !kill_tree(|| descendants(me), reap) {
-        return 125;
-    }
+    let result = kill_tree(|| descendants(me), reap);
     reap();
-    code
+    match result {
+        Ok(()) => code,
+        Err(alive) => deadline_missed(&alive),
+    }
 }

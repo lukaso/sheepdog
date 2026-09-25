@@ -1,6 +1,7 @@
 //! macOS: responsibility-based membership (PLAN.md §2, §3.1, §3.2).
 
-use crate::{code_of, kill_tree, Args};
+use crate::{code_of, deadline_missed, kill_tree, Args};
+use sheepdog::ident::identity;
 use libc::{c_char, c_int, c_void, pid_t, posix_spawnattr_t};
 use std::ffi::CString;
 use std::mem::{size_of, zeroed};
@@ -80,8 +81,9 @@ fn all_pids() -> Vec<pid_t> {
     buf
 }
 
-/// Live, same-uid processes (not zombies) other than this one, whose responsible uniqueid is `r`.
-fn responsible_to(r: u64) -> Vec<pid_t> {
+/// Live, same-uid processes (not zombies) other than this one, whose responsible uniqueid is
+/// `r`, with their identities.
+fn responsible_to(r: u64) -> Vec<(pid_t, u64)> {
     let me = unsafe { libc::getpid() };
     let uid = unsafe { libc::getuid() };
     all_pids()
@@ -89,6 +91,7 @@ fn responsible_to(r: u64) -> Vec<pid_t> {
         .filter(|&p| p != me && p > 0)
         .filter(|&p| bsd(p).map_or(false, |b| b.pbi_uid == uid && b.pbi_status != SZOMB))
         .filter(|&p| resp_uniq(p) == Some(r))
+        .filter_map(|p| Some((p, identity(p)?)))
         .collect()
 }
 
@@ -98,7 +101,7 @@ fn cstrings(v: &[String]) -> Vec<CString> {
 
 /// PLAN.md §3.1: re-exec this process with SETEXEC + disclaim, so it becomes responsible for
 /// itself and for everything it spawns. Returns false when the SPI is unavailable (fallback).
-fn become_responsible() -> bool {
+fn become_responsible(argv0: &[String]) -> bool {
     let me = unsafe { libc::getpid() };
     let mine = match uniq(me) {
         Some((u, _)) => u,
@@ -124,7 +127,7 @@ fn become_responsible() -> bool {
     }
     path.truncate(n as usize);
     let path = CString::new(path).unwrap();
-    let argv = cstrings(&std::env::args().collect::<Vec<_>>());
+    let argv = cstrings(argv0);
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
     unsafe {
@@ -138,7 +141,9 @@ fn become_responsible() -> bool {
     false // only reached if the re-exec failed
 }
 
-/// Spawn the root with the default signal dispositions and an empty mask (PLAN.md §3.1).
+/// Spawn the root. Its signal dispositions and mask are left exactly as the caller set them
+/// (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs), and a spawn
+/// without SETSIGDEF/SETSIGMASK inherits them.
 fn spawn(cmd: &[String], disclaim_root: bool) -> pid_t {
     let argv = cstrings(cmd);
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
@@ -147,16 +152,6 @@ fn spawn(cmd: &[String], disclaim_root: bool) -> pid_t {
     let rc = unsafe {
         let mut attr: posix_spawnattr_t = zeroed();
         libc::posix_spawnattr_init(&mut attr);
-        let mut all: libc::sigset_t = zeroed();
-        libc::sigfillset(&mut all);
-        let mut none: libc::sigset_t = zeroed();
-        libc::sigemptyset(&mut none);
-        libc::posix_spawnattr_setsigdefault(&mut attr, &all);
-        libc::posix_spawnattr_setsigmask(&mut attr, &none);
-        libc::posix_spawnattr_setflags(
-            &mut attr,
-            (libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK) as i16,
-        );
         if disclaim_root {
             if let Some(d) = sym::<Disclaim>("responsibility_spawnattrs_setdisclaim") {
                 d(&mut attr, 1);
@@ -188,7 +183,7 @@ fn wait(pid: pid_t) -> i32 {
 pub fn run(a: &Args) -> i32 {
     match a.mode.as_deref() {
         None | Some("responsible") => {
-            let ok = become_responsible();
+            let ok = become_responsible(&a.argv);
             std::env::remove_var(REEXEC_MARK);
             if !ok {
                 eprintln!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
@@ -196,19 +191,19 @@ pub fn run(a: &Args) -> i32 {
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             let root = spawn(&a.cmd, false);
             let code = wait(root);
-            if !kill_tree(|| responsible_to(me), || {}) {
-                return 125;
+            match kill_tree(|| responsible_to(me), || {}) {
+                Ok(()) => code,
+                Err(alive) => deadline_missed(&alive),
             }
-            code
         }
         Some("root-disclaim") => {
             let root = spawn(&a.cmd, true);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let code = wait(root);
-            if !kill_tree(|| responsible_to(r), || {}) {
-                return 125;
+            match kill_tree(|| responsible_to(r), || {}) {
+                Ok(()) => code,
+                Err(alive) => deadline_missed(&alive),
             }
-            code
         }
         Some(m) => {
             eprintln!("sheepdog: unknown mode {m}");
