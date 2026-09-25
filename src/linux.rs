@@ -85,10 +85,10 @@ extern "C" {
     static environ: *const *mut libc::c_char;
 }
 
-/// Spawn the root with posix_spawnp. Its signal dispositions and mask are left exactly as the
-/// caller set them (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs)
-/// and passes no SETSIGDEF/SETSIGMASK. posix_spawn also avoids running Rust code in a forked
-/// child.
+/// Spawn the root with posix_spawnp. Its signal dispositions are the caller's (sheepdog
+/// changes none except SIGCHLD, set to default: `#![no_main]`, see main.rs), and its mask is
+/// set to the caller's with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked).
+/// PLAN.md §3.1, cell 23. posix_spawn also avoids running Rust code in a forked child.
 fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> i32 {
     let argv: Vec<CString> = cstrings(cmd).unwrap_or_else(|e| {
         say!("sheepdog: {e}");

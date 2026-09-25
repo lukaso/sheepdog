@@ -147,9 +147,9 @@ fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool 
     false // only reached if the re-exec failed
 }
 
-/// Spawn the root. Its signal dispositions and mask are left exactly as the caller set them
-/// (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs), and a spawn
-/// without SETSIGDEF/SETSIGMASK inherits them.
+/// Spawn the root. Its signal dispositions are the caller's (sheepdog changes none except
+/// SIGCHLD, set to default: `#![no_main]`, see main.rs), and its mask is set to the caller's
+/// with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked). PLAN.md §3.1, cell 23.
 fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) -> pid_t {
     let argv = cstrings(cmd).unwrap_or_else(|e| {
         say!("sheepdog: {e}");
