@@ -128,7 +128,8 @@ It **lists**; it kills nothing unless asked.
     - it forwards **HUP only when it is the session leader** (then only it gets HUP when the terminal closes);
     - it **never forwards INT**: a terminal INT already reaches the whole process group, and forwarding would deliver it twice (review round 4). It consumes INT, so it does not die of it. An INT sent to the relay's pid only therefore reaches nothing: the stated pid-only limit, stricter on this path;
     - it waits on SIGCHLD (no polling delay) and **dies the way the supervisor died** (death by signal N stays death by signal N, which shells rely on);
-    - the supervisor has `PR_SET_PDEATHSIG(SIGTERM)`: if the relay is killed, the supervisor is told to end the job rather than run on unseen.
+    - the supervisor has `PR_SET_PDEATHSIG(SIGTERM)`: if the relay is killed, the supervisor ends the job (measured: the root and an escapee are gone) rather than run on unseen.
+    - **Stated limits:** the relay's own death by a core-dumping signal (QUIT, SEGV) does not report "core dumped" (it re-raises with RLIMIT_CORE 0; with a pipe `core_pattern` such as systemd-coredump the kernel ignores that limit and a second crash record is possible). If the caller ignored or blocked TERM, the parent-death TERM does nothing, and a killed relay leaves the supervisor running until the root exits.
     - Measured (Alpine): the relay path's exit latency equals the direct path's; the root's signal mask is identical on both paths.
 - **After that the supervisor never forks again,** so it can still kill at pid exhaustion. It is single-threaded.
 - **Reaping:** `waitpid(-1, WNOHANG)` in the event loop reaps every adopted orphan on Linux. Only the root's exit sets the exit code.
@@ -420,6 +421,8 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 **macOS residual (named):** macOS has no atomic "tree empty" check (no subreaper, no enumeration of responsible processes), so it still ends on two empty scans. The fast chain is green there (fork is slow enough), which is luck, not proof. A process chain that hops faster than a scan can outrun it on macOS.
 
 **Round 4 (review of the round-3 fixes): no P1; 2 P2 + 5 P3 in the new Linux relay, fixed test-first (death by signal preserved, no double INT by design, no exit latency, a dead relay takes the supervisor with it, the relay path keeps the caller's mask, atomic child check, a distinct panic message). Mutants MR1–MR4 red. The no-double-INT rule has no test until phase 1 gives the supervisor INT handling (cell 22, relay variant).**
+
+**Round 5 (review of round 4): no P1; P2-A was a regression of round 4** (the relay's parent-death TERM killed the supervisor by default action and leaked the tree; the dead-relay cell hid it by cleaning the root itself). Fixed by building "TERM ends the job" now; **P2-B**: the mask cell measured nothing on Debian (dash resets the mask), now no shell in the path and the control must show the injected bits. Mutants MT1, MR4 (now on Debian), MT3b (50 ms polling), MT4a/b (HUP rules) red. Test lesson: count processes by program and marker, not by marker alone (the marker also sits in sheepdog's own argv).
 
 **Carried into phase 1** (not measured in phase 0): the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 

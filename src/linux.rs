@@ -217,12 +217,18 @@ pub fn run(a: &Args) -> i32 {
     }
     let me = unsafe { libc::getpid() };
     let root = spawn(&a.cmd);
-    let mut code = 125;
+    // wait for the root, reaping adopted orphans meanwhile; a TERM ends the wait (the job
+    // must be ended: PLAN.md §3.1)
+    let mut code = Some(125);
     loop {
+        if crate::term_requested() {
+            code = None;
+            break;
+        }
         let mut st = 0;
         let r = unsafe { libc::waitpid(-1, &mut st, 0) };
         if r == root {
-            code = code_of(st);
+            code = Some(code_of(st));
             break;
         }
         if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
@@ -237,8 +243,11 @@ pub fn run(a: &Args) -> i32 {
         kill_tree(&opts, || descendants(me), reap, || None, crate::signal)
     };
     reap();
+    if code.is_none() && result.is_ok() {
+        return crate::die_by_term(143);
+    }
     match result {
-        Ok(()) => code,
+        Ok(()) => code.unwrap_or(143),
         Err(e) => crate::kill_failed(e),
     }
 }

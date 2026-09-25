@@ -279,128 +279,225 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     assert!(left.is_empty(), "members were left behind after a panic: {left:?}");
 }
 
+// ---- TERM ends the job (review round 5, P2-A) -----------------------------------------
+
+fn marked_pids(marker: &str) -> Vec<i32> {
+    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
+    assert!(out.status.success(), "ps failed");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == marker))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+/// Live `/bin/sleep <marker>` processes only. Counting every process whose argv mentions the
+/// marker also counts sheepdog itself when the marker is inside its `sh -c` argument.
+fn sleeps(marker: &str) -> usize {
+    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
+    assert!(out.status.success(), "ps failed");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.len() >= 3 && w[1].ends_with("sleep") && w[2] == marker
+        })
+        .count()
+}
+fn kill_marked(markers: &[&str]) {
+    for m in markers {
+        for p in marked_pids(m) {
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+    }
+}
+
+/// PLAN.md §3.1: TERM to sheepdog ends the job. The root and an escapee are gone, and
+/// sheepdog itself dies of SIGTERM (so a caller sees death by signal).
+#[test]
+fn term_to_sheepdog_ends_the_job() {
+    use std::os::unix::process::ExitStatusExt;
+    let (root, esc) = (format!("26.{}444001", std::process::id()), format!("25.{}444002", std::process::id()));
+    let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
+    let mut c = Command::new(sheepdog()).args(["run", "--", "sh", "-c", &inner]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    let before = (sleeps(&root), sleeps(&esc));
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = c.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let after = (sleeps(&root), sleeps(&esc));
+    kill_marked(&[&root, &esc]);
+    assert_eq!(before, (1, 1), "the job did not start");
+    assert_eq!(after, (0, 0), "TERM left the job running (root, escapee)");
+    assert_eq!(st.signal(), Some(libc::SIGTERM), "sheepdog must die of SIGTERM, got {st:?}");
+}
+
 // ---- the Linux relay (review round 4) ---------------------------------------------------
 // The relay exists only on Linux, when sheepdog starts with children it did not create.
 
 #[cfg(target_os = "linux")]
 mod relay {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
 
-    fn by_marker(marker: &str) -> Vec<i32> {
-        let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
-        assert!(out.status.success(), "ps failed");
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| l.split_whitespace().any(|w| w == marker))
-            .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+    /// `sd-fixture bg-then-exec <job> sheepdog run -- <root...>` (with a job: the relay path),
+    /// or sheepdog directly (no job: the direct path). No shell in between.
+    fn start(job: Option<&str>, root: &[&str]) -> Command {
+        let mut c = match job {
+            Some(j) => {
+                let mut c = Command::new(fixture());
+                c.args(["bg-then-exec", j, sheepdog(), "run", "--"]);
+                c
+            }
+            None => {
+                let mut c = Command::new(sheepdog());
+                c.args(["run", "--"]);
+                c
+            }
+        };
+        c.args(root).stdout(Stdio::null()).stderr(Stdio::null());
+        c
+    }
+    /// The sheepdog children of `pid` (the relay's supervisor).
+    fn supervisors_of(pid: i32) -> Vec<i32> {
+        std::fs::read_dir("/proc").unwrap().flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|&p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok()
+                .and_then(|s| s.get(s.rfind(')')? + 2..).map(|r| r.split_whitespace().nth(1) == Some(&pid.to_string())))
+                .unwrap_or(false)
+                && std::fs::read_to_string(format!("/proc/{p}/cmdline")).map_or(false, |c| c.contains("sheepdog")))
             .collect()
     }
-    fn kill_marked(markers: &[&str]) {
-        for m in markers {
-            for p in by_marker(m) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
-        }
-    }
-    /// `sh -c '[job &] exec sheepdog run -- <root...>'`; returns the child (sheepdog's pid).
-    fn start(job: Option<&str>, root: &str) -> std::process::Child {
-        let pre = job.map(|j| format!("/bin/sleep {j} & ")).unwrap_or_default();
-        let script = format!("{pre}exec \"$0\" run -- {root}");
-        Command::new("sh").args(["-c", &script, sheepdog()]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+    fn m(tag: u32) -> String {
+        format!("27.{}55{tag:04}", std::process::id())
     }
 
     /// P2-1: death by a signal stays death by that signal through the relay.
     #[test]
     fn the_relay_preserves_death_by_signal() {
-        let (job, r1, r2) = (format!("28.{}555001", std::process::id()), format!("27.{}555002", std::process::id()), format!("27.{}555003", std::process::id()));
-        let mut direct = start(None, &format!("/bin/sleep {r1}"));
-        let mut relayed = start(Some(&job), &format!("/bin/sleep {r2}"));
+        let (job, r1, r2) = (m(1), m(2), m(3));
+        let mut direct = start(None, &["/bin/sleep", &r1]).spawn().unwrap();
+        let mut relayed = start(Some(&job), &["/bin/sleep", &r2]).spawn().unwrap();
         std::thread::sleep(Duration::from_millis(400));
+        let sups = supervisors_of(relayed.id() as i32);
         unsafe {
             libc::kill(direct.id() as i32, libc::SIGTERM);
             libc::kill(relayed.id() as i32, libc::SIGTERM);
         }
         let (d, r) = (direct.wait().unwrap(), relayed.wait().unwrap());
         kill_marked(&[&job, &r1, &r2]);
+        assert_eq!(sups.len(), 1, "the relay path did not start a supervisor: {sups:?}");
         assert_eq!(d.signal(), Some(libc::SIGTERM), "control: without the relay, sheepdog dies of SIGTERM");
         assert_eq!(r.signal(), Some(libc::SIGTERM), "the relay turned death-by-signal into {r:?}");
     }
 
-    /// P3-1: the relay adds no polling delay to the exit.
+    /// P3-1: the relay adds no polling delay to the exit (median of 9, within 10 ms).
     #[test]
     fn the_relay_adds_no_exit_latency() {
-        let job = format!("28.{}555004", std::process::id());
+        let job = m(4);
         let time = |j: Option<&str>| {
-            let mut v: Vec<u128> = (0..5)
+            let mut v: Vec<u128> = (0..9)
                 .map(|_| {
                     let t = Instant::now();
-                    start(j, "true").wait().unwrap();
+                    start(j, &["true"]).status().unwrap();
                     t.elapsed().as_millis()
                 })
                 .collect();
             v.sort();
-            v[2]
+            v[4]
         };
         let direct = time(None);
         let relayed = time(Some(&job));
         kill_marked(&[&job]);
-        assert!(relayed <= direct + 20, "relay median {relayed} ms vs direct {direct} ms");
+        assert!(relayed <= direct + 10, "relay median {relayed} ms vs direct {direct} ms");
     }
 
-    /// P3-2: if the relay dies, the supervisor does not keep running on its own.
+    /// P3-2 / review round 5 P2-A: if the relay is killed, the job still ends: the root and an
+    /// escapee are gone within the kill deadline (not just the supervisor).
     #[test]
-    fn a_dead_relay_takes_the_supervisor_with_it() {
-        let (job, root) = (format!("28.{}555005", std::process::id()), format!("27.{}555006", std::process::id()));
-        let mut relayed = start(Some(&job), &format!("/bin/sleep {root}"));
+    fn a_dead_relay_still_ends_the_job() {
+        let (job, root, esc) = (m(5), m(6), m(7));
+        let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
+        let mut relayed = start(Some(&job), &["sh", "-c", &inner]).spawn().unwrap();
         std::thread::sleep(Duration::from_millis(400));
-        let relay = relayed.id() as i32;
-        let sup: Vec<i32> = std::fs::read_dir("/proc").unwrap().flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-            .filter(|&p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok()
-                .and_then(|s| s.get(s.rfind(')')? + 2..).map(|r| r.split_whitespace().nth(1) == Some(&relay.to_string())))
-                .unwrap_or(false)
-                && std::fs::read_to_string(format!("/proc/{p}/cmdline")).map_or(false, |c| c.contains("sheepdog")))
-            .collect();
-        assert_eq!(sup.len(), 1, "expected one supervisor child of the relay, found {sup:?}");
-        unsafe { libc::kill(relay, libc::SIGKILL) };
+        let sups = supervisors_of(relayed.id() as i32);
+        let before = (sleeps(&root), sleeps(&esc));
+        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
         let _ = relayed.wait();
-        std::thread::sleep(Duration::from_millis(500));
-        let alive = std::path::Path::new(&format!("/proc/{}", sup[0])).exists()
-            && !std::fs::read_to_string(format!("/proc/{}/stat", sup[0])).map_or(true, |s| s.contains(") Z "));
-        kill_marked(&[&job, &root]);
-        if alive {
-            unsafe { libc::kill(sup[0], libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(11);
+        let mut after = (1, 1);
+        while Instant::now() < deadline {
+            after = (sleeps(&root), sleeps(&esc));
+            if after == (0, 0) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(!alive, "the supervisor kept running after its relay was killed");
+        kill_marked(&[&job, &root, &esc]);
+        for s in &sups {
+            unsafe { libc::kill(*s, libc::SIGKILL) };
+        }
+        assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
+        assert_eq!(before, (1, 1), "the job did not start");
+        assert_eq!(after, (0, 0), "killing the relay leaked the job (root, escapee)");
     }
 
-    /// P3-4: on the relay path the root still gets the caller's signal mask.
+    /// P3-4 / review round 5 P2-B: on the relay path the root gets the caller's signal mask.
+    /// The root reads its own mask (no shell: dash resets the mask at startup), and the control
+    /// must show the injected bits, or the cell measures nothing.
     #[test]
     fn the_relay_path_keeps_the_callers_mask() {
-        use std::os::unix::process::CommandExt;
-        let job = format!("28.{}555007", std::process::id());
+        let job = m(8);
         let read = |j: Option<&str>| -> String {
-            let pre = j.map(|j| format!("/bin/sleep {j} & ")).unwrap_or_default();
-            let script = format!("{pre}exec \"$0\" run -- sh -c 'grep SigBlk /proc/$$/status'");
+            let mut c = start(j, &["grep", "SigBlk", "/proc/self/status"]);
+            c.stdout(Stdio::piped());
             let out = unsafe {
-                Command::new("sh").args(["-c", &script, sheepdog()])
-                    .pre_exec(|| {
-                        let mut set: libc::sigset_t = std::mem::zeroed();
-                        libc::sigemptyset(&mut set);
-                        libc::sigaddset(&mut set, libc::SIGUSR1);
-                        libc::sigaddset(&mut set, libc::SIGWINCH);
-                        libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-                        Ok(())
-                    })
-                    .output().unwrap()
+                c.pre_exec(|| {
+                    let mut set: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut set);
+                    libc::sigaddset(&mut set, libc::SIGUSR1);
+                    libc::sigaddset(&mut set, libc::SIGWINCH);
+                    libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                    Ok(())
+                })
+                .output()
+                .unwrap()
             };
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         let direct = read(None);
         let relayed = read(Some(&job));
         kill_marked(&[&job]);
-        assert!(direct.starts_with("SigBlk:"), "control failed: {direct:?}");
+        let bits = |s: &str| u64::from_str_radix(s.trim_start_matches("SigBlk:").trim(), 16).unwrap_or(0);
+        let injected = (1u64 << (libc::SIGUSR1 - 1)) | (1u64 << (libc::SIGWINCH - 1));
+        assert_eq!(bits(&direct) & injected, injected, "control: the injected mask did not reach the root: {direct:?}");
         assert_eq!(relayed, direct, "the relay path changed the root's signal mask");
+    }
+
+    /// Review round 5, P3-5: the relay forwards HUP only when it is the session leader.
+    #[test]
+    fn the_relay_forwards_hup_only_as_session_leader() {
+        let (j1, j2, r1, r2) = (m(9), m(10), m(11), m(12));
+        // not a leader: HUP to the relay is dropped; the relay keeps running
+        let mut plain = start(Some(&j1), &["/bin/sleep", &r1]).spawn().unwrap();
+        // session leader: HUP is forwarded; the supervisor dies of it, and so does the relay
+        let mut leader = unsafe {
+            start(Some(&j2), &["/bin/sleep", &r2]).pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            }).spawn().unwrap()
+        };
+        std::thread::sleep(Duration::from_millis(400));
+        unsafe {
+            libc::kill(plain.id() as i32, libc::SIGHUP);
+            libc::kill(leader.id() as i32, libc::SIGHUP);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let plain_alive = plain.try_wait().unwrap().is_none();
+        let leader_st = leader.wait().unwrap();
+        unsafe { libc::kill(plain.id() as i32, libc::SIGKILL) };
+        let _ = plain.wait();
+        kill_marked(&[&j1, &j2, &r1, &r2]);
+        assert!(plain_alive, "a relay that is not the session leader must drop HUP");
+        assert_eq!(leader_st.signal(), Some(libc::SIGHUP), "the session leader must forward HUP: {leader_st:?}");
     }
 }

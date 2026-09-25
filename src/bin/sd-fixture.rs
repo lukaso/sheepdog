@@ -23,6 +23,9 @@
 //!   until the chain completes, and then the last generation survives.
 //! - `exec-chld-ignored PROG ARGS...`: set SIGCHLD to ignored, then exec PROG. Shells cannot
 //!   do this (`trap '' CHLD` leaves SIGCHLD handled), so the SIGCHLD test needs it.
+//! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
+//!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
+//!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
 
 use sheepdog::ident::identity;
 use std::ffi::CString;
@@ -90,6 +93,21 @@ fn main() {
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
+    if mode == "bg-then-exec" && a.len() >= 4 {
+        use std::os::unix::process::CommandExt;
+        let m = CString::new(a[2].as_str()).unwrap();
+        unsafe {
+            if libc::fork() == 0 {
+                let null = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+                libc::dup2(null, 1);
+                libc::dup2(null, 2);
+                exec_sleep(&m);
+            }
+        }
+        let e = std::process::Command::new(&a[3]).args(&a[4..]).exec();
+        eprintln!("sd-fixture: exec failed: {e}");
+        std::process::exit(127);
+    }
     if mode == "exec-chld-ignored" && a.len() >= 3 {
         use std::os::unix::process::CommandExt;
         unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };

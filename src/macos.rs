@@ -172,15 +172,19 @@ fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
     pid
 }
 
-fn wait(pid: pid_t) -> i32 {
+/// Wait for the root. Returns None if a TERM arrived first (the job must be ended).
+fn wait(pid: pid_t) -> Option<i32> {
     let mut st = 0;
     loop {
+        if crate::term_requested() {
+            return None;
+        }
         let r = unsafe { libc::waitpid(pid, &mut st, 0) };
         if r == pid {
-            return code_of(st);
+            return Some(code_of(st));
         }
         if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return 125;
+            return Some(125);
         }
     }
 }
@@ -196,8 +200,15 @@ pub fn run(a: &Args) -> i32 {
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             let root = spawn(&a.cmd, false);
             let code = wait(root);
-            match kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal) {
-                Ok(()) => code,
+            let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal);
+            if code.is_none() {
+                let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
+                if result.is_ok() {
+                    return crate::die_by_term(143);
+                }
+            }
+            match result {
+                Ok(()) => code.unwrap_or(143),
                 Err(e) => crate::kill_failed(e),
             }
         }
@@ -205,8 +216,12 @@ pub fn run(a: &Args) -> i32 {
             let root = spawn(&a.cmd, true);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let code = wait(root);
-            match kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal) {
-                Ok(()) => code,
+            let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal);
+            if code.is_none() && result.is_ok() {
+                return crate::die_by_term(143);
+            }
+            match result {
+                Ok(()) => code.unwrap_or(143),
                 Err(e) => crate::kill_failed(e),
             }
         }

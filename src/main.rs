@@ -293,6 +293,51 @@ fn kill_loop(
     }
 }
 
+/// Set by the SIGTERM handler: the caller asked to end the job (PLAN.md §3.1).
+pub static TERM_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_term(_: c_int) {
+    TERM_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// "TERM ends the job" (PLAN.md §3.1; review round 5, P2-A: without it, the relay's
+/// PDEATHSIG killed the supervisor by default action and leaked the tree). Installed only if
+/// the caller left SIGTERM at default: a caller that ignores TERM keeps it ignored, for
+/// sheepdog and for the root (a caught signal is reset to default on exec, so installing a
+/// handler over an ignored TERM would change the root's disposition). No SA_RESTART, so a
+/// blocking wait returns EINTR and the wait loops see the flag.
+fn install_term_handler() {
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut old);
+        if old.sa_sigaction != libc::SIG_DFL {
+            return;
+        }
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_term as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = 0;
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
+
+pub fn term_requested() -> bool {
+    TERM_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// After the tree was killed for a TERM: die of SIGTERM, so the caller sees death by signal.
+pub fn die_by_term(fallback: i32) -> i32 {
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        let mut one: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut one);
+        libc::sigaddset(&mut one, libc::SIGTERM);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        libc::raise(libc::SIGTERM);
+    }
+    fallback
+}
+
 /// Report a missed deadline (PLAN.md §3.3 step 6) and return exit code 125.
 pub fn deadline_missed(alive: &[i32]) -> i32 {
     if alive.is_empty() {
@@ -314,6 +359,7 @@ fn run(argv: Vec<OsString>) -> i32 {
         Ok(a) => a,
         Err(code) => return code,
     };
+    install_term_handler();
     #[cfg(target_os = "macos")]
     let code = macos::run(&args);
     #[cfg(target_os = "linux")]
