@@ -17,10 +17,12 @@
 //!   200 µs, each recorded by G and running `/bin/sleep M`. The root exits as soon as G exists,
 //!   so the breeding happens while sheepdog is killing. A kill without freeze-and-repeat misses
 //!   children created between its scan and its signal.
-//! - `chain M R N`: cell 7 (chain). As `escape`, but G runs a chain of N generations: each
-//!   generation waits 500 µs, forks its successor and exits, so the tree keeps moving; the last
+//! - `chain M R N [DELAY_US]`: cell 7 (chain). As `escape`, but G runs a chain of N generations:
+//!   each generation waits DELAY_US (default 500 µs; 0 = as fast as fork allows), forks its successor and exits, so the tree keeps moving; the last
 //!   generation runs `/bin/sleep M`. A killer that does not freeze stays one generation behind
 //!   until the chain completes, and then the last generation survives.
+//! - `exec-chld-ignored PROG ARGS...`: set SIGCHLD to ignored, then exec PROG. Shells cannot
+//!   do this (`trap '' CHLD` leaves SIGCHLD handled), so the SIGCHLD test needs it.
 
 use sheepdog::ident::identity;
 use std::ffi::CString;
@@ -88,6 +90,13 @@ fn main() {
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
+    if mode == "exec-chld-ignored" && a.len() >= 3 {
+        use std::os::unix::process::CommandExt;
+        unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+        let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
+        eprintln!("sd-fixture: exec failed: {e}");
+        std::process::exit(127);
+    }
     unsafe {
         match (mode, a.len()) {
             ("escape", 4) | ("escape-fast", 4) => {
@@ -103,12 +112,15 @@ fn main() {
                     record(&a[2], g);
                 }
             }
-            ("chain", 5) => {
+            ("chain", 5) | ("chain", 6) => {
                 let m = CString::new(a[2].as_str()).unwrap();
                 let n: usize = a[4].parse().unwrap_or_else(|_| usage());
+                let delay: u32 = a.get(5).map(|d| d.parse().unwrap_or_else(|_| usage())).unwrap_or(500);
                 let g = spawn_escapee(&a[3], true, || {
                     for _ in 0..n {
-                        libc::usleep(500);
+                        if delay > 0 {
+                            libc::usleep(delay);
+                        }
                         match libc::fork() {
                             0 => continue,
                             -1 => {}

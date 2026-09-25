@@ -60,7 +60,10 @@ impl Iteration {
             .collect()
     }
     fn marked(&self) -> Vec<i32> {
-        let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().unwrap();
+        // no unwrap: this also runs inside Drop, where a panic would abort the suite
+        let Ok(out) = Command::new("ps").args(["-Ao", "pid=,args="]).output() else {
+            return Vec::new();
+        };
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| l.split_whitespace().any(|w| w == self.marker))
@@ -205,6 +208,18 @@ fn cell7_a_fork_chain_leaves_no_survivor() {
     let o = iterate(n, |it| run_sheepdog(None, &["chain", &it.marker, it.rec(), "4000"]));
     assert!(o.recorded >= n, "the chain did not start ({} records)", o.recorded);
     assert_eq!(o.survivors, 0, "{} chains of {n} survived", o.survivors);
+}
+
+/// Cell 7 (fast chain): each generation forks its successor at once and exits, so every
+/// process lives microseconds while one scan takes milliseconds. A scan-only emptiness check
+/// sees only dead or not-yet-listed pids and declares a live tree clean (phase-0 fix review,
+/// P1-A). SD_CHAIN_N sets the generation count (default 20000).
+#[test]
+fn cell7_a_fast_fork_chain_leaves_no_survivor() {
+    let gens = std::env::var("SD_CHAIN_N").unwrap_or_else(|_| "20000".into());
+    let o = iterate(30, |it| run_sheepdog(None, &["chain", &it.marker, it.rec(), &gens, "0"]));
+    assert!(o.recorded >= 30, "the chain did not start ({} records)", o.recorded);
+    assert_eq!(o.survivors, 0, "{} fast chains of 30 survived", o.survivors);
 }
 
 /// Cells 24-lite and 20 (PLAN.md §3.2 sticky membership, §3.3 step 6 deadline): a member

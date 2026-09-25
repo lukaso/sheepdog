@@ -102,3 +102,119 @@ fn cell23_an_ignored_sigpipe_stays_ignored() {
     let (_, err) = with_caller_ignoring("PIPE", "yes | head -c1 >/dev/null");
     assert!(err.contains("Broken pipe") || err.contains("EPIPE"), "SIGPIPE was reset to default: {err:?}");
 }
+
+// ---- phase-0 fix review, round 2 --------------------------------------------------------
+
+fn fixture() -> &'static str {
+    env!("CARGO_BIN_EXE_sd-fixture")
+}
+
+/// P1-B: a caller that ignores SIGCHLD makes the kernel reap children automatically. The
+/// supervisor must still wait for the root, kill the tree and return the root's code promptly.
+#[test]
+fn a_caller_that_ignores_sigchld_does_not_break_the_supervisor() {
+    let marker = format!("29.{}999001", std::process::id());
+    let rec = std::env::temp_dir().join(format!("sd-chld-{}", std::process::id()));
+    let _ = std::fs::remove_file(&rec);
+    let mut child = Command::new(fixture())
+        .args(["exec-chld-ignored", sheepdog(), "run", "--", fixture(), "escape", &marker])
+        .arg(&rec)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    let code = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st.code();
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let survivors = Command::new("ps").args(["-Ao", "pid=,args="]).output().map(|o| {
+        String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.split_whitespace().any(|w| w == marker)).count()
+    });
+    // cleanup by marker before asserting
+    if let Ok(o) = Command::new("ps").args(["-Ao", "pid=,args="]).output() {
+        for l in String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.split_whitespace().any(|w| w == marker)) {
+            if let Some(p) = l.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()) {
+                unsafe { libc::kill(p, libc::SIGKILL) };
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&rec);
+    assert_eq!(code, Some(0), "sheepdog did not return the root's code within 5 s");
+    assert_eq!(survivors.unwrap_or(1), 0, "the escapee survived");
+}
+
+/// P2: argv bytes that are not UTF-8 reach the root unchanged.
+#[test]
+fn non_utf8_arguments_reach_the_root_unchanged() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let arg = OsString::from_vec(vec![0xff, 0xfe]);
+    let out = Command::new(sheepdog())
+        .args(["run", "--", "sh", "-c", "printf %s \"$1\" | od -An -tx1", "_"])
+        .arg(&arg)
+        .output()
+        .unwrap();
+    let hex: String = String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(hex, "ff fe", "the root received different bytes");
+}
+
+/// P2: the deadline bounds the runtime even when the tree never looks empty (debug seam
+/// SHEEPDOG_TEST_NEVER_EMPTY=1 makes every emptiness check answer "not empty").
+#[test]
+fn the_kill_deadline_bounds_the_runtime() {
+    let mut child = Command::new(sheepdog())
+        .args(["run", "--", "true"])
+        .env("SHEEPDOG_TEST_NEVER_EMPTY", "1")
+        .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            assert_eq!(st.code(), Some(125), "a missed deadline must exit 125");
+            return;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("sheepdog ran past its kill deadline");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// P3: writing to a closed stderr must not panic across the C entry point (UB before Rust
+/// 1.81; measured exit 134). A usage error must still exit 125.
+#[test]
+fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    unsafe { libc::close(fds[0]) }; // nobody will ever read: writes fail with EPIPE
+    let stderr = unsafe { Stdio::from_raw_fd(fds[1]) };
+    // Command resets SIGPIPE to default in the child (then the write kills sheepdog with
+    // SIGPIPE, which is correct); ignore it explicitly so the write returns EPIPE instead
+    use std::os::unix::process::CommandExt;
+    let st = unsafe {
+        Command::new(sheepdog())
+            .arg("bogus")
+            .stderr(stderr)
+            .pre_exec(|| {
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+                Ok(())
+            })
+            .status()
+            .unwrap()
+    };
+    assert_eq!(st.code(), Some(125));
+}

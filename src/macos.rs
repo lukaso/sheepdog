@@ -1,6 +1,8 @@
 //! macOS: responsibility-based membership (PLAN.md §2, §3.1, §3.2).
 
-use crate::{code_of, deadline_missed, kill_tree, Args};
+use crate::{code_of, cstrings, deadline_missed, kill_tree, say, Args};
+use std::io::Write;
+use std::ffi::OsString;
 use sheepdog::ident::identity;
 use libc::{c_char, c_int, c_void, pid_t, posix_spawnattr_t};
 use std::ffi::CString;
@@ -95,13 +97,10 @@ fn responsible_to(r: u64) -> Vec<(pid_t, u64)> {
         .collect()
 }
 
-fn cstrings(v: &[String]) -> Vec<CString> {
-    v.iter().map(|s| CString::new(s.as_str()).unwrap()).collect()
-}
 
 /// PLAN.md §3.1: re-exec this process with SETEXEC + disclaim, so it becomes responsible for
 /// itself and for everything it spawns. Returns false when the SPI is unavailable (fallback).
-fn become_responsible(argv0: &[String]) -> bool {
+fn become_responsible(argv0: &[OsString]) -> bool {
     let me = unsafe { libc::getpid() };
     let mine = match uniq(me) {
         Some((u, _)) => u,
@@ -144,7 +143,7 @@ fn become_responsible(argv0: &[String]) -> bool {
 /// Spawn the root. Its signal dispositions and mask are left exactly as the caller set them
 /// (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs), and a spawn
 /// without SETSIGDEF/SETSIGMASK inherits them.
-fn spawn(cmd: &[String], disclaim_root: bool) -> pid_t {
+fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
     let argv = cstrings(cmd);
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
@@ -161,7 +160,7 @@ fn spawn(cmd: &[String], disclaim_root: bool) -> pid_t {
         libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), &attr, ptrs.as_ptr(), env)
     };
     if rc != 0 {
-        eprintln!("sheepdog: cannot run {}: {}", cmd[0], std::io::Error::from_raw_os_error(rc));
+        say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
         std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
     }
     pid
@@ -186,12 +185,12 @@ pub fn run(a: &Args) -> i32 {
             let ok = become_responsible(&a.argv);
             std::env::remove_var(REEXEC_MARK);
             if !ok {
-                eprintln!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
+                say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             let root = spawn(&a.cmd, false);
             let code = wait(root);
-            match kill_tree(|| responsible_to(me), || {}) {
+            match kill_tree(|| responsible_to(me), || {}, || None) {
                 Ok(()) => code,
                 Err(alive) => deadline_missed(&alive),
             }
@@ -200,13 +199,13 @@ pub fn run(a: &Args) -> i32 {
             let root = spawn(&a.cmd, true);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let code = wait(root);
-            match kill_tree(|| responsible_to(r), || {}) {
+            match kill_tree(|| responsible_to(r), || {}, || None) {
                 Ok(()) => code,
                 Err(alive) => deadline_missed(&alive),
             }
         }
         Some(m) => {
-            eprintln!("sheepdog: unknown mode {m}");
+            say!("sheepdog: unknown mode {m}");
             125
         }
     }

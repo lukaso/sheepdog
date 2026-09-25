@@ -399,6 +399,18 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 | identity checker (not only argv markers) | control: an escapee with no marker is found by identity | — | green (5/5 found) |
 | freeze (SIGSTOP) before kill | cell 7 (breeder, chain) | no freeze (M3) | **green: not load-bearing in any safe test.** A bounded tree converges by repeat alone; only unbounded fast growth (a fork bomb) separates them, which is not run on a workstation. **Named residual.** |
 
+**Second review of the fixes (2026-09-25), 2 P1 + 2 P2 + 3 P3, all fixed test-first:**
+
+| Finding | Fix | Cell | Mutant |
+|---|---|---|---|
+| P1-A Linux false clean: a tree that moves faster than one `/proc` scan looks empty twice | Linux ends on the **authoritative** check: `waitpid(-1, WNOHANG)` = ECHILD (the subreaper is the parent of the topmost live member). A scan-only "empty" never ends it while children exist | cell 7 fast chain (0 µs generations, 30 per run); 25 full-suite runs each on Alpine and Debian: 0 failures | scan-only end (M5): red 5 of 5 runs, unmutated green 5 of 5 |
+| P1-B a caller that ignores SIGCHLD makes the kernel auto-reap; the supervisor never kills | sheepdog sets SIGCHLD to default before anything else; **the root gets SIGCHLD at default** (a stated exception to "inherit the caller's signals") | exec with SIGCHLD ignored: root's code within 5 s, escapee dead | no reset (M7): red |
+| P2 non-UTF-8 argv corrupted | argv stays raw bytes end to end (also the macOS re-exec) | `\xff\xfe` reaches the root unchanged | lossy conversion (M8): red |
+| P2 the deadline did not bound the runtime | deadline checked at the top of every pass; a 100 ms settle before "not clean" | debug seam NEVER_EMPTY: exit 125 within the deadline | deadline only in the non-empty branch (M6): red |
+| P3 a panic unwinding out of the C `main` (UB before Rust 1.81); cleanup double-panic | errors written with ignored results, body under `catch_unwind`; the checker never unwraps `ps` | closed stderr with SIGPIPE ignored: exit 125 | both layers removed (M9b): red |
+
+**macOS residual (named):** macOS has no atomic "tree empty" check (no subreaper, no enumeration of responsible processes), so it still ends on two empty scans. The fast chain is green there (fork is slow enough), which is luck, not proof. A process chain that hops faster than a scan can outrun it on macOS.
+
 **Carried into phase 1** (not measured in phase 0): the TERM grace (§3.3); the pid-reuse seam for the identity re-check (the check exists, the forced-reuse cell does not); the pidfd path and its `ENOSYS` fallback; socket registration (facts from the round-4 probe only); Linux on amd64 and as PID 1; the grant through a PATH symlink (the phase-0 grant was reset by the control before this could be tested).
 
 ## 8. Open questions for the operator

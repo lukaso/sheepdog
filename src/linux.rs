@@ -4,7 +4,9 @@
 //! (measured in round 1, also as non-root in a default container), so the tree is exactly
 //! this process's live descendants. The supervisor must reap what it adopts (round 1, F5).
 
-use crate::{code_of, deadline_missed, kill_tree, Args};
+use crate::{code_of, cstrings, deadline_missed, kill_tree, say, Args};
+use std::ffi::OsString;
+use std::io::Write;
 use sheepdog::ident::identity;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -58,6 +60,27 @@ fn reap() {
     while unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) } > 0 {}
 }
 
+/// The authoritative emptiness check (phase-0 fix review, P1-A): with the subreaper set, every
+/// live member of the tree has a live ancestor that is this process's child, or is its child
+/// itself. So "no children at all" (waitpid reports ECHILD) means the tree is empty, atomically,
+/// whatever the tree does between two /proc scans.
+fn tree_empty() -> Option<bool> {
+    let mut st = 0;
+    loop {
+        match unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) } {
+            0 => return Some(false),
+            r if r > 0 => continue, // reaped one; ask again
+            _ => {
+                let e = std::io::Error::last_os_error().raw_os_error();
+                if e == Some(libc::EINTR) {
+                    continue;
+                }
+                return Some(e == Some(libc::ECHILD));
+            }
+        }
+    }
+}
+
 extern "C" {
     static environ: *const *mut libc::c_char;
 }
@@ -66,8 +89,8 @@ extern "C" {
 /// caller set them (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs)
 /// and passes no SETSIGDEF/SETSIGMASK. posix_spawn also avoids running Rust code in a forked
 /// child.
-fn spawn(cmd: &[String]) -> i32 {
-    let argv: Vec<CString> = cmd.iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+fn spawn(cmd: &[OsString]) -> i32 {
+    let argv: Vec<CString> = cstrings(cmd);
     let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: libc::pid_t = 0;
@@ -75,7 +98,7 @@ fn spawn(cmd: &[String]) -> i32 {
         libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), std::ptr::null(), ptrs.as_ptr(), environ)
     };
     if rc != 0 {
-        eprintln!("sheepdog: cannot run {}: {}", cmd[0], std::io::Error::from_raw_os_error(rc));
+        say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
         std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
     }
     pid
@@ -86,12 +109,12 @@ pub fn run(a: &Args) -> i32 {
         None | Some("subreaper") => true,
         Some("none") => false,
         Some(m) => {
-            eprintln!("sheepdog: unknown mode {m}");
+            say!("sheepdog: unknown mode {m}");
             return 125;
         }
     };
     if subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
-        eprintln!("sheepdog: cannot become a subreaper; tracking is degraded");
+        say!("sheepdog: cannot become a subreaper; tracking is degraded");
     }
     let me = unsafe { libc::getpid() };
     let root = spawn(&a.cmd);
@@ -107,7 +130,7 @@ pub fn run(a: &Args) -> i32 {
             break;
         }
     }
-    let result = kill_tree(|| descendants(me), reap);
+    let result = kill_tree(|| descendants(me), reap, tree_empty);
     reap();
     match result {
         Ok(()) => code,
