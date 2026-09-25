@@ -191,7 +191,11 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
     }
     // A TERM that is pending now would stay in the relay (pending signals are not inherited
     // across fork) and reach the supervisor only later, possibly after it started the root.
-    // So it ends sheepdog here, before any fork or root (S1 review, P2-1).
+    // So it ends sheepdog here, before any fork or root (S1 review, P2-1). Remaining window,
+    // accepted: a TERM that reaches the relay after this check and before the fork is
+    // forwarded, and if it reaches the supervisor after its own pre-spawn check, the root may
+    // start and is then killed at once, never left running (the same as a TERM arriving just
+    // after the pre-spawn check without a relay).
     if sig.watch_term && crate::term_pending() {
         return Some(crate::die_by_term(143));
     }
