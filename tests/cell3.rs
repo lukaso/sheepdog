@@ -117,8 +117,7 @@ fn control_without_subreaper_loses_escapees() {
 fn cell3_default_mode_leaves_no_survivor() {
     let n: usize = std::env::var("SD_STRESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
     let o = iterate(n, under_sheepdog(None));
-    // non-vacuity: the escapees really were created (a killed-before-recording G is not a leak,
-    // but most must record, or the fixture did not run)
-    assert!(o.spawned * 10 >= n * 9, "only {} of {n} escapees were created", o.spawned);
+    // non-vacuity: the escapees really were created (C records each G right after forking it)
+    assert!(o.spawned * 100 >= n * 99, "only {} of {n} escapees were created", o.spawned);
     assert_eq!(o.survivors, 0, "{} of {n} escapees survived sheepdog", o.survivors);
 }
