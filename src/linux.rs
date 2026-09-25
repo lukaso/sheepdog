@@ -89,7 +89,7 @@ extern "C" {
 /// caller set them (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs)
 /// and passes no SETSIGDEF/SETSIGMASK. posix_spawn also avoids running Rust code in a forked
 /// child.
-fn spawn(cmd: &[OsString]) -> i32 {
+fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> i32 {
     let argv: Vec<CString> = cstrings(cmd).unwrap_or_else(|e| {
         say!("sheepdog: {e}");
         std::process::exit(125)
@@ -98,7 +98,14 @@ fn spawn(cmd: &[OsString]) -> i32 {
     ptrs.push(std::ptr::null_mut());
     let mut pid: libc::pid_t = 0;
     let rc = unsafe {
-        libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), std::ptr::null(), ptrs.as_ptr(), environ)
+        // the root gets the caller's mask (sheepdog blocks TERM and SIGCHLD for itself)
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+        libc::posix_spawnattr_init(&mut attr);
+        libc::posix_spawnattr_setsigmask(&mut attr, caller_mask);
+        libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSIGMASK as libc::c_short);
+        let rc = libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), &attr, ptrs.as_ptr(), environ);
+        libc::posix_spawnattr_destroy(&mut attr);
+        rc
     };
     if rc != 0 {
         say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
@@ -199,7 +206,7 @@ fn relay_if_needed() -> Option<i32> {
     }
 }
 
-pub fn run(a: &Args) -> i32 {
+pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if let Some(code) = relay_if_needed() {
         return code;
     }
@@ -216,25 +223,38 @@ pub fn run(a: &Args) -> i32 {
         say!("sheepdog: cannot become a subreaper; tracking is degraded");
     }
     let me = unsafe { libc::getpid() };
-    let root = spawn(&a.cmd);
-    // wait for the root, reaping adopted orphans meanwhile; a TERM ends the wait (the job
-    // must be ended: PLAN.md §3.1)
-    let mut code = Some(125);
-    loop {
-        if crate::term_requested() {
-            code = None;
-            break;
-        }
-        let mut st = 0;
-        let r = unsafe { libc::waitpid(-1, &mut st, 0) };
-        if r == root {
-            code = Some(code_of(st));
-            break;
-        }
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            break;
+    let root = spawn(&a.cmd, &sig.caller_mask);
+    // wait for the root, reaping adopted orphans meanwhile. TERM and SIGCHLD are blocked
+    // (main.rs setup_signals) and taken synchronously by sigtimedwait: a signal that arrives
+    // after a check stays pending, so there is no check-then-block gap (review round 6).
+    let mut waitset: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigemptyset(&mut waitset);
+        libc::sigaddset(&mut waitset, libc::SIGCHLD);
+        if sig.watch_term {
+            libc::sigaddset(&mut waitset, libc::SIGTERM);
         }
     }
+    let code = 'wait: loop {
+        loop {
+            let mut st = 0;
+            let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+            if r == root {
+                break 'wait Some(code_of(st));
+            }
+            if r <= 0 {
+                break;
+            }
+        }
+        if sig.watch_term && crate::term_pending() {
+            break None;
+        }
+        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS"); // widens any check-then-block gap
+        let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        if unsafe { libc::sigtimedwait(&waitset, std::ptr::null_mut(), &ts) } == libc::SIGTERM {
+            break None;
+        }
+    };
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
     let opts = crate::KillOpts::from_env();
     let result = if is_subreaper {

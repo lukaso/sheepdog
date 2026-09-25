@@ -82,6 +82,33 @@ fn with_caller_ignoring(ignored: &str, inner: &str) -> (i32, String) {
     (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// Cell 23 (mask): the root is born with exactly the caller's blocked signals, never with
+/// sheepdog's own (it blocks TERM and SIGCHLD for itself; on macOS the self re-exec must
+/// carry the caller's mask, or the re-exec'd image records sheepdog's mask as the caller's).
+#[test]
+fn cell23_the_root_gets_exactly_the_callers_mask() {
+    use std::os::unix::process::CommandExt;
+    let out = unsafe {
+        Command::new(sheepdog())
+            .args(["run", "--", fixture(), "print-mask"])
+            .pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGUSR1);
+                libc::sigaddset(&mut set, libc::SIGWINCH);
+                libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+                Ok(())
+            })
+            .output()
+            .unwrap()
+    };
+    let mut got: Vec<i32> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect();
+    got.sort();
+    let mut want = vec![libc::SIGUSR1, libc::SIGWINCH];
+    want.sort();
+    assert_eq!(got, want, "the root's blocked signals differ from the caller's");
+}
+
 #[test]
 fn cell23_signals_the_caller_ignored_stay_ignored() {
     // a shell cannot un-ignore a signal ignored on entry, so each kill must do nothing
@@ -311,6 +338,17 @@ fn kill_marked(markers: &[&str]) {
     }
 }
 
+/// Poll `cond` until it holds (up to 10 s). Tests wait for the job to exist instead of
+/// sleeping a fixed time: on macOS the first launch of a freshly built binary is delayed by the
+/// security scan, and a fixed sleep then races the scan (round 6).
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !cond() {
+        assert!(start.elapsed() < Duration::from_secs(10), "timed out waiting for: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// PLAN.md §3.1: TERM to sheepdog ends the job. The root and an escapee are gone, and
 /// sheepdog itself dies of SIGTERM (so a caller sees death by signal).
 #[test]
@@ -319,7 +357,7 @@ fn term_to_sheepdog_ends_the_job() {
     let (root, esc) = (format!("26.{}444001", std::process::id()), format!("25.{}444002", std::process::id()));
     let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
     let mut c = Command::new(sheepdog()).args(["run", "--", "sh", "-c", &inner]).spawn().unwrap();
-    std::thread::sleep(Duration::from_millis(400));
+    wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
     let before = (sleeps(&root), sleeps(&esc));
     unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
     let st = c.wait().unwrap();
@@ -377,7 +415,7 @@ mod relay {
         let (job, r1, r2) = (m(1), m(2), m(3));
         let mut direct = start(None, &["/bin/sleep", &r1]).spawn().unwrap();
         let mut relayed = start(Some(&job), &["/bin/sleep", &r2]).spawn().unwrap();
-        std::thread::sleep(Duration::from_millis(400));
+        wait_until("both roots", || sleeps(&r1) == 1 && sleeps(&r2) == 1);
         let sups = supervisors_of(relayed.id() as i32);
         unsafe {
             libc::kill(direct.id() as i32, libc::SIGTERM);
@@ -418,7 +456,7 @@ mod relay {
         let (job, root, esc) = (m(5), m(6), m(7));
         let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
         let mut relayed = start(Some(&job), &["sh", "-c", &inner]).spawn().unwrap();
-        std::thread::sleep(Duration::from_millis(400));
+        wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
         let sups = supervisors_of(relayed.id() as i32);
         let before = (sleeps(&root), sleeps(&esc));
         unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
@@ -474,6 +512,8 @@ mod relay {
     }
 
     /// Review round 5, P3-5: the relay forwards HUP only when it is the session leader.
+    /// This cell asserts forwarding only. That the forwarded HUP must not leak the tree is
+    /// the separate (ignored, phase-1) cell `a_forwarded_hup_does_not_leak_the_tree`.
     #[test]
     fn the_relay_forwards_hup_only_as_session_leader() {
         let (j1, j2, r1, r2) = (m(9), m(10), m(11), m(12));
@@ -486,7 +526,7 @@ mod relay {
                 Ok(())
             }).spawn().unwrap()
         };
-        std::thread::sleep(Duration::from_millis(400));
+        wait_until("both roots", || sleeps(&r1) == 1 && sleeps(&r2) == 1);
         unsafe {
             libc::kill(plain.id() as i32, libc::SIGHUP);
             libc::kill(leader.id() as i32, libc::SIGHUP);
@@ -500,4 +540,124 @@ mod relay {
         assert!(plain_alive, "a relay that is not the session leader must drop HUP");
         assert_eq!(leader_st.signal(), Some(libc::SIGHUP), "the session leader must forward HUP: {leader_st:?}");
     }
+}
+
+// ---- TERM windows (review round 6) -------------------------------------------------------
+
+/// Start sheepdog with a seam window of `ms`, wait until it signals that it is inside the
+/// window (a ready file; never a guess with a sleep), and return the child.
+fn start_in_window(seam: &str, ms: &str, tag: &str, root: &[&str]) -> std::process::Child {
+    let ready = std::env::temp_dir().join(format!("sd-ready-{}-{}", std::process::id(), tag));
+    let _ = std::fs::remove_file(&ready);
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--"])
+        .args(root)
+        .env(seam, ms)
+        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !ready.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = c.kill();
+            let _ = c.wait();
+            panic!("sheepdog never reached the {seam} window");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = std::fs::remove_file(&ready);
+    c
+}
+// Debug seams widen each window so the tests are deterministic:
+// SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS (macOS: before the self re-exec) and
+// SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS (both: after the root is spawned, before the wait).
+
+/// P2-1: a TERM before the root exists ends sheepdog, and the root never runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_term_during_the_self_reexec_is_not_lost() {
+    use std::os::unix::process::ExitStatusExt;
+    let root = format!("24.{}333001", std::process::id());
+    // the root records that it started; a root that ran even briefly leaves this file
+    let started = std::env::temp_dir().join(format!("sd-started-{}", std::process::id()));
+    let _ = std::fs::remove_file(&started);
+    let script = format!("touch '{}'; exec /bin/sleep {root}", started.display());
+    let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "300", &root, &["sh", "-c", &script]);
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let start = Instant::now();
+    let st = loop {
+        if let Some(st) = c.try_wait().unwrap() {
+            break Some(st);
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            let _ = c.kill();
+            let _ = c.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let ran = started.exists();
+    let _ = std::fs::remove_file(&started);
+    kill_marked(&[&root]);
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "the TERM was lost across the re-exec");
+    assert!(!ran, "the root started although TERM arrived before it existed");
+}
+
+/// P2-2: a TERM between spawning the root and blocking in the wait ends the job.
+#[test]
+fn a_term_just_before_the_wait_is_not_lost() {
+    use std::os::unix::process::ExitStatusExt;
+    let root = format!("24.{}333002", std::process::id());
+    let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "400", &root, &["/bin/sleep", &root]);
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let start = Instant::now();
+    let st = loop {
+        if let Some(st) = c.try_wait().unwrap() {
+            break Some(st);
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            let _ = c.kill();
+            let _ = c.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let took = start.elapsed();
+    std::thread::sleep(Duration::from_millis(100));
+    let left = sleeps(&root);
+    kill_marked(&[&root]);
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "the TERM was lost before the wait");
+    // the window is 400 ms; a wait that notices TERM only by a timeout takes over 1 s
+    assert!(took < Duration::from_millis(1000), "TERM was noticed only after {took:?}");
+    assert_eq!(left, 0, "the root survived the TERM");
+}
+
+/// Review round 6, P2-3 (a phase-1 requirement, PLAN.md §7.1): a HUP that the relay
+/// forwards as session leader must not leak the tree. Today the supervisor has no HUP
+/// handling and dies of it by default action, leaving the root and escapees running.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "phase 1: the supervisor's HUP handling (PLAN.md §3.1, §7.1)"]
+fn a_forwarded_hup_does_not_leak_the_tree() {
+    use std::os::unix::process::CommandExt;
+    let (job, root, esc) = (format!("27.{}556001", std::process::id()), format!("27.{}556002", std::process::id()), format!("27.{}556003", std::process::id()));
+    let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
+    let mut c = unsafe {
+        Command::new(fixture())
+            .args(["bg-then-exec", &job, sheepdog(), "run", "--", "sh", "-c", &inner])
+            .pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            })
+            .spawn()
+            .unwrap()
+    };
+    wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
+    unsafe { libc::kill(c.id() as i32, libc::SIGHUP) };
+    let _ = c.wait();
+    std::thread::sleep(Duration::from_millis(500));
+    let after = (sleeps(&root), sleeps(&esc));
+    kill_marked(&[&job, &root, &esc]);
+    assert_eq!(after, (0, 0), "a forwarded HUP leaked the tree (root, escapee)");
 }

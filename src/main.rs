@@ -109,6 +109,19 @@ pub fn signal(pid: i32, id: u64, sig: c_int) {
     }
 }
 
+/// Test seam (debug builds only): sleep for the number of ms in env var `name`. If
+/// SHEEPDOG_TEST_READY_FILE is set, first create that file, so a test can act INSIDE the window
+/// instead of guessing with a sleep (on macOS the first launch of a freshly built binary is
+/// delayed by the security scan, and a sleep-based test then raced the scan, not the window).
+pub fn seam_sleep(name: &str) {
+    if let Some(ms) = std::env::var(name).ok().filter(|_| cfg!(debug_assertions)).and_then(|v| v.parse().ok()) {
+        if let Ok(f) = std::env::var("SHEEPDOG_TEST_READY_FILE") {
+            let _ = std::fs::File::create(f);
+        }
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
 fn seam(name: &str) -> bool {
     cfg!(debug_assertions) && std::env::var(name).as_deref() == Ok("1")
 }
@@ -293,36 +306,45 @@ fn kill_loop(
     }
 }
 
-/// Set by the SIGTERM handler: the caller asked to end the job (PLAN.md §3.1).
-pub static TERM_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-extern "C" fn on_term(_: c_int) {
-    TERM_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+/// Signal set-up of a run (PLAN.md §3.1). sheepdog never catches TERM or SIGCHLD: it BLOCKS
+/// them and waits for them synchronously (Linux: sigtimedwait; macOS: kqueue plus a sigpending
+/// check). A blocked signal stays pending until the wait takes it, across the macOS self
+/// re-exec and across any gap between a check and a blocking call, so no TERM can be lost
+/// (review round 6: a caught TERM was lost across the re-exec, and between the flag check and
+/// the blocking wait).
+pub struct Signals {
+    /// the mask sheepdog was started with: the root gets exactly this
+    pub caller_mask: libc::sigset_t,
+    /// false when the caller ignored TERM: then TERM stays ignored, for sheepdog and the root
+    pub watch_term: bool,
 }
 
-/// "TERM ends the job" (PLAN.md §3.1; review round 5, P2-A: without it, the relay's
-/// PDEATHSIG killed the supervisor by default action and leaked the tree). Installed only if
-/// the caller left SIGTERM at default: a caller that ignores TERM keeps it ignored, for
-/// sheepdog and for the root (a caught signal is reset to default on exec, so installing a
-/// handler over an ignored TERM would change the root's disposition). No SA_RESTART, so a
-/// blocking wait returns EINTR and the wait loops see the flag.
-fn install_term_handler() {
+fn setup_signals() -> Signals {
     unsafe {
-        let mut old: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut old);
-        if old.sa_sigaction != libc::SIG_DFL {
-            return;
+        // sheepdog must see its children's exits (review round 2, P1-B); the root inherits it
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+        let mut term: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut term);
+        let watch_term = term.sa_sigaction == libc::SIG_DFL;
+        let mut block: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut block);
+        libc::sigaddset(&mut block, libc::SIGCHLD);
+        if watch_term {
+            libc::sigaddset(&mut block, libc::SIGTERM);
         }
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_term as usize;
-        libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = 0;
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        let mut caller_mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigprocmask(libc::SIG_BLOCK, &block, &mut caller_mask);
+        Signals { caller_mask, watch_term }
     }
 }
 
-pub fn term_requested() -> bool {
-    TERM_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+/// Is a TERM pending (blocked, not yet taken by a wait)?
+pub fn term_pending() -> bool {
+    unsafe {
+        let mut p: libc::sigset_t = std::mem::zeroed();
+        libc::sigpending(&mut p);
+        libc::sigismember(&p, libc::SIGTERM) == 1
+    }
 }
 
 /// After the tree was killed for a TERM: die of SIGTERM, so the caller sees death by signal.
@@ -353,17 +375,15 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 }
 
 fn run(argv: Vec<OsString>) -> i32 {
-    // sheepdog must see its children's exits (P1-B); the root inherits this default
-    unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
     let args = match parse(argv) {
         Ok(a) => a,
         Err(code) => return code,
     };
-    install_term_handler();
+    let sig = setup_signals();
     #[cfg(target_os = "macos")]
-    let code = macos::run(&args);
+    let code = macos::run(&args, &sig);
     #[cfg(target_os = "linux")]
-    let code = linux::run(&args);
+    let code = linux::run(&args, &sig);
     code
 }
 

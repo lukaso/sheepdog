@@ -100,7 +100,7 @@ fn responsible_to(r: u64) -> Vec<(pid_t, u64)> {
 
 /// PLAN.md §3.1: re-exec this process with SETEXEC + disclaim, so it becomes responsible for
 /// itself and for everything it spawns. Returns false when the SPI is unavailable (fallback).
-fn become_responsible(argv0: &[OsString]) -> bool {
+fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool {
     let me = unsafe { libc::getpid() };
     let mine = match uniq(me) {
         Some((u, _)) => u,
@@ -132,11 +132,15 @@ fn become_responsible(argv0: &[OsString]) -> bool {
     };
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
+    crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS");
     unsafe {
         let mut attr: posix_spawnattr_t = zeroed();
         libc::posix_spawnattr_init(&mut attr);
         disclaim(&mut attr, 1);
-        libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETEXEC as i16);
+        // the new image starts with the caller's mask: a TERM that is pending from before the
+        // re-exec is delivered at once and ends sheepdog before any root exists (round 6, P2-1)
+        libc::posix_spawnattr_setsigmask(&mut attr, caller_mask);
+        libc::posix_spawnattr_setflags(&mut attr, (libc::POSIX_SPAWN_SETEXEC | libc::POSIX_SPAWN_SETSIGMASK) as i16);
         let env = *_NSGetEnviron() as *const *mut c_char;
         libc::posix_spawn(std::ptr::null_mut(), path.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), env);
     }
@@ -146,7 +150,7 @@ fn become_responsible(argv0: &[OsString]) -> bool {
 /// Spawn the root. Its signal dispositions and mask are left exactly as the caller set them
 /// (PLAN.md §3.1, cell 23): sheepdog changes none (`#![no_main]`, see main.rs), and a spawn
 /// without SETSIGDEF/SETSIGMASK inherits them.
-fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
+fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) -> pid_t {
     let argv = cstrings(cmd).unwrap_or_else(|e| {
         say!("sheepdog: {e}");
         std::process::exit(125)
@@ -157,6 +161,9 @@ fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
     let rc = unsafe {
         let mut attr: posix_spawnattr_t = zeroed();
         libc::posix_spawnattr_init(&mut attr);
+        // the root gets the caller's mask (sheepdog blocks TERM and SIGCHLD for itself)
+        libc::posix_spawnattr_setsigmask(&mut attr, caller_mask);
+        libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSIGMASK as i16);
         if disclaim_root {
             if let Some(d) = sym::<Disclaim>("responsibility_spawnattrs_setdisclaim") {
                 d(&mut attr, 1);
@@ -173,33 +180,65 @@ fn spawn(cmd: &[OsString], disclaim_root: bool) -> pid_t {
 }
 
 /// Wait for the root. Returns None if a TERM arrived first (the job must be ended).
-fn wait(pid: pid_t) -> Option<i32> {
-    let mut st = 0;
-    loop {
-        if crate::term_requested() {
-            return None;
+/// kqueue watches the root's exit and TERM (TERM is blocked, so it is recorded, not acted
+/// on); a TERM that was already pending before the registration is found by `term_pending`.
+/// There is no check-then-block gap: an event after a check is queued for the next kevent.
+fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
+    unsafe {
+        let kq = libc::kqueue();
+        let mut ch: [libc::kevent; 2] = zeroed();
+        ch[0].ident = pid as usize;
+        ch[0].filter = libc::EVFILT_PROC;
+        ch[0].flags = libc::EV_ADD;
+        ch[0].fflags = libc::NOTE_EXIT;
+        ch[1].ident = libc::SIGTERM as usize;
+        ch[1].filter = libc::EVFILT_SIGNAL;
+        ch[1].flags = libc::EV_ADD;
+        // register one by one. XNU rejects NOTE_EXIT (ESRCH) for a root that is already
+        // exiting but not yet reapable; then no exit event will ever come, and waiting on
+        // kevent alone would block forever (measured: a hang after ~380 cell-3 iterations).
+        let proc_watched = libc::kevent(kq, &ch[0], 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0;
+        if watch_term {
+            libc::kevent(kq, &ch[1], 1, std::ptr::null_mut(), 0, std::ptr::null());
         }
-        let r = unsafe { libc::waitpid(pid, &mut st, 0) };
-        if r == pid {
-            return Some(code_of(st));
-        }
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return Some(125);
-        }
+        let mut st = 0;
+        let result = loop {
+            if watch_term && crate::term_pending() {
+                break None;
+            }
+            if libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
+                break Some(code_of(st));
+            }
+            if !proc_watched {
+                // the root is exiting: wait for it directly (brief)
+                break if libc::waitpid(pid, &mut st, 0) == pid { Some(code_of(st)) } else { Some(125) };
+            }
+            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS"); // widens any check-then-block gap
+            // a 1 s timeout is a safety net: the loop re-checks, so it can never block forever
+            let mut ev: libc::kevent = zeroed();
+            let one_s = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+            let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &one_s);
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                // no kqueue: fall back to a blocking wait for the root
+                break if libc::waitpid(pid, &mut st, 0) == pid { Some(code_of(st)) } else { Some(125) };
+            }
+        };
+        libc::close(kq);
+        result
     }
 }
 
-pub fn run(a: &Args) -> i32 {
+pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     match a.mode.as_deref() {
         None | Some("responsible") => {
-            let ok = become_responsible(&a.argv);
+            let ok = become_responsible(&a.argv, &sig.caller_mask);
             std::env::remove_var(REEXEC_MARK);
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
-            let root = spawn(&a.cmd, false);
-            let code = wait(root);
+            let root = spawn(&a.cmd, false, &sig.caller_mask);
+            let code = wait(root, sig.watch_term);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal);
             if code.is_none() {
                 let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
@@ -213,9 +252,9 @@ pub fn run(a: &Args) -> i32 {
             }
         }
         Some("root-disclaim") => {
-            let root = spawn(&a.cmd, true);
+            let root = spawn(&a.cmd, true, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
-            let code = wait(root);
+            let code = wait(root, sig.watch_term);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal);
             if code.is_none() && result.is_ok() {
                 return crate::die_by_term(143);

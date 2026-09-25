@@ -23,6 +23,7 @@
 //!   until the chain completes, and then the last generation survives.
 //! - `exec-chld-ignored PROG ARGS...`: set SIGCHLD to ignored, then exec PROG. Shells cannot
 //!   do this (`trap '' CHLD` leaves SIGCHLD handled), so the SIGCHLD test needs it.
+//! - `print-mask`: print the numbers of the blocked signals, one per line.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -93,6 +94,19 @@ fn main() {
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
+    if mode == "print-mask" {
+        // the blocked signals of this process, one number per line (for cell 23's mask check)
+        unsafe {
+            let mut m: libc::sigset_t = std::mem::zeroed();
+            libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut m);
+            for sig in 1..32 {
+                if libc::sigismember(&m, sig) == 1 {
+                    println!("{sig}");
+                }
+            }
+        }
+        std::process::exit(0);
+    }
     if mode == "bg-then-exec" && a.len() >= 4 {
         use std::os::unix::process::CommandExt;
         let m = CString::new(a[2].as_str()).unwrap();
