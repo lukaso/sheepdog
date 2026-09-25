@@ -105,6 +105,14 @@ fn control_root_disclaim_design_loses_escapees() {
     assert!(o.survivors > 0, "the round-2 design must lose escapees; it lost none");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn control_without_subreaper_loses_escapees() {
+    let o = iterate(20, under_sheepdog(Some("none")));
+    assert!(o.spawned >= 18, "the fixture did not spawn its escapees ({})", o.spawned);
+    assert!(o.survivors > 0, "without the subreaper, escapees must be lost; none were");
+}
+
 #[test]
 fn cell3_default_mode_leaves_no_survivor() {
     let n: usize = std::env::var("SD_STRESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
