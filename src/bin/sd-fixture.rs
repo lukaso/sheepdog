@@ -99,6 +99,22 @@ unsafe fn spawn_escapee(rec: &str, via_pipe: bool, g_body: impl FnOnce()) -> Opt
     }
 }
 
+/// Is this process responsible for itself (the disclaim took effect)?
+#[cfg(target_os = "macos")]
+fn self_responsible() -> bool {
+    type RespUniq = unsafe extern "C" fn(libc::pid_t) -> u64;
+    unsafe {
+        let name = CString::new("responsibility_get_uniqueid_responsible_for_pid").unwrap();
+        let f = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+        if f.is_null() {
+            return false;
+        }
+        let f: RespUniq = std::mem::transmute(f);
+        let me = libc::getpid();
+        identity(me).map_or(false, |u| f(me) == u)
+    }
+}
+
 /// Stopped by a signal (`T`).
 fn is_stopped(pid: i32) -> bool {
     #[cfg(target_os = "linux")]
@@ -119,12 +135,26 @@ fn is_stopped(pid: i32) -> bool {
 
 static mut TERM_FD: libc::c_int = -1;
 
+/// term-logger: record the TERM, take 300 ms to shut down, record the clean exit. A SIGKILL
+/// during those 300 ms (the grace not honoured) leaves no EXIT line.
 extern "C" fn on_term(_: libc::c_int) {
     unsafe {
         let pid = libc::getpid();
         let line = format!("TERM {pid}\n");
         libc::write(TERM_FD, line.as_ptr() as *const libc::c_void, line.len());
+        libc::usleep(300_000);
+        let line = format!("EXIT {pid}\n");
+        libc::write(TERM_FD, line.as_ptr() as *const libc::c_void, line.len());
         libc::_exit(0);
+    }
+}
+
+/// term-counter: record every TERM and keep running (only SIGKILL ends it).
+extern "C" fn count_term(_: libc::c_int) {
+    unsafe {
+        let pid = libc::getpid();
+        let line = format!("TERM {pid}\n");
+        libc::write(TERM_FD, line.as_ptr() as *const libc::c_void, line.len());
     }
 }
 
@@ -147,13 +177,14 @@ unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     ptrs.push(std::ptr::null_mut());
     let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
     libc::posix_spawnattr_init(&mut attr);
-    if !f.is_null() {
-        let d: Disclaim = std::mem::transmute(f);
-        d(&mut attr, 1);
+    if f.is_null() {
+        libc::_exit(3); // no disclaim: the cell would pass for another reason
     }
+    let d: Disclaim = std::mem::transmute(f);
+    d(&mut attr, 1);
     libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETEXEC as i16);
     libc::posix_spawn(std::ptr::null_mut(), path.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), *_NSGetEnviron() as *const *mut libc::c_char);
-    libc::_exit(126)
+    libc::_exit(3) // SETEXEC returns only on failure
 }
 
 fn main() {
@@ -163,25 +194,101 @@ fn main() {
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
+    #[cfg(target_os = "macos")]
     if mode == "redisclaim-c" && a.len() == 4 {
-        // C after its disclaim re-exec: start GG, live 700 ms, exit
+        // C after its disclaim re-exec: start GG, live SD_C_LIFE_MS (default 700 ms), exit.
+        // Exit 4 if the disclaim did not take effect (the cell would pass for another reason).
+        if !self_responsible() {
+            std::process::exit(4);
+        }
         let m = CString::new(a[2].as_str()).unwrap();
+        let life: u32 = std::env::var("SD_C_LIFE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700);
         unsafe {
             if libc::fork() == 0 {
                 libc::setsid();
+                let g = libc::getpid();
                 if libc::fork() == 0 {
-                    libc::usleep(50_000); // exec only after G has exited (puniq resets to 1)
+                    // exec only after G has exited (then `puniq` resets to 1), bounded
+                    let mut n = 0;
+                    while libc::getppid() == g && n < 2000 {
+                        libc::usleep(1000);
+                        n += 1;
+                    }
+                    record(&a[3], libc::getpid());
                     exec_sleep(&m);
                 }
                 libc::_exit(0);
             }
-            libc::usleep(700_000);
+            libc::usleep(life * 1000);
             libc::_exit(0);
         }
     }
+    #[cfg(target_os = "macos")]
     if mode == "puniq-d" && a.len() == 4 {
+        // D after its disclaim re-exec: record itself only if responsible for itself
+        if !self_responsible() {
+            std::process::exit(4);
+        }
+        record(&a[3], unsafe { libc::getpid() });
         let m = CString::new(a[2].as_str()).unwrap();
         unsafe { exec_sleep(&m) }
+    }
+    // `dspawn [wait] PROG ARGS...` (macOS): posix_spawn PROG with the responsibility disclaim
+    // (PROG is responsible for itself); with `wait`, wait for it and exit with its code, else
+    // exit at once. Exit 3 if the disclaim or the spawn is not available.
+    #[cfg(target_os = "macos")]
+    if mode == "dspawn" && a.len() >= 3 {
+        let wait = a[2] == "wait";
+        let rest = &a[if wait { 3 } else { 2 }..];
+        type Disclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
+        extern "C" {
+            fn _NSGetEnviron() -> *mut *const *const libc::c_char;
+        }
+        unsafe {
+            let name = CString::new("responsibility_spawnattrs_setdisclaim").unwrap();
+            let f = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+            if f.is_null() || rest.is_empty() {
+                libc::_exit(3);
+            }
+            let args: Vec<CString> = rest.iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+            let mut ptrs: Vec<*mut libc::c_char> = args.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
+            ptrs.push(std::ptr::null_mut());
+            let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+            libc::posix_spawnattr_init(&mut attr);
+            let d: Disclaim = std::mem::transmute(f);
+            d(&mut attr, 1);
+            let mut pid = 0;
+            let rc = libc::posix_spawn(&mut pid, args[0].as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), *_NSGetEnviron() as *const *mut libc::c_char);
+            if rc != 0 {
+                libc::_exit(3);
+            }
+            if wait {
+                let mut st = 0;
+                libc::waitpid(pid, &mut st, 0);
+                libc::_exit(if libc::WIFEXITED(st) { libc::WEXITSTATUS(st) } else { 128 + libc::WTERMSIG(st) });
+            }
+            libc::_exit(0);
+        }
+    }
+    // escape-late M R: C forks G (records itself, becomes `/bin/sleep M`), C lives 600 ms and
+    // exits; the root waits for C. So G is a descendant for over two scan ticks, then is
+    // reparented away (to init without a subreaper): only tracking while running catches it.
+    if mode == "escape-late" && a.len() == 4 {
+        let m = CString::new(a[2].as_str()).unwrap();
+        unsafe {
+            let c = libc::fork();
+            if c == 0 {
+                if libc::fork() == 0 {
+                    record(&a[3], libc::getpid());
+                    exec_sleep(&m);
+                }
+                libc::usleep(600_000);
+                libc::_exit(0);
+            }
+            let mut st = 0;
+            libc::waitpid(c, &mut st, 0);
+            libc::_exit(0);
+        }
     }
     if (mode == "redisclaim" || mode == "puniq-only") && a.len() == 4 {
         #[cfg(target_os = "macos")]
@@ -197,6 +304,9 @@ fn main() {
             if mode == "redisclaim" {
                 let mut st = 0;
                 libc::waitpid(c, &mut st, 0);
+                if !libc::WIFEXITED(st) || libc::WEXITSTATUS(st) != 0 {
+                    libc::_exit(3); // C failed (no disclaim, or not responsible for itself)
+                }
                 // outlive C, so GG has become responsible for itself (the change is not
                 // immediate) before the kill starts, not during it
                 libc::usleep(400_000);
@@ -211,7 +321,7 @@ fn main() {
             std::process::exit(2);
         }
     }
-    if mode == "term-logger" && (a.len() == 4 || (a.len() == 5 && a[4] == "stop")) {
+    if (mode == "term-logger" || mode == "term-counter") && (a.len() == 4 || (a.len() == 5 && a[4] == "stop")) {
         let term_file = CString::new(format!("{}.term", a[3])).unwrap();
         let stop = a.len() == 5;
         unsafe {
@@ -219,7 +329,8 @@ fn main() {
             TERM_FD = fd;
             // installed before the fork, so the escapee has it from its first instruction (a TERM
             // that came before a handler installed in the escapee would kill it unrecorded)
-            libc::signal(libc::SIGTERM, on_term as *const () as usize);
+            let h = if mode == "term-logger" { on_term as *const () as usize } else { count_term as *const () as usize };
+            libc::signal(libc::SIGTERM, h);
             if let Some(g) = spawn_escapee(&a[3], true, || {
                 let mut none: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut none);
@@ -234,8 +345,13 @@ fn main() {
                 record(&a[3], g);
                 // the root's exit starts the kill: in stop mode the escapee must be stopped by
                 // then, or its TERM would come before the stop and the CONT would not be tested
+                let mut waited = 0;
                 while stop && !is_stopped(g) {
+                    if waited > 2000 {
+                        libc::_exit(3); // the escapee never stopped: fail loudly, never hang
+                    }
                     libc::usleep(1000);
+                    waited += 1;
                 }
             }
             libc::_exit(0);

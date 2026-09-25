@@ -311,6 +311,18 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     assert!(left.is_empty(), "members were left behind after a panic: {left:?}");
 }
 
+/// Review S2 A-P3: a duration that is not finite or too large is a usage error, not a panic.
+#[test]
+fn an_unrepresentable_grace_is_a_usage_error() {
+    for v in ["inf", "NaN", "1e30", "-1"] {
+        let out = Command::new(sheepdog()).args(["run", "--grace", v, "--", "true"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(125), "--grace {v}: {err}");
+        assert!(err.contains("usage"), "--grace {v}: no usage line: {err}");
+        assert!(!err.contains("panick"), "--grace {v} panicked: {err}");
+    }
+}
+
 // ---- TERM ends the job (review round 5, P2-A) -----------------------------------------
 
 fn marked_pids(marker: &str) -> Vec<i32> {
@@ -374,10 +386,10 @@ fn term_to_sheepdog_ends_the_job() {
     assert_eq!(st.signal(), Some(libc::SIGTERM), "sheepdog must die of SIGTERM, got {st:?}");
 }
 
-// ---- the Linux relay (review round 4) ---------------------------------------------------
-// The relay exists only on Linux, when sheepdog starts with children it did not create.
+// ---- the relay (review round 4; macOS since the S2 review, A-P2-1) ------------------------
+// When sheepdog starts with children it did not create, it forks a fresh supervisor and the
+// first process becomes the relay (Linux: not their subreaper; macOS: a fresh uniqueid).
 
-#[cfg(target_os = "linux")]
 mod relay {
     use super::*;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -402,12 +414,14 @@ mod relay {
     }
     /// The sheepdog children of `pid` (the relay's supervisor).
     fn supervisors_of(pid: i32) -> Vec<i32> {
-        std::fs::read_dir("/proc").unwrap().flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
-            .filter(|&p| std::fs::read_to_string(format!("/proc/{p}/stat")).ok()
-                .and_then(|s| s.get(s.rfind(')')? + 2..).map(|r| r.split_whitespace().nth(1) == Some(&pid.to_string())))
-                .unwrap_or(false)
-                && std::fs::read_to_string(format!("/proc/{p}/cmdline")).map_or(false, |c| c.contains("sheepdog")))
+        let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().expect("ps");
+        assert!(out.status.success(), "ps failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                (w.len() >= 3 && w[1] == pid.to_string() && w[2].ends_with("sheepdog")).then(|| w[0].parse().ok()).flatten()
+            })
             .collect()
     }
     fn m(tag: u32) -> String {
@@ -491,7 +505,7 @@ mod relay {
     fn the_relay_path_keeps_the_callers_mask() {
         let job = m(8);
         let read = |j: Option<&str>| -> String {
-            let mut c = start(j, &["grep", "SigBlk", "/proc/self/status"]);
+            let mut c = start(j, &[fixture(), "print-mask"]);
             c.stdout(Stdio::piped());
             let out = unsafe {
                 c.pre_exec(|| {
@@ -510,9 +524,8 @@ mod relay {
         let direct = read(None);
         let relayed = read(Some(&job));
         kill_marked(&[&job]);
-        let bits = |s: &str| u64::from_str_radix(s.trim_start_matches("SigBlk:").trim(), 16).unwrap_or(0);
-        let injected = (1u64 << (libc::SIGUSR1 - 1)) | (1u64 << (libc::SIGWINCH - 1));
-        assert_eq!(bits(&direct) & injected, injected, "control: the injected mask did not reach the root: {direct:?}");
+        let has = |s: &str, sig: i32| s.lines().any(|l| l.trim() == sig.to_string());
+        assert!(has(&direct, libc::SIGUSR1) && has(&direct, libc::SIGWINCH), "control: the injected mask did not reach the root: {direct:?}");
         assert_eq!(relayed, direct, "the relay path changed the root's signal mask");
     }
 

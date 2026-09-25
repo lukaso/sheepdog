@@ -5,7 +5,7 @@
 use sheepdog::ident::same;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -34,9 +34,10 @@ impl Job {
     fn rec(&self) -> &str {
         self.rec.to_str().unwrap()
     }
-    fn term_lines(&self) -> usize {
+    /// The lines the escapee's TERM handler wrote (`TERM <pid>`, `EXIT <pid>`).
+    fn term_log(&self) -> Vec<String> {
         let p = format!("{}.term", self.rec());
-        std::fs::read_to_string(p).map(|s| s.lines().count()).unwrap_or(0)
+        std::fs::read_to_string(p).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
     }
     fn recorded(&self) -> Vec<(i32, u64)> {
         std::fs::read_to_string(&self.rec)
@@ -103,28 +104,88 @@ fn run(extra: &[&str], fixture_args: &[&str]) -> std::process::ExitStatus {
         .unwrap()
 }
 
-/// §3.3 step 1: a member that exits on TERM during the grace gets no SIGKILL. The fixture's
-/// escapee catches TERM, records it and exits 0; a SIGKILL first would leave no record.
+/// The TERM log of a clean shutdown by the escapee `g`: its TERM, then its EXIT 300 ms later.
+fn clean_exit(g: i32) -> Vec<String> {
+    vec![format!("TERM {g}"), format!("EXIT {g}")]
+}
+
+/// §3.3 step 1: a member that exits on TERM during the grace gets no SIGKILL. The escapee's
+/// handler records the TERM, takes 300 ms, then records its EXIT: a SIGKILL during those
+/// 300 ms (the grace not honoured) leaves no EXIT line.
 #[test]
 fn s2_a_member_that_exits_on_term_gets_no_kill() {
     let j = Job::new();
     let st = run(&[], &["term-logger", &j.marker, j.rec()]);
     assert_eq!(st.code(), Some(0));
-    assert_eq!(j.recorded().len(), 1, "the escapee was not created");
-    assert_eq!(j.term_lines(), 1, "the escapee got no TERM before it died (killed outright?)");
+    let g = j.recorded().first().copied().expect("the escapee was not created").0;
+    assert_eq!(j.term_log(), clean_exit(g), "the escapee was not given its grace");
     assert!(j.alive().is_empty(), "the escapee survived");
 }
 
 /// §3.3 step 1: a member that is stopped still gets its TERM, because the TERM is followed by
-/// a CONT (a stopped process does not act on TERM until it runs).
+/// a CONT (a stopped process does not act on TERM until it runs). The fixture's root exits
+/// only once the escapee is stopped.
 #[test]
 fn s2_a_stopped_member_still_gets_its_term() {
     let j = Job::new();
     let st = run(&[], &["term-logger", &j.marker, j.rec(), "stop"]);
-    assert_eq!(st.code(), Some(0));
-    assert_eq!(j.recorded().len(), 1);
-    assert_eq!(j.term_lines(), 1, "the stopped escapee never saw its TERM (no CONT after TERM?)");
+    assert_eq!(st.code(), Some(0), "the fixture's escapee never stopped");
+    let g = j.recorded().first().copied().expect("the escapee was not created").0;
+    assert_eq!(j.term_log(), clean_exit(g), "the stopped escapee never acted on its TERM (no CONT after TERM?)");
     assert!(j.alive().is_empty());
+}
+
+/// §3.3 step 1: the grace ends as soon as every member is gone, not at its end (2 s by
+/// default). The escapee takes 300 ms to exit on TERM; the time is measured from its TERM to
+/// sheepdog's exit, so a slow start of the job under load does not count.
+#[test]
+fn s2_the_grace_ends_when_the_members_are_gone() {
+    let j = Job::new();
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--", fixture(), "term-logger", &j.marker, j.rec()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while j.term_log().is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(20), "the escapee never got its TERM");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let termed = Instant::now();
+    let st = c.wait().unwrap();
+    let took = termed.elapsed();
+    assert_eq!(st.code(), Some(0));
+    assert!(took < Duration::from_millis(1000), "sheepdog ended {took:?} after the TERM: the grace ran out instead of ending with its members");
+}
+
+/// §3.3 step 1: each member gets exactly one TERM (many programs treat a second TERM as "force
+/// quit"). The escapee counts its TERMs and ignores them, so the grace runs to its end.
+#[test]
+fn s2_each_member_gets_one_term() {
+    let j = Job::new();
+    let st = run(&["--grace", "500ms"], &["term-counter", &j.marker, j.rec()]);
+    assert_eq!(st.code(), Some(0));
+    let g = j.recorded().first().copied().expect("the escapee was not created").0;
+    assert_eq!(j.term_log(), vec![format!("TERM {g}")], "not exactly one TERM");
+    assert!(j.alive().is_empty(), "the escapee survived the kill after the grace");
+}
+
+/// §3.3: the kill deadline starts after the grace, so a grace longer than the deadline still
+/// ends with a kill (debug seam: a 300 ms deadline; the escapee ignores TERM).
+#[test]
+fn s2_the_deadline_starts_after_the_grace() {
+    let j = Job::new();
+    let st = Command::new(sheepdog())
+        .args(["run", "--grace", "500ms", "--", fixture(), "term-counter", &j.marker, j.rec()])
+        .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(j.recorded().len(), 1, "the escapee was not created");
+    assert_eq!(st.code(), Some(0), "the deadline ran out during the grace");
+    assert!(j.alive().is_empty(), "the escapee survived");
 }
 
 /// `--grace 0` goes straight to SIGKILL: no TERM is sent.
@@ -134,7 +195,7 @@ fn s2_grace_zero_goes_straight_to_kill() {
     let st = run(&["--grace", "0"], &["term-logger", &j.marker, j.rec()]);
     assert_eq!(st.code(), Some(0));
     assert_eq!(j.recorded().len(), 1);
-    assert_eq!(j.term_lines(), 0, "--grace 0 still sent a TERM");
+    assert!(j.term_log().is_empty(), "--grace 0 still sent a TERM");
     assert!(j.alive().is_empty());
 }
 
@@ -148,8 +209,49 @@ fn s2_leave_strays_leaves_the_stray() {
     assert_eq!(j.alive().len(), 1, "--leave-strays still killed the stray");
 }
 
+/// `--leave-strays` applies when the command ends by itself. TERM to sheepdog ends the whole
+/// job, strays included (PLAN.md §3.3).
+#[test]
+fn s2_leave_strays_still_kills_on_term() {
+    let j = Job::new();
+    let script = format!("\"$0\" escape {m} '{r}'; exec /bin/sleep {m}", m = j.marker, r = j.rec());
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--leave-strays", "--", "sh", "-c", &script, fixture()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    while j.recorded().is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(10), "the escapee was not created");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = c.wait().unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.signal(), Some(libc::SIGTERM));
+    std::thread::sleep(Duration::from_millis(100));
+    let alive = j.alive();
+    assert!(alive.is_empty(), "TERM with --leave-strays left the job running: {alive:?}");
+}
+
+/// Linux `--mode none` (no subreaper): a member that was a descendant for a few scans and was
+/// then reparented away is still killed, because it was seen while running.
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_mode_none_kills_a_member_seen_while_running() {
+    let j = Job::new();
+    let st = run(&["--mode", "none"], &["escape-late", &j.marker, j.rec()]);
+    assert_eq!(st.code(), Some(0));
+    assert_eq!(j.recorded().len(), 1, "the member was not created");
+    std::thread::sleep(Duration::from_millis(100));
+    let alive = j.alive();
+    assert!(alive.is_empty(), "a member seen while running survived: {alive:?}");
+}
+
 /// The scan while running costs under 1 % CPU: a 3 s job costs at most 30 ms more CPU than
-/// an instant job (the difference is the scan; start-up is in both).
+/// an instant job (the difference is the scan; start-up is in both). Minimum of 3 samples each,
+/// so contention from other tests cannot inflate the result.
 #[test]
 fn s2_the_scan_costs_under_one_percent_cpu() {
     fn cpu(args: &[&str]) -> Duration {
@@ -165,7 +267,7 @@ fn s2_the_scan_costs_under_one_percent_cpu() {
     }
     let _ = cpu(&["true"]); // warm-up (the first launch is scanned by the OS)
     let base = (0..3).map(|_| cpu(&["true"])).min().unwrap();
-    let job = cpu(&["/bin/sleep", "3"]);
+    let job = (0..3).map(|_| cpu(&["/bin/sleep", "3"])).min().unwrap();
     let scan = job.saturating_sub(base);
     assert!(scan < Duration::from_millis(30), "the scan used {scan:?} of CPU in a 3 s run (> 1 %; start-up {base:?})");
 }
@@ -180,7 +282,8 @@ fn s2_cell24_a_member_that_redisclaims_after_it_was_seen_loses_nothing() {
     for _ in 0..3 {
         let j = Job::new();
         let st = run(&[], &["redisclaim", &j.marker, j.rec()]);
-        assert_eq!(st.code(), Some(0));
+        assert_eq!(st.code(), Some(0), "the fixture failed: C did not become responsible for itself");
+        assert_eq!(j.recorded().len(), 1, "GG was not created");
         std::thread::sleep(Duration::from_millis(100));
         let alive = j.alive();
         assert!(alive.is_empty(), "the stray of a re-disclaimed member survived: {alive:?}");
@@ -196,6 +299,7 @@ fn s2_a_self_disclaimed_child_is_caught_by_its_original_parent() {
         let j = Job::new();
         let st = run(&[], &["puniq-only", &j.marker, j.rec()]);
         assert_eq!(st.code(), Some(0));
+        assert_eq!(j.recorded().len(), 1, "D was not created, or it did not become responsible for itself");
         std::thread::sleep(Duration::from_millis(100));
         let alive = j.alive();
         assert!(alive.is_empty(), "a self-disclaimed child survived: {alive:?}");
@@ -207,16 +311,15 @@ fn s2_a_self_disclaimed_child_is_caught_by_its_original_parent() {
 #[cfg(target_os = "macos")]
 #[test]
 fn s2_a_failed_term_registration_still_wakes_on_term() {
-    use std::time::Instant;
     let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up
-    // five samples: without the fallback, TERM waits for the next 250 ms tick, whose phase is
-    // random, so a single sample lands under 100 ms about 40 % of the time
+    // five samples: without the fallback, TERM waits for the next 250 ms tick, whose phase
+    // against the TERM varies, so one sample can land under 100 ms
     for _ in 0..5 {
         let j = Job::new();
-        let mut c = Command::new(sheepdog())
+        let c = Command::new(sheepdog())
             .args(["run", "--", "/bin/sleep", &j.marker])
             .env("SHEEPDOG_TEST_KQ_SIG_EINVAL", "1")
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let t = Instant::now();
@@ -227,10 +330,85 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
         std::thread::sleep(Duration::from_millis(30));
         let k = Instant::now();
         unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
-        let st = c.wait().unwrap();
+        let out = c.wait_with_output().unwrap();
         let took = k.elapsed();
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(st.signal(), Some(libc::SIGTERM));
+        assert_eq!(out.status.signal(), Some(libc::SIGTERM));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("cannot watch TERM"), "the seam did not fail the TERM registration: {err}");
         assert!(took < Duration::from_millis(100), "TERM took {took:?} after a failed TERM registration");
     }
+}
+
+/// Review S2 A-P2-1 (macOS): a caller that is responsible for itself (a launchd job, an app
+/// helper) runs `bg & exec sheepdog run -- ...`. sheepdog keeps the caller's uniqueid across the
+/// exec, so the background job is responsible to it; it was not started by the job and must
+/// survive. Control: the same from a plain shell.
+#[cfg(target_os = "macos")]
+#[test]
+fn s2_a_self_responsible_callers_background_job_survives() {
+    for disclaimed in [false, true] {
+        let pidf = std::env::temp_dir().join(format!("sd-s2-bg-{}-{disclaimed}", std::process::id()));
+        let _ = std::fs::remove_file(&pidf);
+        let script = format!("/bin/sleep 30 & echo $! > '{}'; exec \"{}\" run -- true", pidf.display(), sheepdog());
+        let mut c = if disclaimed {
+            let mut c = Command::new(fixture());
+            c.args(["dspawn", "wait", "/bin/sh", "-c", &script]);
+            c
+        } else {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", &script]);
+            c
+        };
+        let st = c.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
+        let _ = std::fs::remove_file(&pidf);
+        let t = Instant::now();
+        let mut alive = true;
+        while t.elapsed() < Duration::from_millis(500) {
+            alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(st.code(), Some(0), "disclaimed caller={disclaimed}");
+        assert!(alive, "disclaimed caller={disclaimed}: the caller's background job was killed");
+    }
+}
+
+/// Review S2 A-P2-2 (macOS): the root starts a child with the disclaim and exits at once,
+/// before any scan saw it. The child's one fact is its original parent, the root: sheepdog must
+/// know the root's identity from its birth.
+#[cfg(target_os = "macos")]
+#[test]
+fn s2_a_fast_roots_disclaimed_child_is_killed() {
+    for i in 0..20 {
+        let j = Job::new();
+        let st = run(&[], &["dspawn", "/bin/sleep", &j.marker]);
+        assert_eq!(st.code(), Some(0), "run {i}: the fixture failed");
+        std::thread::sleep(Duration::from_millis(100));
+        let alive = j.alive();
+        assert!(alive.is_empty(), "run {i}: the fast root's disclaimed child survived: {alive:?}");
+    }
+}
+
+/// A stated limit (PLAN.md §3.2), not a guarantee: a member that re-disclaims and dies within
+/// one scan tick of starting GG loses GG (GG becomes responsible for itself, its `puniq` is 1,
+/// and no scan saw it). Run by hand to measure the window: `cargo test -- --ignored`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "stated limit: R growth has a one-tick window (PLAN.md §3.2)"]
+fn s2_limit_a_redisclaimed_member_that_dies_within_one_tick() {
+    let j = Job::new();
+    let st = Command::new(sheepdog())
+        .args(["run", "--", fixture(), "redisclaim", &j.marker, j.rec()])
+        .env("SD_C_LIFE_MS", "30")
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(0));
+    std::thread::sleep(Duration::from_millis(100));
+    let alive = j.alive();
+    assert!(alive.is_empty(), "GG survived (the stated one-tick window): {alive:?}");
 }

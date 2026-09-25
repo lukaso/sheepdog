@@ -52,12 +52,20 @@ pub struct Args {
 }
 
 /// A duration: "0", "2" (seconds), "2s", "500ms".
+/// `500ms`, `2s` or `2` (seconds, fractions allowed), at most one day. Anything else, including
+/// `inf` and `NaN`, is None (a usage error; `Duration::from_secs_f64` would panic on them).
 fn parse_duration(s: &str) -> Option<Duration> {
-    if let Some(ms) = s.strip_suffix("ms") {
-        return ms.parse().ok().map(Duration::from_millis);
-    }
-    let secs = s.strip_suffix('s').unwrap_or(s);
-    secs.parse::<f64>().ok().filter(|v| *v >= 0.0).map(Duration::from_secs_f64)
+    const MAX: Duration = Duration::from_secs(86_400);
+    let d = if let Some(ms) = s.strip_suffix("ms") {
+        Duration::from_millis(ms.parse().ok()?)
+    } else {
+        let secs: f64 = s.strip_suffix('s').unwrap_or(s).parse().ok()?;
+        if !(0.0..=MAX.as_secs_f64()).contains(&secs) {
+            return None;
+        }
+        Duration::from_secs_f64(secs)
+    };
+    (d <= MAX).then_some(d)
 }
 
 /// Arguments as C strings, byte for byte (non-UTF-8 arguments pass unchanged). An argument
@@ -199,12 +207,6 @@ pub struct Tracker {
     pub known: HashMap<i32, u64>,
     pub ever: std::collections::HashSet<u64>,
     pub r: std::collections::HashSet<u64>,
-    /// macOS: this process's uniqueid and the root's pid. sheepdog spawns only the root, so a
-    /// process whose original parent is sheepdog and that is not the root predates the job (a
-    /// shell's `cmd & exec sheepdog ...` keeps the uniqueid across the exec): not a member
-    /// through `puniq`. The root's pid cannot be reused while the root is our child.
-    pub me: u64,
-    pub root: i32,
 }
 
 impl Tracker {
@@ -452,6 +454,34 @@ pub fn consume(sig: c_int) -> bool {
         libc::signal(sig, libc::SIG_DFL);
         true
     }
+}
+
+/// Does this process already have children (for example a shell's background job before it
+/// `exec`ed sheepdog)? waitid with WNOWAIT answers atomically without /proc and without reaping
+/// anything (review round 4, P3-3).
+pub fn has_children() -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    r == 0
+}
+
+/// Die the way the supervisor died: death by signal N stays death by signal N for our caller,
+/// which shells rely on (for example to stop a loop on ctrl-C: review round 4, P2-1).
+pub fn die_like(status: libc::c_int) -> i32 {
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        unsafe {
+            let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+            libc::signal(sig, libc::SIG_DFL);
+            let mut one: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut one);
+            libc::sigaddset(&mut one, sig);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+    }
+    code_of(status)
 }
 
 /// Before the root is spawned: a TERM that is already pending (the caller blocked TERM and it

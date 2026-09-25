@@ -141,34 +141,6 @@ fn poll_fd(fd: i32, ms: i32) {
     unsafe { libc::poll(&mut p, 1, ms) };
 }
 
-/// Does this process already have children (for example a shell's background job before it
-/// `exec`ed sheepdog)? waitid with WNOWAIT answers atomically without /proc and without reaping
-/// anything (review round 4, P3-3).
-fn has_children() -> bool {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let r = unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
-    r == 0
-}
-
-/// Die the way the supervisor died: death by signal N stays death by signal N for our caller,
-/// which shells rely on (for example to stop a loop on ctrl-C: review round 4, P2-1).
-fn die_like(status: libc::c_int) -> i32 {
-    if libc::WIFSIGNALED(status) {
-        let sig = libc::WTERMSIG(status);
-        unsafe {
-            let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-            libc::setrlimit(libc::RLIMIT_CORE, &no_core);
-            libc::signal(sig, libc::SIG_DFL);
-            let mut one: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut one);
-            libc::sigaddset(&mut one, sig);
-            libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
-            libc::raise(sig);
-        }
-    }
-    code_of(status)
-}
-
 /// If sheepdog starts with children it did not create, it must not become their subreaper, or
 /// it adopts them and their orphans as members (review round 3). So it forks once, before
 /// anything else: the child is a fresh supervisor with no children; this process becomes the
@@ -186,7 +158,7 @@ fn die_like(status: libc::c_int) -> i32 {
 /// The supervisor gets PR_SET_PDEATHSIG(SIGTERM): if the relay is killed, the supervisor is
 /// told to end the job instead of running on unseen (review round 4, P3-2).
 fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
-    if !has_children() {
+    if !crate::has_children() {
         return None;
     }
     // A TERM that is pending now would stay in the relay (pending signals are not inherited
@@ -233,7 +205,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                         if fd >= 0 {
                             libc::close(fd);
                         }
-                        return Some(die_like(st));
+                        return Some(crate::die_like(st));
                     }
                     let got = if fd >= 0 {
                         poll_fd(fd, 1000);

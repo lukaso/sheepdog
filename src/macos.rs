@@ -118,7 +118,7 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
         for i in &infos {
             let member = t.ever.contains(&i.uniq)
                 || i.resp.map_or(false, |r| t.r.contains(&r))
-                || (t.ever.contains(&i.puniq) && !(i.puniq == t.me && i.pid != t.root));
+                || t.ever.contains(&i.puniq);
             if member {
                 changed |= t.ever.insert(i.uniq);
                 if i.resp == Some(i.uniq) {
@@ -200,7 +200,9 @@ fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool 
 /// Spawn the root. Its signal dispositions are the caller's (sheepdog changes none except
 /// SIGCHLD, set to default: `#![no_main]`, see main.rs), and its mask is set to the caller's
 /// with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked). PLAN.md §3.1, cell 23.
-fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) -> pid_t {
+/// Spawn the root with the caller's mask. `suspended`: it starts stopped before its first
+/// instruction, so its identity can be read before it can start or leave anything.
+fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &libc::sigset_t) -> pid_t {
     let argv = cstrings(cmd).unwrap_or_else(|e| {
         say!("sheepdog: {e}");
         std::process::exit(125)
@@ -213,7 +215,11 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) ->
         libc::posix_spawnattr_init(&mut attr);
         // the root gets the caller's mask (sheepdog blocks TERM and SIGCHLD for itself)
         libc::posix_spawnattr_setsigmask(&mut attr, caller_mask);
-        libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSIGMASK as i16);
+        let mut flags = libc::POSIX_SPAWN_SETSIGMASK;
+        if suspended {
+            flags |= libc::POSIX_SPAWN_START_SUSPENDED;
+        }
+        libc::posix_spawnattr_setflags(&mut attr, flags as i16);
         if disclaim_root {
             if let Some(d) = sym::<Disclaim>("responsibility_spawnattrs_setdisclaim") {
                 d(&mut attr, 1);
@@ -229,6 +235,112 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) ->
     pid
 }
 
+/// Env var that carries the relay's pid across the supervisor's re-exec; removed before the root
+/// is spawned.
+const RELAY_PID: &str = "SHEEPDOG_RELAY_PID";
+
+/// If sheepdog starts with children it did not create, it forks once, first: the child is a
+/// fresh supervisor, and this process becomes the relay. The reason on macOS is identity: a
+/// shell's `bg & exec sheepdog` keeps the shell's uniqueid, so a background job the caller
+/// started is responsible to (or a child of) that uniqueid and would count as a member. The
+/// fresh supervisor has a uniqueid nothing else refers to (S2 review, A-P2-1). Returns
+/// Some(code) in the relay, None in the supervisor.
+///
+/// The relay, as on Linux (PLAN.md §3.1): forwards TERM; forwards HUP only when it is the
+/// session leader; never forwards INT (a terminal INT reaches the whole group); dies the way
+/// the supervisor died. macOS has no PDEATHSIG, so the supervisor watches the relay itself and
+/// raises TERM when it dies (`relay_gone`).
+fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
+    if !crate::has_children() {
+        return None;
+    }
+    // a TERM pending now would stay in the relay (pending signals are not inherited across fork)
+    if sig.watch_term && crate::term_pending() {
+        return Some(crate::die_by_term(143));
+    }
+    unsafe {
+        let relay = libc::getpid();
+        let mut set: libc::sigset_t = zeroed();
+        libc::sigemptyset(&mut set);
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
+            libc::sigaddset(&mut set, s);
+        }
+        let mut old: libc::sigset_t = zeroed();
+        libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old);
+        match libc::fork() {
+            0 => {
+                std::env::set_var(RELAY_PID, relay.to_string());
+                libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                None
+            }
+            -1 => {
+                libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+                say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
+                Some(125)
+            }
+            sup => Some(relay_loop(sup, relay)),
+        }
+    }
+}
+
+/// The relay's loop: a kqueue on the supervisor's exit and on TERM/HUP/INT (all blocked; a
+/// kqueue signal event is only a wake-up, the signal is taken with `consume`).
+fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
+    unsafe {
+        let kq = libc::kqueue();
+        if kq >= 0 {
+            let mut ev: libc::kevent = zeroed();
+            ev.ident = sup as usize;
+            ev.filter = libc::EVFILT_PROC;
+            ev.flags = libc::EV_ADD;
+            ev.fflags = libc::NOTE_EXIT;
+            libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+            for s in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+                let mut ev: libc::kevent = zeroed();
+                ev.ident = s as usize;
+                ev.filter = libc::EVFILT_SIGNAL;
+                ev.flags = libc::EV_ADD;
+                libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+            }
+        }
+        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
+        loop {
+            let mut st = 0;
+            if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
+                if kq >= 0 {
+                    libc::close(kq);
+                }
+                return crate::die_like(st);
+            }
+            if crate::consume(libc::SIGTERM) {
+                libc::kill(sup, libc::SIGTERM);
+            }
+            if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
+                libc::kill(sup, libc::SIGHUP);
+            }
+            crate::consume(libc::SIGINT); // never forwarded: the terminal sent it to the group
+            if kq >= 0 {
+                // a registration that failed only costs this bounded wait
+                let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
+                let mut ev: libc::kevent = zeroed();
+                libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// The supervisor under a relay: if the relay has died (this process was reparented), raise
+/// TERM, as Linux's PR_SET_PDEATHSIG does; the TERM paths then end the job.
+fn relay_gone(relay: Option<pid_t>) {
+    if let Some(r) = relay {
+        if unsafe { libc::getppid() } != r {
+            unsafe { libc::raise(libc::SIGTERM) };
+        }
+    }
+}
+
 /// The event loop's wait (PHASE1.md §1): returns the root's exit code, or None if the job
 /// must be ended because of TERM.
 ///
@@ -242,7 +354,7 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) ->
 /// - One fixed order when events coincide (round-7 P3-F4): TERM, then the root's exit.
 /// - Any other kqueue failure: poll every 50 ms. A blocked TERM stays pending, so polling
 ///   loses nothing; it never falls into a blocking wait that ignores TERM.
-fn wait(pid: pid_t, watch_term: bool, track: &mut dyn FnMut()) -> Option<i32> {
+fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMut()) -> Option<i32> {
     unsafe {
         let kq = libc::kqueue();
         let mut polling = kq < 0;
@@ -287,11 +399,22 @@ fn wait(pid: pid_t, watch_term: bool, track: &mut dyn FnMut()) -> Option<i32> {
                     polling = true;
                 }
             }
+            // the relay's exit only wakes the loop (relay_gone decides); if it cannot be
+            // watched, the 250 ms tick bounds the delay
+            if let Some(r) = relay {
+                let mut ev: libc::kevent = zeroed();
+                ev.ident = r as usize;
+                ev.filter = libc::EVFILT_PROC;
+                ev.flags = libc::EV_ADD;
+                ev.fflags = libc::NOTE_EXIT;
+                libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+            }
         }
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
         let mut exited: Option<i32> = None;
         let result = loop {
+            relay_gone(relay);
             let term = watch_term && crate::consume(libc::SIGTERM);
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(code_of(st));
@@ -318,8 +441,10 @@ fn wait(pid: pid_t, watch_term: bool, track: &mut dyn FnMut()) -> Option<i32> {
             let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
             track(); // membership while running (a tick or an event)
-            if r > 0 && ev.filter == libc::EVFILT_PROC {
-                // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit)
+            if r > 0 && ev.filter == libc::EVFILT_PROC && ev.ident == pid as usize {
+                // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit).
+                // Only the root's event: the relay's exit is also an EVFILT_PROC event, and a
+                // blocking wait for a root that still runs would hang the loop.
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
             } else if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
                 say!("sheepdog: kqueue failed ({}); polling instead", std::io::Error::last_os_error());
@@ -336,8 +461,14 @@ fn wait(pid: pid_t, watch_term: bool, track: &mut dyn FnMut()) -> Option<i32> {
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     match a.mode.as_deref() {
         None | Some("responsible") => {
+            if let Some(code) = relay_if_needed(sig) {
+                return code;
+            }
             let ok = become_responsible(&a.argv, &sig.caller_mask);
             std::env::remove_var(REEXEC_MARK);
+            let relay: Option<pid_t> = std::env::var(RELAY_PID).ok().and_then(|v| v.parse().ok());
+            std::env::remove_var(RELAY_PID);
+            relay_gone(relay); // the relay died before this point: TERM is now pending
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
@@ -348,15 +479,19 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let tracker = std::cell::RefCell::new(crate::Tracker::default());
             tracker.borrow_mut().r.insert(me);
             tracker.borrow_mut().ever.insert(me);
-            let root = spawn(&a.cmd, false, &sig.caller_mask);
-            tracker.borrow_mut().me = me;
-            tracker.borrow_mut().root = root;
+            // the root's identity is known from its birth: a child it starts with the disclaim
+            // has only `puniq` = the root as its fact, even if the root exits before any scan
+            let root = spawn(&a.cmd, false, true, &sig.caller_mask);
+            if let Some((u, _)) = uniq(root) {
+                tracker.borrow_mut().ever.insert(u);
+            }
+            unsafe { libc::kill(root, libc::SIGCONT) };
             let mut track = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);
                 t.refresh(found);
             };
-            let code = wait(root, sig.watch_term, &mut track);
+            let code = wait(root, sig.watch_term, relay, &mut track);
             if a.leave_strays && code.is_some() {
                 return code.unwrap_or(125);
             }
@@ -387,9 +522,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }
-            let root = spawn(&a.cmd, true, &sig.caller_mask);
+            let root = spawn(&a.cmd, true, false, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
-            let code = wait(root, sig.watch_term, &mut || {});
+            let code = wait(root, sig.watch_term, None, &mut || {});
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal, Default::default());
             if code.is_none() && result.is_ok() {
                 return crate::die_by_term(143);
