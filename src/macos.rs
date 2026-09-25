@@ -57,11 +57,15 @@ pub fn uniq(pid: pid_t) -> Option<(u64, u64)> {
 /// The uniqueid of the process responsible for `pid`; None means "no fact" (PLAN.md §3.2).
 pub fn resp_uniq(pid: pid_t) -> Option<u64> {
     // Test seam (debug builds only): SHEEPDOG_TEST_SPI=broken makes the SPI answer "no fact".
-    if cfg!(debug_assertions) && std::env::var("SHEEPDOG_TEST_SPI").as_deref() == Ok("broken") {
-        return None;
-    }
-    let f: RespUniq = sym("responsibility_get_uniqueid_responsible_for_pid")?;
-    let v = unsafe { f(pid) };
+    // Both are resolved once: the scan calls this for every process on every tick.
+    static F: std::sync::OnceLock<Option<RespUniq>> = std::sync::OnceLock::new();
+    let f = *F.get_or_init(|| {
+        if cfg!(debug_assertions) && std::env::var("SHEEPDOG_TEST_SPI").as_deref() == Ok("broken") {
+            return None;
+        }
+        sym("responsibility_get_uniqueid_responsible_for_pid")
+    });
+    let v = unsafe { f?(pid) };
     (v != 0 && v != u64::MAX).then_some(v)
 }
 
@@ -81,6 +85,52 @@ fn all_pids() -> Vec<pid_t> {
     let got = unsafe { libc::proc_listallpids(buf.as_mut_ptr() as *mut c_void, bytes) };
     buf.truncate(got.max(0) as usize);
     buf
+}
+
+struct Info {
+    pid: pid_t,
+    uniq: u64,
+    puniq: u64,
+    resp: Option<u64>,
+}
+
+/// The members of the job right now (PLAN.md §3.2, macOS), updating the tracker: a live,
+/// same-uid process (not a zombie, not sheepdog) is a member if its responsible uniqueid is in
+/// R, or its original parent's uniqueid (`puniq`) is one ever seen as a member. Iterated to a
+/// fixed point within one scan, so a chain found in one scan counts at once. A member that is
+/// responsible for itself (it re-disclaimed: an inner sheepdog, an app helper started inside
+/// the job) joins R, so its own children are members through responsibility too.
+pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
+    let me = unsafe { libc::getpid() };
+    let uid = unsafe { libc::getuid() };
+    let infos: Vec<Info> = all_pids()
+        .into_iter()
+        .filter(|&p| p != me && p > 0)
+        // bsd() fails for a zombie or a gone process, so it also filters those
+        .filter(|&p| bsd(p).map_or(false, |b| b.pbi_uid == uid))
+        .filter_map(|p| {
+            let (u, pu) = uniq(p)?;
+            Some(Info { pid: p, uniq: u, puniq: pu, resp: resp_uniq(p) })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for i in &infos {
+            let member = t.ever.contains(&i.uniq)
+                || i.resp.map_or(false, |r| t.r.contains(&r))
+                || (t.ever.contains(&i.puniq) && !(i.puniq == t.me && i.pid != t.root));
+            if member {
+                changed |= t.ever.insert(i.uniq);
+                if i.resp == Some(i.uniq) {
+                    changed |= t.r.insert(i.uniq);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    infos.iter().filter(|i| t.ever.contains(&i.uniq)).map(|i| (i.pid, i.uniq)).collect()
 }
 
 /// Live, same-uid processes (not zombies) other than this one, whose responsible uniqueid is
@@ -192,7 +242,7 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) ->
 /// - One fixed order when events coincide (round-7 P3-F4): TERM, then the root's exit.
 /// - Any other kqueue failure: poll every 50 ms. A blocked TERM stays pending, so polling
 ///   loses nothing; it never falls into a blocking wait that ignores TERM.
-fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
+fn wait(pid: pid_t, watch_term: bool, track: &mut dyn FnMut()) -> Option<i32> {
     unsafe {
         let kq = libc::kqueue();
         let mut polling = kq < 0;
@@ -202,6 +252,8 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
         // NOTE_EXIT registration only (TERM still registers: the hazardous combination).
         let mut proc_exiting = false;
         let force_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_EINVAL");
+        // debug seam: fail only the TERM registration (S1 fix review, P3-2)
+        let force_sig_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_SIG_EINVAL");
         if !polling {
             let mut ch: [libc::kevent; 2] = zeroed();
             ch[0].ident = pid as usize;
@@ -212,7 +264,7 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
             ch[1].filter = libc::EVFILT_SIGNAL;
             ch[1].flags = libc::EV_ADD;
             let reg = |c: &libc::kevent| -> Result<(), i32> {
-                if force_einval && c.filter == libc::EVFILT_PROC {
+                if (force_einval && c.filter == libc::EVFILT_PROC) || (force_sig_einval && c.filter == libc::EVFILT_SIGNAL) {
                     return Err(libc::EINVAL);
                 }
                 if libc::kevent(kq, c, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 {
@@ -259,11 +311,13 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
             if polling {
                 std::thread::sleep(std::time::Duration::from_millis(50));
+                track();
                 continue;
             }
             let mut ev: libc::kevent = zeroed();
             let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
+            track(); // membership while running (a tick or an event)
             if r > 0 && ev.filter == libc::EVFILT_PROC {
                 // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit)
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
@@ -291,9 +345,33 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }
+            let tracker = std::cell::RefCell::new(crate::Tracker::default());
+            tracker.borrow_mut().r.insert(me);
+            tracker.borrow_mut().ever.insert(me);
             let root = spawn(&a.cmd, false, &sig.caller_mask);
-            let code = wait(root, sig.watch_term);
-            let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal);
+            tracker.borrow_mut().me = me;
+            tracker.borrow_mut().root = root;
+            let mut track = || {
+                let mut t = tracker.borrow_mut();
+                let found = members(&mut t);
+                t.refresh(found);
+            };
+            let code = wait(root, sig.watch_term, &mut track);
+            if a.leave_strays && code.is_some() {
+                return code.unwrap_or(125);
+            }
+            let initial = tracker.borrow().known.clone();
+            let result = kill_tree(
+                &crate::KillOpts::from_env().with_grace(a.grace),
+                || {
+                    let mut t = tracker.borrow_mut();
+                    members(&mut t)
+                },
+                || {},
+                || None,
+                crate::signal,
+                initial,
+            );
             if code.is_none() {
                 let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
                 if result.is_ok() {
@@ -311,8 +389,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             let root = spawn(&a.cmd, true, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
-            let code = wait(root, sig.watch_term);
-            let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal);
+            let code = wait(root, sig.watch_term, &mut || {});
+            let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal, Default::default());
             if code.is_none() && result.is_ok() {
                 return crate::die_by_term(143);
             }

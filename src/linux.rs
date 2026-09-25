@@ -297,7 +297,11 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let fd = signal_fd(&waitset);
     crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
     let mut exited: Option<i32> = None;
+    // membership while running (PLAN.md §3.2): a member seen on any tick is killed at the end
+    // even if it is no longer a descendant by then (sticky, by identity)
+    let mut tracker = crate::Tracker::default();
     let code = loop {
+        tracker.refresh(descendants(me));
         let term = if fd >= 0 {
             drain(fd).contains(&libc::SIGTERM)
         } else {
@@ -329,12 +333,16 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
+    if a.leave_strays && code.is_some() {
+        return code.unwrap_or(125);
+    }
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
-    let opts = crate::KillOpts::from_env();
+    let opts = crate::KillOpts::from_env().with_grace(a.grace);
+    let initial = tracker.known;
     let result = if is_subreaper {
-        kill_tree(&opts, || descendants(me), reap, tree_empty, crate::signal)
+        kill_tree(&opts, || descendants(me), reap, tree_empty, crate::signal, initial)
     } else {
-        kill_tree(&opts, || descendants(me), reap, || None, crate::signal)
+        kill_tree(&opts, || descendants(me), reap, || None, crate::signal, initial)
     };
     reap();
     if code.is_none() && result.is_ok() {

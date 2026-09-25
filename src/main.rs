@@ -45,6 +45,19 @@ pub struct Args {
     pub argv: Vec<OsString>,
     pub mode: Option<String>,
     pub cmd: Vec<OsString>,
+    /// §3.3 step 1: how long members get after TERM before SIGKILL (default 2 s)
+    pub grace: Duration,
+    /// skip the kill when the root exits normally (a TERM still ends the job)
+    pub leave_strays: bool,
+}
+
+/// A duration: "0", "2" (seconds), "2s", "500ms".
+fn parse_duration(s: &str) -> Option<Duration> {
+    if let Some(ms) = s.strip_suffix("ms") {
+        return ms.parse().ok().map(Duration::from_millis);
+    }
+    let secs = s.strip_suffix('s').unwrap_or(s);
+    secs.parse::<f64>().ok().filter(|v| *v >= 0.0).map(Duration::from_secs_f64)
 }
 
 /// Arguments as C strings, byte for byte (non-UTF-8 arguments pass unchanged). An argument
@@ -57,7 +70,7 @@ pub fn cstrings(v: &[OsString]) -> Result<Vec<CString>, String> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--mode M] -- command [args...]");
     125
 }
 
@@ -68,12 +81,22 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     }
     let sep = args.iter().position(|a| a.as_bytes() == b"--").ok_or_else(usage)?;
     let mut mode = None;
+    let mut grace = Duration::from_secs(2);
+    let mut leave_strays = false;
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
             b"--mode" if i + 1 < sep => {
                 mode = Some(args[i + 1].to_string_lossy().into_owned());
                 i += 2;
+            }
+            b"--grace" if i + 1 < sep => {
+                grace = parse_duration(&args[i + 1].to_string_lossy()).ok_or_else(usage)?;
+                i += 2;
+            }
+            b"--leave-strays" => {
+                leave_strays = true;
+                i += 1;
             }
             _ => return Err(usage()),
         }
@@ -82,7 +105,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd })
+    Ok(Args { argv, mode, cmd, grace, leave_strays })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -135,6 +158,8 @@ fn seam(name: &str) -> bool {
 /// seams exist only in debug builds.
 pub struct KillOpts {
     pub deadline: Duration,
+    /// §3.3 step 1: TERM (then CONT) every member, and give them this long to exit
+    pub grace: Duration,
     /// hide every member from all scans after the first one that reported it (cell 24-lite)
     pub forget: bool,
     /// every emptiness check answers "not empty" (the deadline-bound test)
@@ -144,8 +169,14 @@ pub struct KillOpts {
 }
 
 impl KillOpts {
+    pub fn with_grace(mut self, grace: Duration) -> Self {
+        self.grace = grace;
+        self
+    }
+
     pub fn from_env() -> Self {
         KillOpts {
+            grace: Duration::ZERO,
             deadline: std::env::var("SHEEPDOG_TEST_DEADLINE_MS")
                 .ok()
                 .filter(|_| cfg!(debug_assertions))
@@ -156,6 +187,40 @@ impl KillOpts {
             never_empty: seam("SHEEPDOG_TEST_NEVER_EMPTY"),
             panic_after_stop: seam("SHEEPDOG_TEST_PANIC_AFTER_STOP"),
         }
+    }
+}
+
+/// Membership while the job runs (PLAN.md §3.2): the sticky map of live members, every
+/// identity ever seen as a member (macOS: the `puniq` fact looks parents up here, and it must
+/// still hold after a parent has exited), and R, the responsible identities (macOS: the
+/// supervisor plus members that became responsible for themselves).
+#[derive(Default)]
+pub struct Tracker {
+    pub known: HashMap<i32, u64>,
+    pub ever: std::collections::HashSet<u64>,
+    pub r: std::collections::HashSet<u64>,
+    /// macOS: this process's uniqueid and the root's pid. sheepdog spawns only the root, so a
+    /// process whose original parent is sheepdog and that is not the root predates the job (a
+    /// shell's `cmd & exec sheepdog ...` keeps the uniqueid across the exec): not a member
+    /// through `puniq`. The root's pid cannot be reused while the root is our child.
+    pub me: u64,
+    pub root: i32,
+}
+
+impl Tracker {
+    /// Add freshly found members to the sticky map (replacing an entry only if the old
+    /// process is gone) and drop members confirmed dead.
+    pub fn refresh(&mut self, found: Vec<(i32, u64)>) {
+        for (p, id) in found {
+            self.ever.insert(id);
+            match self.known.get(&p) {
+                Some(&old) if same(p, old) => {}
+                _ => {
+                    self.known.insert(p, id);
+                }
+            }
+        }
+        self.known.retain(|&p, &mut id| same(p, id));
     }
 }
 
@@ -176,7 +241,7 @@ pub fn kill_failed(e: KillError) -> i32 {
     }
 }
 
-/// PLAN.md §3.3 steps 2-6 (the spike still omits the TERM grace).
+/// PLAN.md §3.3: the TERM grace (step 1), then the freeze-and-kill passes (steps 2-6).
 ///
 /// - `members` returns the live members right now as (pid, identity).
 /// - `reap` runs every pass (Linux reaps adopted orphans).
@@ -197,8 +262,9 @@ pub fn kill_tree(
     reap: impl FnMut(),
     tree_empty: impl FnMut() -> Option<bool>,
     send: impl FnMut(i32, u64, c_int),
+    initial: HashMap<i32, u64>,
 ) -> Result<(), KillError> {
-    let known: std::cell::RefCell<HashMap<i32, u64>> = Default::default();
+    let known: std::cell::RefCell<HashMap<i32, u64>> = std::cell::RefCell::new(initial);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         kill_loop(opts, members, reap, tree_empty, send, &known)
     }));
@@ -250,6 +316,31 @@ fn kill_loop(
         }
         known.retain(|&p, &mut id| same(p, id));
     };
+    // §3.3 step 1, the grace: TERM then CONT every member (a stopped member acts on TERM only
+    // once it runs), newly found ones too, until all are gone or the grace is over
+    if !opts.grace.is_zero() {
+        let grace_end = Instant::now() + opts.grace;
+        let mut termed: std::collections::HashSet<(i32, u64)> = std::collections::HashSet::new();
+        loop {
+            reap();
+            refresh(&mut known.borrow_mut(), scan());
+            let now: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+            for &(p, id) in &now {
+                if termed.insert((p, id)) {
+                    send(p, id, libc::SIGTERM);
+                    send(p, id, libc::SIGCONT);
+                }
+            }
+            if now.is_empty() && empty_check() != Some(false) {
+                break;
+            }
+            if Instant::now() > grace_end {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let deadline = deadline + opts.grace;
     let mut empty = 0;
     loop {
         reap();
@@ -445,7 +536,7 @@ mod tests {
         let pid = child.id() as i32;
         let id = sheepdog::ident::identity(pid).unwrap();
         let mut calls = 0;
-        let opts = KillOpts { deadline: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false };
+        let opts = KillOpts { deadline: Duration::ZERO, grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false };
         let r = kill_tree(
             &opts,
             || {
@@ -455,6 +546,7 @@ mod tests {
             || {},
             || None,
             |_, _, _| {}, // never signal: the member stays alive
+            HashMap::new(),
         );
         let _ = child.kill();
         let _ = child.wait();

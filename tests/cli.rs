@@ -254,22 +254,26 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
 /// on Linux: the subreaper supervisor killed it as a member).
 #[test]
 fn a_background_job_started_before_sheepdog_is_not_killed() {
-    let marker = format!("28.{}777001", std::process::id());
-    let script = format!("/bin/sleep {marker} & exec \"$0\" run -- true");
+    // the job's pid comes from `$!`, so the check does not depend on the job having exec'd yet
+    let pidf = std::env::temp_dir().join(format!("sd-bg-{}", std::process::id()));
+    let _ = std::fs::remove_file(&pidf);
+    let script = format!("/bin/sleep 30 & echo $! > '{}'; exec \"$0\" run -- true", pidf.display());
     let st = Command::new("sh").args(["-c", &script, sheepdog()]).status().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
-    assert!(out.status.success());
-    let alive: Vec<i32> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.split_whitespace().any(|w| w == marker))
-        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
-        .collect();
-    for &p in &alive {
-        unsafe { libc::kill(p, libc::SIGKILL) };
+    let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
+    let _ = std::fs::remove_file(&pidf);
+    // sheepdog has exited, so a job it killed is reaped by init promptly: wait for that, bounded
+    let t = Instant::now();
+    let mut alive = true;
+    while t.elapsed() < Duration::from_millis(500) {
+        alive = unsafe { libc::kill(pid, 0) } == 0;
+        if !alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
+    unsafe { libc::kill(pid, libc::SIGKILL) };
     assert_eq!(st.code(), Some(0));
-    assert_eq!(alive.len(), 1, "the caller's background job was killed");
+    assert!(alive, "the caller's background job was killed");
 }
 
 /// Review round 3, F7: a panic after the freeze must not leave members stopped. Debug seam
@@ -280,7 +284,8 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     let rec = std::env::temp_dir().join(format!("sd-panic-{}", std::process::id()));
     let _ = std::fs::remove_file(&rec);
     let st = Command::new(sheepdog())
-        .args(["run", "--", fixture(), "escape", &marker])
+        // --grace 0: the TERM grace would end the escapee before the freeze is reached
+        .args(["run", "--grace", "0", "--", fixture(), "escape", &marker])
         .arg(&rec)
         .env("SHEEPDOG_TEST_PANIC_AFTER_STOP", "1")
         .stdout(Stdio::null())

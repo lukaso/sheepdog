@@ -148,6 +148,23 @@ fn s1_a_term_during_the_reexec_means_the_root_never_runs() {
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM));
 }
 
+/// Exited but not reaped.
+fn is_zombie(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rsplit_once(')').and_then(|(_, r)| r.trim_start().chars().next()))
+            == Some('Z')
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // proc_pidinfo fails for a zombie; ps reads the process table (sysctl)
+        let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().expect("ps");
+        String::from_utf8_lossy(&out.stdout).trim_start().starts_with('Z')
+    }
+}
+
 /// P3-F4: TERM and the root's exit in ONE wake: TERM wins, on both OSes (sheepdog dies of
 /// SIGTERM, not with the root's code). The seam holds the loop while both happen.
 #[test]
@@ -156,15 +173,22 @@ fn s1_term_and_root_exit_in_one_wake_term_wins() {
     // inside the window, then the root exits and TERM arrives: both wait for the next wake
     let done = tmp("f4-root-done");
     let _ = std::fs::remove_file(&done);
-    let script = format!("sleep 0.1; touch '{}'; exit 7", done.display());
+    let script = format!("sleep 0.1; echo $$ > '{}'; exit 7", done.display());
     let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500", "f4", &["sh", "-c", &script], false);
-    // the root writes its marker right before it exits: wait for it, so TERM really coincides
+    // the root writes its pid right before it exits: wait until it is a zombie (exited, not yet
+    // reaped, since the loop is held in the window), so TERM really coincides
     let t = Instant::now();
-    while !done.exists() {
+    let root = loop {
+        if let Some(p) = std::fs::read_to_string(&done).ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+            break p;
+        }
         assert!(t.elapsed() < Duration::from_secs(1), "the root never reached its exit (the window would close first)");
         std::thread::sleep(Duration::from_millis(2));
+    };
+    while !is_zombie(root) {
+        assert!(t.elapsed() < Duration::from_secs(1), "the root never became a zombie");
+        std::thread::sleep(Duration::from_millis(2));
     }
-    std::thread::sleep(Duration::from_millis(50)); // the root's `exit` right after its marker
     let _ = std::fs::remove_file(&done);
     unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
     let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
