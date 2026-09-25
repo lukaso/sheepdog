@@ -64,6 +64,16 @@ fn in_window(seam: &str, ms: &str, tag: &str, root: &[&str], pre_block_term: boo
     child
 }
 
+/// Is a `/bin/sleep <marker>` process running, per `ps -Ao args=` output? The program must
+/// be `/bin/sleep`: sheepdog's own argv also contains the marker (`run -- /bin/sleep <marker>`),
+/// and matching it would "see" the root before it exists.
+fn root_running(ps: &str, marker: &str) -> bool {
+    ps.lines().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && w[0] == "/bin/sleep" && w[1] == marker
+    })
+}
+
 /// P3-F1: once the root exits, sheepdog exits within 100 ms, in every run (NOTE_EXIT can
 /// arrive before the root is reapable; the loop must then reap it with a blocking wait,
 /// not sleep through a timeout).
@@ -88,9 +98,15 @@ fn s1_exit_follows_the_root_within_100ms_every_time() {
 fn s1_a_term_pending_at_start_means_the_root_never_runs() {
     let started = tmp("f2-started");
     let _ = std::fs::remove_file(&started);
+    // control: without a pending TERM the same root does run (the root resolves on every image)
+    let ctl = tmp("f2-control");
+    let _ = std::fs::remove_file(&ctl);
+    Command::new(sheepdog()).args(["run", "--", "touch"]).arg(&ctl).status().unwrap();
+    assert!(ctl.exists(), "control: the root did not run without a TERM");
+    let _ = std::fs::remove_file(&ctl);
     let mut c = unsafe {
         Command::new(sheepdog())
-            .args(["run", "--", "/usr/bin/touch"])
+            .args(["run", "--", "touch"])
             .arg(&started)
             .env("SHEEPDOG_TEST_SLEEP_BEFORE_SPAWN_MS", "300")
             .env("SHEEPDOG_TEST_READY_FILE", tmp("f2-ready"))
@@ -138,8 +154,18 @@ fn s1_a_term_during_the_reexec_means_the_root_never_runs() {
 fn s1_term_and_root_exit_in_one_wake_term_wins() {
     // the root is still alive when the window opens (it exits after 100 ms), so the loop is
     // inside the window, then the root exits and TERM arrives: both wait for the next wake
-    let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "600", "f4", &["sh", "-c", "sleep 0.1; exit 7"], false);
-    std::thread::sleep(Duration::from_millis(300)); // the root's own 100 ms, with margin (not a start-up guess)
+    let done = tmp("f4-root-done");
+    let _ = std::fs::remove_file(&done);
+    let script = format!("sleep 0.1; touch '{}'; exit 7", done.display());
+    let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500", "f4", &["sh", "-c", &script], false);
+    // the root writes its marker right before it exits: wait for it, so TERM really coincides
+    let t = Instant::now();
+    while !done.exists() {
+        assert!(t.elapsed() < Duration::from_secs(1), "the root never reached its exit (the window would close first)");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    std::thread::sleep(Duration::from_millis(50)); // the root's `exit` right after its marker
+    let _ = std::fs::remove_file(&done);
     unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
     let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
     assert_eq!(st.signal(), Some(libc::SIGTERM), "the root's exit won over TERM: {st:?}");
@@ -171,4 +197,108 @@ fn s1_the_root_holds_no_signalfd() {
     let fds = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "the root failed: {fds}");
     assert!(!fds.contains("signalfd"), "the root inherited a signalfd:\n{fds}");
+}
+
+/// P2-2 (S1 review): the loop wakes on TERM itself, not on its 250 ms tick. With a live root
+/// and sheepdog blocked in its wait, TERM ends the job well under the tick, every time.
+#[test]
+fn s1_term_wakes_the_loop_at_once() {
+    let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up (first-launch scan)
+    let mut worst = Duration::ZERO;
+    for i in 0..10 {
+        let root = format!("23.{}112{:03}", std::process::id(), i);
+        let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sleep", &root]).spawn().unwrap();
+        // readiness: the root exists, so sheepdog is in (or about to enter) its wait
+        let t = Instant::now();
+        loop {
+            let out = Command::new("ps").args(["-Ao", "args="]).output().unwrap();
+            if root_running(&String::from_utf8_lossy(&out.stdout), &root) {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "the root never started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(30)); // let sheepdog block in its wait
+        let k = Instant::now();
+        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+        let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
+        worst = worst.max(k.elapsed());
+        let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+        assert_eq!(st.signal(), Some(libc::SIGTERM));
+    }
+    assert!(worst < Duration::from_millis(100), "TERM took {worst:?} to end the job (the 250 ms tick, not a wake-up?)");
+}
+
+/// P3-b (S1 review, macOS): a kqueue registration that fails with anything but ESRCH falls
+/// back to polling; TERM still ends the job (debug seam forces EINVAL).
+#[cfg(target_os = "macos")]
+#[test]
+fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
+    let root = format!("23.{}113001", std::process::id());
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--", "/bin/sleep", &root])
+        .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    loop {
+        let out = Command::new("ps").args(["-Ao", "args="]).output().unwrap();
+        if root_running(&String::from_utf8_lossy(&out.stdout), &root) {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(10), "the root never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(50)); // the root exists: let sheepdog settle into its wait
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = wait_bounded(&mut c, Duration::from_secs(3));
+    let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "TERM was ignored after a failed registration");
+}
+
+/// P2-1 (S1 review, Linux): a TERM pending when sheepdog starts must end it before any root
+/// runs also in the relay shape (sheepdog starts with a child it did not create, so it forks
+/// a relay; a pending signal is not inherited across fork). Debug seam
+/// SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS delays the relay's forwarding, which makes the
+/// race deterministic.
+#[cfg(target_os = "linux")]
+#[test]
+fn s1_a_term_pending_at_start_means_no_root_in_the_relay_shape() {
+    let started = tmp("relay-f2-started");
+    let _ = std::fs::remove_file(&started);
+    let job = format!("22.{}114001", std::process::id());
+    let job_c = std::ffi::CString::new(job.clone()).unwrap();
+    let mut c = unsafe {
+        Command::new(sheepdog())
+            .args(["run", "--", "touch"])
+            .arg(&started)
+            .env("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS", "300")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .pre_exec(move || {
+                // a child that sheepdog did not create (the relay shape), then a pending TERM
+                if libc::fork() == 0 {
+                    let prog = b"/bin/sleep\0";
+                    let argv = [prog.as_ptr() as *const libc::c_char, job_c.as_ptr(), std::ptr::null()];
+                    libc::execv(argv[0], argv.as_ptr());
+                    libc::_exit(127);
+                }
+                let mut s: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut s);
+                libc::sigaddset(&mut s, libc::SIGTERM);
+                libc::sigprocmask(libc::SIG_BLOCK, &s, std::ptr::null_mut());
+                libc::raise(libc::SIGTERM);
+                Ok(())
+            })
+            .spawn()
+            .unwrap()
+    };
+    let st = wait_bounded(&mut c, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_millis(100));
+    let ran = started.exists();
+    let _ = std::fs::remove_file(&started);
+    let _ = Command::new("pkill").args(["-f", &format!("sleep {job}")]).status();
+    assert!(!ran, "the root ran although a TERM was pending before sheepdog started");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM));
 }

@@ -122,6 +122,11 @@ pub fn seam_sleep(name: &str) {
     }
 }
 
+/// Test seam (debug builds only): is env var `name` set to "1"?
+pub fn seam_flag(name: &str) -> bool {
+    seam(name)
+}
+
 fn seam(name: &str) -> bool {
     cfg!(debug_assertions) && std::env::var(name).as_deref() == Ok("1")
 }

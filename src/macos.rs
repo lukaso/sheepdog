@@ -196,7 +196,12 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
     unsafe {
         let kq = libc::kqueue();
         let mut polling = kq < 0;
-        let mut proc_watched = false;
+        // NOTE_EXIT refused with ESRCH: the root is already exiting (reap it with a blocking
+        // wait). Any other registration failure: poll, never a wait that ignores TERM (S1
+        // review, P3-b). Debug seam SHEEPDOG_TEST_KQ_EINVAL=1 forces an EINVAL failure of the
+        // NOTE_EXIT registration only (TERM still registers: the hazardous combination).
+        let mut proc_exiting = false;
+        let force_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_EINVAL");
         if !polling {
             let mut ch: [libc::kevent; 2] = zeroed();
             ch[0].ident = pid as usize;
@@ -206,9 +211,29 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
             ch[1].ident = libc::SIGTERM as usize;
             ch[1].filter = libc::EVFILT_SIGNAL;
             ch[1].flags = libc::EV_ADD;
-            proc_watched = libc::kevent(kq, &ch[0], 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0;
-            if watch_term {
-                libc::kevent(kq, &ch[1], 1, std::ptr::null_mut(), 0, std::ptr::null());
+            let reg = |c: &libc::kevent| -> Result<(), i32> {
+                if force_einval && c.filter == libc::EVFILT_PROC {
+                    return Err(libc::EINVAL);
+                }
+                if libc::kevent(kq, c, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+                }
+            };
+            match reg(&ch[0]) {
+                Ok(()) => {}
+                Err(e) if e == libc::ESRCH => proc_exiting = true,
+                Err(e) => {
+                    say!("sheepdog: cannot watch the command's exit (errno {e}); polling instead");
+                    polling = true;
+                }
+            }
+            if watch_term && !polling {
+                if let Err(e) = reg(&ch[1]) {
+                    say!("sheepdog: cannot watch TERM (errno {e}); polling instead");
+                    polling = true;
+                }
             }
         }
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
@@ -226,8 +251,8 @@ fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
             if let Some(code) = exited {
                 break Some(code);
             }
-            if !polling && !proc_watched {
-                // NOTE_EXIT was refused: the root is exiting; reap it, then decide again
+            if !polling && proc_exiting {
+                // NOTE_EXIT was refused with ESRCH: the root is exiting; reap it, then decide again
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
                 continue;
             }

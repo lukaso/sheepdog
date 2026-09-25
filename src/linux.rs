@@ -185,9 +185,15 @@ fn die_like(status: libc::c_int) -> i32 {
 /// - dies the way the supervisor died (P2-1).
 /// The supervisor gets PR_SET_PDEATHSIG(SIGTERM): if the relay is killed, the supervisor is
 /// told to end the job instead of running on unseen (review round 4, P3-2).
-fn relay_if_needed() -> Option<i32> {
+fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
     if !has_children() {
         return None;
+    }
+    // A TERM that is pending now would stay in the relay (pending signals are not inherited
+    // across fork) and reach the supervisor only later, possibly after it started the root.
+    // So it ends sheepdog here, before any fork or root (S1 review, P2-1).
+    if sig.watch_term && crate::term_pending() {
+        return Some(crate::die_by_term(143));
     }
     unsafe {
         let relay = libc::getpid();
@@ -216,6 +222,7 @@ fn relay_if_needed() -> Option<i32> {
             sup => {
                 // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
                 let fd = signal_fd(&set);
+                crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
                 loop {
                     let mut st = 0;
                     if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
@@ -250,7 +257,7 @@ fn relay_if_needed() -> Option<i32> {
 }
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
-    if let Some(code) = relay_if_needed() {
+    if let Some(code) = relay_if_needed(sig) {
         return code;
     }
     let subreaper = match a.mode.as_deref() {
