@@ -1,0 +1,174 @@
+//! Phase 1, step S1 (PHASE1.md): the event loop. Readiness only, never a fixed sleep before
+//! acting on a child (on macOS the first launch of a fresh binary is delayed by the security
+//! scan). Debug seams: SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS widens the loop's wait window,
+//! SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS widens the window between registering for events and
+//! the first consumption pass, SHEEPDOG_TEST_READY_FILE is created when a window opens.
+
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+fn sheepdog() -> &'static str {
+    env!("CARGO_BIN_EXE_sheepdog")
+}
+
+fn tmp(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("sd-loop-{}-{tag}", std::process::id()))
+}
+
+/// Wait for `child` with a bound; kill it and return None if it does not end.
+fn wait_bounded(child: &mut std::process::Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    let start = Instant::now();
+    loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            return Some(st);
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Spawn with a seam window; return once sheepdog signals it is inside the window.
+fn in_window(seam: &str, ms: &str, tag: &str, root: &[&str], pre_block_term: bool) -> std::process::Child {
+    let ready = tmp(&format!("ready-{tag}"));
+    let _ = std::fs::remove_file(&ready);
+    let mut c = Command::new(sheepdog());
+    c.args(["run", "--"]).args(root).env(seam, ms).env("SHEEPDOG_TEST_READY_FILE", &ready);
+    c.stdout(Stdio::null()).stderr(Stdio::null());
+    if pre_block_term {
+        unsafe {
+            c.pre_exec(|| {
+                let mut s: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut s);
+                libc::sigaddset(&mut s, libc::SIGTERM);
+                libc::sigprocmask(libc::SIG_BLOCK, &s, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+    }
+    let mut child = c.spawn().unwrap();
+    let start = Instant::now();
+    while !ready.exists() {
+        if start.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("sheepdog never reached the {seam} window");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = std::fs::remove_file(&ready);
+    child
+}
+
+/// P3-F1: once the root exits, sheepdog exits within 100 ms, in every run (NOTE_EXIT can
+/// arrive before the root is reapable; the loop must then reap it with a blocking wait,
+/// not sleep through a timeout).
+#[test]
+fn s1_exit_follows_the_root_within_100ms_every_time() {
+    let n: usize = std::env::var("SD_LATENCY_N").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up (first-launch scan)
+    let mut worst = Duration::ZERO;
+    for _ in 0..n {
+        let t = Instant::now();
+        let st = Command::new(sheepdog()).args(["run", "--", "true"]).status().unwrap();
+        let took = t.elapsed();
+        assert_eq!(st.code(), Some(0));
+        worst = worst.max(took);
+    }
+    assert!(worst < Duration::from_millis(100), "the slowest of {n} runs took {worst:?}");
+}
+
+/// P3-F2: with a TERM already pending when sheepdog starts (the caller blocked TERM and it
+/// arrived), the root never runs, and sheepdog dies of SIGTERM.
+#[test]
+fn s1_a_term_pending_at_start_means_the_root_never_runs() {
+    let started = tmp("f2-started");
+    let _ = std::fs::remove_file(&started);
+    let mut c = unsafe {
+        Command::new(sheepdog())
+            .args(["run", "--", "/usr/bin/touch"])
+            .arg(&started)
+            .env("SHEEPDOG_TEST_SLEEP_BEFORE_SPAWN_MS", "300")
+            .env("SHEEPDOG_TEST_READY_FILE", tmp("f2-ready"))
+            .pre_exec(|| {
+                // the caller blocks TERM; sheepdog inherits the mask with TERM pending
+                let mut s: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut s);
+                libc::sigaddset(&mut s, libc::SIGTERM);
+                libc::sigprocmask(libc::SIG_BLOCK, &s, std::ptr::null_mut());
+                libc::raise(libc::SIGTERM);
+                Ok(())
+            })
+            .spawn()
+            .unwrap()
+    };
+    let st = wait_bounded(&mut c, Duration::from_secs(5));
+    let ran = started.exists();
+    let _ = std::fs::remove_file(&started);
+    let _ = std::fs::remove_file(tmp("f2-ready"));
+    assert!(!ran, "the root ran although a TERM was pending before it existed");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "sheepdog must die of SIGTERM");
+}
+
+/// P3-F3 (macOS): a TERM during the self re-exec ends sheepdog before any root exists. The
+/// root's FIRST action records that it started (`/usr/bin/touch`), so a root that ran even
+/// for an instant is seen (a `sh -c touch` root started too slowly for that).
+#[cfg(target_os = "macos")]
+#[test]
+fn s1_a_term_during_the_reexec_means_the_root_never_runs() {
+    let started = tmp("f3-started");
+    let _ = std::fs::remove_file(&started);
+    let root = ["/usr/bin/touch", started.to_str().unwrap()];
+    let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "300", "f3", &root, false);
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = wait_bounded(&mut c, Duration::from_secs(5));
+    let ran = started.exists();
+    let _ = std::fs::remove_file(&started);
+    assert!(!ran, "the root ran although TERM arrived before it existed");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM));
+}
+
+/// P3-F4: TERM and the root's exit in ONE wake: TERM wins, on both OSes (sheepdog dies of
+/// SIGTERM, not with the root's code). The seam holds the loop while both happen.
+#[test]
+fn s1_term_and_root_exit_in_one_wake_term_wins() {
+    // the root is still alive when the window opens (it exits after 100 ms), so the loop is
+    // inside the window, then the root exits and TERM arrives: both wait for the next wake
+    let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "600", "f4", &["sh", "-c", "sleep 0.1; exit 7"], false);
+    std::thread::sleep(Duration::from_millis(300)); // the root's own 100 ms, with margin (not a start-up guess)
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
+    assert_eq!(st.signal(), Some(libc::SIGTERM), "the root's exit won over TERM: {st:?}");
+}
+
+/// macOS consumption (plan review round 2): a TERM that arrives between the registration
+/// for events and the first consumption pass is seen, and the supervisor ends; a second TERM
+/// does not hang anything.
+#[test]
+fn s1_a_term_right_after_registration_ends_the_job() {
+    let root = format!("23.{}111001", std::process::id());
+    let mut c = in_window("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS", "300", "reg", &["/bin/sleep", &root], false);
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    std::thread::sleep(Duration::from_millis(20));
+    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    let st = wait_bounded(&mut c, Duration::from_secs(5));
+    let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "the supervisor did not end on TERM");
+}
+
+/// Linux: the loop's signalfd must not leak into the root (SFD_CLOEXEC).
+#[cfg(target_os = "linux")]
+#[test]
+fn s1_the_root_holds_no_signalfd() {
+    let out = Command::new(sheepdog())
+        .args(["run", "--", "sh", "-c", "ls -l /proc/$$/fd"])
+        .output()
+        .unwrap();
+    let fds = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the root failed: {fds}");
+    assert!(!fds.contains("signalfd"), "the root inherited a signalfd:\n{fds}");
+}

@@ -338,6 +338,34 @@ fn setup_signals() -> Signals {
     }
 }
 
+/// Consume `sig` if it is pending (PHASE1.md §1.1): discard it with the SIG_IGN/SIG_DFL
+/// toggle (POSIX discards a pending signal whose action becomes SIG_IGN, even while it is
+/// blocked) and return true. Never `sigwait`: on macOS a signal that `sigpending` showed can
+/// vanish before a `sigwait` (a CONT removes a pending TSTP, and back), and `sigwait` then
+/// blocks forever (phase-1 plan review, rounds 2 and 3, probed). Never for SIGCHLD: SIG_IGN
+/// on SIGCHLD turns on automatic reaping.
+pub fn consume(sig: c_int) -> bool {
+    assert_ne!(sig, libc::SIGCHLD, "SIGCHLD must never be toggled");
+    unsafe {
+        let mut p: libc::sigset_t = std::mem::zeroed();
+        libc::sigpending(&mut p);
+        if libc::sigismember(&p, sig) != 1 {
+            return false;
+        }
+        libc::signal(sig, libc::SIG_IGN);
+        libc::signal(sig, libc::SIG_DFL);
+        true
+    }
+}
+
+/// Before the root is spawned: a TERM that is already pending (the caller blocked TERM and it
+/// arrived) ends sheepdog now, so the root never runs (round-7 P3-F2). Returns the exit code
+/// if sheepdog must end.
+pub fn term_before_spawn(sig: &Signals) -> Option<i32> {
+    seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_SPAWN_MS");
+    (sig.watch_term && term_pending()).then(|| die_by_term(143))
+}
+
 /// Is a TERM pending (blocked, not yet taken by a wait)?
 pub fn term_pending() -> bool {
     unsafe {

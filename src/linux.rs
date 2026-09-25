@@ -114,6 +114,33 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> i32 {
     pid
 }
 
+/// A signalfd for `set` (PHASE1.md §1.1): CLOEXEC, so it never leaks into the root, and
+/// non-blocking, so draining it never blocks. Returns -1 if unavailable (then: poll).
+fn signal_fd(set: &libc::sigset_t) -> i32 {
+    unsafe { libc::signalfd(-1, set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) }
+}
+
+/// Read every pending signal from `fd` (each is consumed exactly once) and return them.
+fn drain(fd: i32) -> Vec<i32> {
+    let mut got = Vec::new();
+    loop {
+        let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+        let n = unsafe {
+            libc::read(fd, &mut info as *mut _ as *mut libc::c_void, std::mem::size_of::<libc::signalfd_siginfo>())
+        };
+        if n != std::mem::size_of::<libc::signalfd_siginfo>() as isize {
+            return got;
+        }
+        got.push(info.ssi_signo as i32);
+    }
+}
+
+/// Wait until `fd` is readable or `ms` passed.
+fn poll_fd(fd: i32, ms: i32) {
+    let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut p, 1, ms) };
+}
+
 /// Does this process already have children (for example a shell's background job before it
 /// `exec`ed sheepdog)? waitid with WNOWAIT answers atomically without /proc and without reaping
 /// anything (review round 4, P3-3).
@@ -186,22 +213,38 @@ fn relay_if_needed() -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => loop {
-                let mut st = 0;
-                if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
-                    return Some(die_like(st));
-                }
-                let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
-                match libc::sigtimedwait(&set, std::ptr::null_mut(), &ts) {
-                    libc::SIGTERM => {
-                        libc::kill(sup, libc::SIGTERM);
+            sup => {
+                // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
+                let fd = signal_fd(&set);
+                loop {
+                    let mut st = 0;
+                    if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
+                        if fd >= 0 {
+                            libc::close(fd);
+                        }
+                        return Some(die_like(st));
                     }
-                    libc::SIGHUP if libc::getsid(0) == relay => {
-                        libc::kill(sup, libc::SIGHUP);
+                    let got = if fd >= 0 {
+                        poll_fd(fd, 1000);
+                        drain(fd)
+                    } else {
+                        let ts = libc::timespec { tv_sec: 0, tv_nsec: 50_000_000 };
+                        let s = libc::sigtimedwait(&set, std::ptr::null_mut(), &ts);
+                        if s > 0 { vec![s] } else { vec![] }
+                    };
+                    for s in got {
+                        match s {
+                            libc::SIGTERM => {
+                                libc::kill(sup, libc::SIGTERM);
+                            }
+                            libc::SIGHUP if libc::getsid(0) == relay => {
+                                libc::kill(sup, libc::SIGHUP);
+                            }
+                            _ => {} // SIGCHLD, INT, a HUP we are not the leader for
+                        }
                     }
-                    _ => {} // SIGCHLD, INT, a HUP we are not the leader for, timeout, EINTR
                 }
-            },
+            }
         }
     }
 }
@@ -223,10 +266,15 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         say!("sheepdog: cannot become a subreaper; tracking is degraded");
     }
     let me = unsafe { libc::getpid() };
+    if let Some(code) = crate::term_before_spawn(sig) {
+        return code;
+    }
     let root = spawn(&a.cmd, &sig.caller_mask);
-    // wait for the root, reaping adopted orphans meanwhile. TERM and SIGCHLD are blocked
-    // (main.rs setup_signals) and taken synchronously by sigtimedwait: a signal that arrives
-    // after a check stays pending, so there is no check-then-block gap (review round 6).
+    // The event loop's wait (PHASE1.md §1): a signalfd on {CHLD, TERM} (both blocked by
+    // setup_signals), drained on every wake so each signal is consumed exactly once; the
+    // waitpid(-1, WNOHANG) loop reaps the root and adopted orphans. One fixed order when events
+    // coincide (round-7 P3-F4): TERM, then the root's exit. No signalfd: poll every 50 ms (a
+    // blocked TERM stays pending, so nothing is lost).
     let mut waitset: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe {
         libc::sigemptyset(&mut waitset);
@@ -235,26 +283,41 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             libc::sigaddset(&mut waitset, libc::SIGTERM);
         }
     }
-    let code = 'wait: loop {
+    let fd = signal_fd(&waitset);
+    crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
+    let mut exited: Option<i32> = None;
+    let code = loop {
+        let term = if fd >= 0 {
+            drain(fd).contains(&libc::SIGTERM)
+        } else {
+            sig.watch_term && crate::consume(libc::SIGTERM)
+        };
         loop {
             let mut st = 0;
             let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
-            if r == root {
-                break 'wait Some(code_of(st));
+            if r == root && exited.is_none() {
+                exited = Some(code_of(st));
             }
             if r <= 0 {
                 break;
             }
         }
-        if sig.watch_term && crate::term_pending() {
+        if term {
             break None;
         }
-        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS"); // widens any check-then-block gap
-        let ts = libc::timespec { tv_sec: 1, tv_nsec: 0 };
-        if unsafe { libc::sigtimedwait(&waitset, std::ptr::null_mut(), &ts) } == libc::SIGTERM {
-            break None;
+        if let Some(c) = exited {
+            break Some(c);
+        }
+        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
+        if fd >= 0 {
+            poll_fd(fd, 250);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     };
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
     let opts = crate::KillOpts::from_env();
     let result = if is_subreaper {

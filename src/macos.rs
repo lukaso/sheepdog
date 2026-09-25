@@ -179,51 +179,77 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, caller_mask: &libc::sigset_t) ->
     pid
 }
 
-/// Wait for the root. Returns None if a TERM arrived first (the job must be ended).
-/// kqueue watches the root's exit and TERM (TERM is blocked, so it is recorded, not acted
-/// on); a TERM that was already pending before the registration is found by `term_pending`.
-/// There is no check-then-block gap: an event after a check is queued for the next kevent.
+/// The event loop's wait (PHASE1.md §1): returns the root's exit code, or None if the job
+/// must be ended because of TERM.
+///
+/// - kqueue watches the root's exit (EVFILT_PROC NOTE_EXIT) and TERM (EVFILT_SIGNAL). A
+///   report is only a wake-up; TERM is consumed with `consume` (the SIG_IGN/SIG_DFL toggle),
+///   never `sigwait`.
+/// - After NOTE_EXIT the root is reaped with a BLOCKING waitpid: NOTE_EXIT can arrive before
+///   the root is reapable, and the one-shot event is then gone (round-7 P3-F1).
+/// - If registering NOTE_EXIT fails (ESRCH: the root is already exiting), the root is reaped
+///   with a blocking waitpid (brief).
+/// - One fixed order when events coincide (round-7 P3-F4): TERM, then the root's exit.
+/// - Any other kqueue failure: poll every 50 ms. A blocked TERM stays pending, so polling
+///   loses nothing; it never falls into a blocking wait that ignores TERM.
 fn wait(pid: pid_t, watch_term: bool) -> Option<i32> {
     unsafe {
         let kq = libc::kqueue();
-        let mut ch: [libc::kevent; 2] = zeroed();
-        ch[0].ident = pid as usize;
-        ch[0].filter = libc::EVFILT_PROC;
-        ch[0].flags = libc::EV_ADD;
-        ch[0].fflags = libc::NOTE_EXIT;
-        ch[1].ident = libc::SIGTERM as usize;
-        ch[1].filter = libc::EVFILT_SIGNAL;
-        ch[1].flags = libc::EV_ADD;
-        // register one by one. XNU rejects NOTE_EXIT (ESRCH) for a root that is already
-        // exiting but not yet reapable; then no exit event will ever come, and waiting on
-        // kevent alone would block forever (measured: a hang after ~380 cell-3 iterations).
-        let proc_watched = libc::kevent(kq, &ch[0], 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0;
-        if watch_term {
-            libc::kevent(kq, &ch[1], 1, std::ptr::null_mut(), 0, std::ptr::null());
+        let mut polling = kq < 0;
+        let mut proc_watched = false;
+        if !polling {
+            let mut ch: [libc::kevent; 2] = zeroed();
+            ch[0].ident = pid as usize;
+            ch[0].filter = libc::EVFILT_PROC;
+            ch[0].flags = libc::EV_ADD;
+            ch[0].fflags = libc::NOTE_EXIT;
+            ch[1].ident = libc::SIGTERM as usize;
+            ch[1].filter = libc::EVFILT_SIGNAL;
+            ch[1].flags = libc::EV_ADD;
+            proc_watched = libc::kevent(kq, &ch[0], 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0;
+            if watch_term {
+                libc::kevent(kq, &ch[1], 1, std::ptr::null_mut(), 0, std::ptr::null());
+            }
         }
+        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
+        let mut exited: Option<i32> = None;
         let result = loop {
-            if watch_term && crate::term_pending() {
+            let term = watch_term && crate::consume(libc::SIGTERM);
+            if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
+                exited = Some(code_of(st));
+            }
+            // the fixed order: TERM, then the root's exit
+            if term {
                 break None;
             }
-            if libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
-                break Some(code_of(st));
+            if let Some(code) = exited {
+                break Some(code);
             }
-            if !proc_watched {
-                // the root is exiting: wait for it directly (brief)
-                break if libc::waitpid(pid, &mut st, 0) == pid { Some(code_of(st)) } else { Some(125) };
+            if !polling && !proc_watched {
+                // NOTE_EXIT was refused: the root is exiting; reap it, then decide again
+                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
+                continue;
             }
-            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS"); // widens any check-then-block gap
-            // a 1 s timeout is a safety net: the loop re-checks, so it can never block forever
+            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
+            if polling {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
             let mut ev: libc::kevent = zeroed();
-            let one_s = libc::timespec { tv_sec: 1, tv_nsec: 0 };
-            let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &one_s);
-            if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                // no kqueue: fall back to a blocking wait for the root
-                break if libc::waitpid(pid, &mut st, 0) == pid { Some(code_of(st)) } else { Some(125) };
+            let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
+            let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
+            if r > 0 && ev.filter == libc::EVFILT_PROC {
+                // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit)
+                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
+            } else if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                say!("sheepdog: kqueue failed ({}); polling instead", std::io::Error::last_os_error());
+                polling = true;
             }
         };
-        libc::close(kq);
+        if kq >= 0 {
+            libc::close(kq);
+        }
         result
     }
 }
@@ -237,6 +263,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
+            if let Some(code) = crate::term_before_spawn(sig) {
+                return code;
+            }
             let root = spawn(&a.cmd, false, &sig.caller_mask);
             let code = wait(root, sig.watch_term);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(me), || {}, || None, crate::signal);
@@ -252,6 +281,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
         }
         Some("root-disclaim") => {
+            if let Some(code) = crate::term_before_spawn(sig) {
+                return code;
+            }
             let root = spawn(&a.cmd, true, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let code = wait(root, sig.watch_term);

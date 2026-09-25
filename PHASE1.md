@@ -89,6 +89,13 @@ Control cell: `sleep` under the fixture shell, ctrl-Z → "stopped", ctrl-C → 
 - no test acts on a fixed sleep (readiness only: the phase-0 first-launch lesson);
 - cleanup kills only by recorded identity or marker.
 
+## 3.1 Step notes (what the build measured)
+
+**S1 (2026-09-25):**
+- **The re-exec cell (P3-F3) is guarded twice.** The mask restore across the re-exec makes a pending TERM kill sheepdog at exec, and the pre-spawn TERM check (P3-F2) catches it in the new image. Either one is enough, so mutant MW2 alone stays green on this cell. The double mutant (MW2 + no pre-spawn check) is red. MW2's own damage, the root's mask, stays caught by the cell-23 mask cell.
+- **`signalfd` CLOEXEC is not load-bearing yet.** The signalfd is created after the root is spawned (and the relay's after its fork), so mutant MCL is green. The cell stays as a guard for S2, where the loop may be created before the spawn; the mutant is re-run there.
+- **The macOS consumption hazard is unreachable in S1:** the only watched non-CHLD signal is TERM, and a TERM ends the job at first sight, so an unconditional `sigwait` after a report cannot hang anything yet. The consumption cells and their `sigwait` mutants move to S4 (INT, HUP) and S5 (TSTP, CONT, including the CONT-while-TSTP-pending seam).
+
 ## 4. Risks and named residuals
 
 - **The freeze (SIGSTOP) is not load-bearing in any safe test** (phase 0, mutant M3). It stays a named residual: only an unbounded fork storm separates it from repeat-alone, and that is not run on a workstation.
