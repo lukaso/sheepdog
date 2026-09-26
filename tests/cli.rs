@@ -884,12 +884,15 @@ mod relay {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_term_and_another_signal_after_a_stop_leave_nothing() {
-        for (i, other) in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT].into_iter().enumerate() {
+        // both caller shapes that can end early on TERM: TERM at its default, and blocked (then
+        // the root inherits it blocked and the kill waits out the grace)
+        let cases = [false, true].into_iter().flat_map(|b| [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT].map(move |s| (b, s)));
+        for (i, (block_term, other)) in cases.enumerate() {
             let w = Window::new(64 + 3 * i as u32);
             let esc = m(66 + 3 * i as u32);
             let script = format!("/bin/sleep {esc} & exec /bin/sleep {}", w.root);
             let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
-            caller(&mut c, true, false);
+            caller(&mut c, true, block_term);
             let mut c = c.spawn().unwrap();
             let pg = c.id() as i32;
             w.wait_ready();
@@ -909,9 +912,40 @@ mod relay {
             }
             kill_marked(&[&esc]);
             w.cleanup(&[]);
-            assert_eq!(left, (0, 0), "signal {other}: the job was left (root, the root's child)");
-            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "signal {other}: sheepdog did not die of SIGTERM");
+            assert_eq!(left, (0, 0), "caller blocks TERM={block_term}, signal {other}: the job was left (root, the root's child)");
+            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "caller blocks TERM={block_term}, signal {other}: sheepdog did not die of SIGTERM");
         }
+    }
+
+    /// S2 review round 7 (macOS): an early end caused by the relay's death, with another deadly
+    /// signal (INT) pending at sheepdog: the whole job is still killed. A CONT to the root itself
+    /// lets it run and start a child first (a debug seam holds sheepdog before its check).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_relay_death_and_another_signal_leave_nothing() {
+        let w = Window::new(84);
+        let esc = m(86);
+        let script = format!("echo x > '{}'; /bin/sleep {esc} & exec /bin/sleep {}", w.ran.display(), w.root);
+        let mut c = w.with(&["/bin/sh", "-c", &script], true, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2500");
+        caller(&mut c, false, false);
+        let mut relayed = c.spawn().unwrap();
+        w.wait_ready();
+        let sups = supervisors_of(relayed.id() as i32);
+        let root = w.suspended_root();
+        unsafe { libc::kill(root, libc::SIGCONT) };
+        wait_until("the root's child", || sleeps(&esc) == 1);
+        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        let _ = relayed.wait();
+        for &p in &sups {
+            unsafe { libc::kill(p, libc::SIGINT) };
+        }
+        until_gone(&sups);
+        std::thread::sleep(Duration::from_millis(200));
+        let left = (sleeps(&w.root), sleeps(&esc));
+        kill_marked(&[&esc]);
+        w.cleanup(&[&sups[..], &[root]].concat());
+        assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
+        assert_eq!(left, (0, 0), "the job was left (root, the root's child)");
     }
 
     /// S2 review round 5 (macOS): a relay that dies after the root is resumed but before the
