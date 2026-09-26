@@ -12,6 +12,9 @@
 //!
 //! SD_STRESS_N sets the iteration count of the stress cells (default 200; the gate is 10000).
 
+mod common;
+
+use common::{scan, send};
 use sheepdog::ident::same;
 use std::path::PathBuf;
 use std::process::Command;
@@ -59,13 +62,13 @@ impl Iteration {
             })
             .collect()
     }
-    /// Live pids carrying the marker. Panics if `ps` cannot run or fails: a checker that
-    /// looked at nothing must never report "no survivors" (review round 3, F1).
-    fn marked(&self) -> Vec<i32> {
+    /// Live processes carrying the marker (pid, identity). Panics if `ps` cannot run or fails: a
+    /// checker that looked at nothing must never report "no survivors" (review round 3, F1).
+    fn marked(&self) -> Vec<(i32, u64)> {
         with_marker(&self.marker).expect("the survivor checker could not run ps")
     }
     /// For Drop only: a panic there would abort the suite, so failures mean "nothing found".
-    fn marked_quiet(&self) -> Vec<i32> {
+    fn marked_quiet(&self) -> Vec<(i32, u64)> {
         with_marker(&self.marker).unwrap_or_default()
     }
     /// Survivors by identity, and in total by identity or marker (counted once).
@@ -73,7 +76,7 @@ impl Iteration {
         let by_id: Vec<i32> =
             self.recorded().into_iter().filter(|&(p, id)| same(p, id)).map(|(p, _)| p).collect();
         let mut all = by_id.clone();
-        for p in self.marked() {
+        for (p, _) in self.marked() {
             if !all.contains(&p) {
                 all.push(p);
             }
@@ -85,30 +88,19 @@ impl Iteration {
 impl Drop for Iteration {
     fn drop(&mut self) {
         for (p, id) in self.recorded() {
-            if same(p, id) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
+            send(p, id, libc::SIGKILL);
         }
-        for p in self.marked_quiet() {
-            if self.marked_quiet().contains(&p) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
+        for (p, id) in self.marked_quiet() {
+            send(p, id, libc::SIGKILL);
         }
         let _ = std::fs::remove_file(&self.rec);
     }
 }
 
-/// Live pids whose argv contains `marker` as a whole word; Err if `ps` is missing or fails.
-fn with_marker(marker: &str) -> Result<Vec<i32>, String> {
-    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!("ps exited {:?}", out.status.code()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.split_whitespace().any(|w| w == marker))
-        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
-        .collect())
+/// Live processes whose argv contains `marker` as a whole word, with identities read at
+/// discovery; Err if `ps` is missing or fails.
+fn with_marker(marker: &str) -> Result<Vec<(i32, u64)>, String> {
+    scan(marker, |_| true)
 }
 
 #[derive(Default)]
@@ -157,7 +149,7 @@ fn control_the_marker_checker_finds_a_marked_process() {
     let it = Iteration::new();
     let mut c = Command::new("/bin/sleep").arg(&it.marker).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(50));
-    let found = it.marked();
+    let found: Vec<i32> = it.marked().into_iter().map(|(p, _)| p).collect();
     let _ = c.kill();
     let _ = c.wait();
     assert_eq!(found, vec![c.id() as i32]);

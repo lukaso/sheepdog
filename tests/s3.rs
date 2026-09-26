@@ -1,8 +1,12 @@
 //! Phase 1, step S3 (PHASE1.md): identity before every signal (Linux: pidfd, with the
 //! ENOSYS/EPERM fallback; macOS: the uniqueid re-check) and the wrong-freeze rollback
 //! (PLAN.md §3.3 steps 2 and 4). A decoy is a process outside any job that logs every catchable
-//! signal it gets; a SIGSTOP shows as state T, a SIGKILL as its death.
+//! signal it gets; a SIGSTOP shows as state T, a SIGKILL as its death. Every signal a test
+//! sends goes through the identity-checked door in `common`.
 
+mod common;
+
+use common::send;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -43,6 +47,8 @@ fn enosys_legs() -> &'static [bool] {
 /// A decoy process, started by the test (never part of a job).
 struct Decoy {
     pid: i32,
+    /// its identity, read when its pid is found
+    id: u64,
     file: std::path::PathBuf,
     child: std::process::Child,
 }
@@ -61,7 +67,8 @@ impl Decoy {
             assert!(t.elapsed() < Duration::from_secs(10), "the decoy never started");
             std::thread::sleep(Duration::from_millis(5));
         };
-        Decoy { pid, file, child }
+        let id = sheepdog::ident::identity(pid).expect("the decoy's identity");
+        Decoy { pid, id, file, child }
     }
     fn log_path(&self) -> std::path::PathBuf {
         std::path::PathBuf::from(format!("{}.log", self.file.display()))
@@ -114,9 +121,7 @@ impl Job {
 impl Drop for Job {
     fn drop(&mut self) {
         for (p, id) in self.recorded() {
-            if sheepdog::ident::same(p, id) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
+            send(p, id, libc::SIGKILL);
         }
         let _ = std::fs::remove_file(&self.rec);
     }
@@ -182,7 +187,7 @@ fn s3_a_wrong_freeze_is_rolled_back() {
         let mut decoy = Decoy::start("freeze");
         let siglog = log_path("freeze");
         if pre_stopped {
-            unsafe { libc::kill(decoy.pid, libc::SIGSTOP) };
+            assert!(send(decoy.pid, decoy.id, libc::SIGSTOP), "the decoy is gone");
             let t = Instant::now();
             while state(decoy.pid) != Some('T') {
                 assert!(t.elapsed() < Duration::from_secs(5), "the decoy did not stop");
@@ -318,4 +323,15 @@ fn s3_a_failed_pidfd_send_falls_back() {
     assert!(log.iter().any(|l| l == &fallback_kill), "the escapee's KILL did not go through the fallback: {log:?}");
     assert_eq!(st.code(), Some(0), "the kill did not end clean after a failed pidfd send: {log:?}");
     assert!(!sheepdog::ident::same(rec[0].0, rec[0].1), "the escapee survived");
+}
+
+/// The test door (`common::send`) signals only the recorded process: a live pid whose identity
+/// is not the recorded one gets nothing, and pid 1 or less is refused. Signal 0 only.
+#[test]
+fn s3_the_test_door_refuses_a_stale_identity() {
+    let me = unsafe { libc::getpid() };
+    let id = sheepdog::ident::identity(me).expect("own identity");
+    assert!(send(me, id, 0), "control: the recorded identity is accepted");
+    assert!(!send(me, id.wrapping_add(1), 0), "a live pid with another identity was signalled");
+    assert!(std::panic::catch_unwind(|| send(1, id, 0)).is_err(), "pid 1 was not refused");
 }

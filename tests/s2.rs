@@ -1,7 +1,11 @@
 //! Phase 1, step S2 (PHASE1.md): membership while running, the TERM grace, --leave-strays,
 //! the scan's cost; macOS: the `puniq` fact and R growing from members (full cell 24).
-//! Readiness only; cleanup only by recorded identity or the iteration's marker.
+//! Readiness only; cleanup only by recorded identity or the iteration's marker. Every signal
+//! goes through the doors in `common` (identity-checked pid, or a child not yet reaped).
 
+mod common;
+
+use common::{scan, send, send_child};
 use sheepdog::ident::same;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,20 +53,17 @@ impl Job {
             })
             .collect()
     }
-    /// Live processes of this job: recorded identities still alive, plus any process whose
-    /// argv carries the marker and is not sheepdog itself (sheepdog's argv carries it too).
-    fn alive(&self) -> Vec<i32> {
-        let mut v: Vec<i32> = self.recorded().into_iter().filter(|&(p, id)| same(p, id)).map(|(p, _)| p).collect();
-        let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
-        assert!(out.status.success(), "ps failed");
-        for l in String::from_utf8_lossy(&out.stdout).lines() {
-            let w: Vec<&str> = l.split_whitespace().collect();
-            if w.len() >= 2 && !w[1].ends_with("sheepdog") && w.iter().any(|x| *x == self.marker) {
-                if let Ok(p) = w[0].parse::<i32>() {
-                    if !v.contains(&p) {
-                        v.push(p);
-                    }
-                }
+    /// Processes whose argv carries the marker and that are not sheepdog itself (sheepdog's
+    /// argv carries it too), with identities read at discovery.
+    fn marked(&self) -> Result<Vec<(i32, u64)>, String> {
+        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepdog"))
+    }
+    /// Live processes of this job: recorded identities still alive, plus the marked processes.
+    fn alive(&self) -> Vec<(i32, u64)> {
+        let mut v: Vec<(i32, u64)> = self.recorded().into_iter().filter(|&(p, id)| same(p, id)).collect();
+        for p in self.marked().expect("ps failed") {
+            if !v.iter().any(|q| q.0 == p.0) {
+                v.push(p);
             }
         }
         v
@@ -72,19 +73,10 @@ impl Job {
 impl Drop for Job {
     fn drop(&mut self) {
         for (p, id) in self.recorded() {
-            if same(p, id) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
+            send(p, id, libc::SIGKILL);
         }
-        if let Ok(out) = Command::new("ps").args(["-Ao", "pid=,args="]).output() {
-            for l in String::from_utf8_lossy(&out.stdout).lines() {
-                let w: Vec<&str> = l.split_whitespace().collect();
-                if w.len() >= 2 && !w[1].ends_with("sheepdog") && w.iter().any(|x| *x == self.marker) {
-                    if let Ok(p) = w[0].parse::<i32>() {
-                        unsafe { libc::kill(p, libc::SIGKILL) };
-                    }
-                }
-            }
+        for (p, id) in self.marked().unwrap_or_default() {
+            send(p, id, libc::SIGKILL);
         }
         let _ = std::fs::remove_file(&self.rec);
         let _ = std::fs::remove_file(format!("{}.term", self.rec()));
@@ -226,7 +218,7 @@ fn s2_leave_strays_still_kills_on_term() {
         assert!(t.elapsed() < Duration::from_secs(10), "the escapee was not created");
         std::thread::sleep(Duration::from_millis(5));
     }
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let st = c.wait().unwrap();
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(st.signal(), Some(libc::SIGTERM));
@@ -319,7 +311,7 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
     // guard against a single slow sample under load, not against the tick's phase.
     for _ in 0..5 {
         let j = Job::new();
-        let c = Command::new(sheepdog())
+        let mut c = Command::new(sheepdog())
             .args(["run", "--", "/bin/sleep", &j.marker])
             .env("SHEEPDOG_TEST_KQ_SIG_EINVAL", "1")
             .env("SHEEPDOG_TEST_TICK_MS", "900")
@@ -333,7 +325,7 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
         }
         std::thread::sleep(Duration::from_millis(30));
         let k = Instant::now();
-        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+        assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
         let out = c.wait_with_output().unwrap();
         let took = k.elapsed();
         use std::os::unix::process::ExitStatusExt;
@@ -370,16 +362,20 @@ fn s2_a_callers_earlier_processes_survive() {
             let st = c.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
             let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
             let _ = std::fs::remove_file(&pidf);
+            // its identity, read when the pid is found: None if it is already gone
+            let earlier = common::found(pid);
             let t = Instant::now();
             let mut alive = true;
             while t.elapsed() < Duration::from_millis(500) {
-                alive = unsafe { libc::kill(pid, 0) } == 0;
+                alive = earlier.is_some_and(common::alive);
                 if !alive {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            if let Some((p, id)) = earlier {
+                send(p, id, libc::SIGKILL);
+            }
             assert_eq!(st.code(), Some(0), "disclaimed caller={disclaimed}, {shape}: the fixture or sheepdog failed");
             assert!(alive, "disclaimed caller={disclaimed}: the caller's earlier {shape} was killed");
         }
@@ -422,8 +418,11 @@ fn s2_a_fresh_self_responsible_start_does_not_relay() {
             let w: Vec<&str> = l.split_whitespace().collect();
             (w.len() == 4 && w[2] == "/bin/sleep" && w[3] == j.marker).then(|| (w[0].parse::<i32>().unwrap(), w[1].parse::<i32>().unwrap()))
         });
-        if let Some(f) = found {
-            break f;
+        // the root's identity, read at discovery
+        if let Some((p, ppid)) = found {
+            if let Some((_, id)) = common::found(p) {
+                break (p, ppid, id);
+            }
         }
         assert!(t.elapsed() < Duration::from_secs(10), "the root never started");
         std::thread::sleep(Duration::from_millis(5));
@@ -437,7 +436,7 @@ fn s2_a_fresh_self_responsible_start_does_not_relay() {
             (w.len() == 2 && w[1] == c.id().to_string()).then(|| w[0].parse().ok()).flatten()
         })
         .collect();
-    unsafe { libc::kill(root.0, libc::SIGKILL) };
+    send(root.0, root.2, libc::SIGKILL);
     let _ = c.wait();
     assert_eq!(spawned.len(), 1, "expected the fixture's one child (sheepdog): {spawned:?}");
     assert_eq!(root.1, spawned[0], "a fresh self-responsible sheepdog relayed: the root's parent is not the pid its caller holds");
@@ -546,7 +545,10 @@ fn s2_a_nested_sheepdog_under_a_relay_runs() {
         .stderr(Stdio::null())
         .status()
         .unwrap();
-    let _ = Command::new("pkill").args(["-f", &format!("^/bin/sleep {job}$")]).status();
+    // cleanup by marker and identity: the relay's `/bin/sleep <job>`
+    for (p, id) in scan(&job, |w| w.len() == 3 && w[1] == "/bin/sleep").unwrap_or_default() {
+        send(p, id, libc::SIGKILL);
+    }
     assert_eq!(st.code(), Some(0), "the nested sheepdog failed");
 }
 

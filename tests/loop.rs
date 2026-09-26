@@ -4,6 +4,13 @@
 //! SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS widens the window between registering for events and
 //! the first consumption pass, SHEEPDOG_TEST_READY_FILE is created when a window opens.
 
+//!
+//! Every signal goes through the doors in `common` (a child not yet reaped, or an
+//! identity-checked pid found by its marker); nothing is ever sent to pid 1 or less.
+
+mod common;
+
+use common::{kill_marked, send_child};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -140,7 +147,7 @@ fn s1_a_term_during_the_reexec_means_the_root_never_runs() {
     let _ = std::fs::remove_file(&started);
     let root = ["/usr/bin/touch", started.to_str().unwrap()];
     let mut c = in_window("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "300", "f3", &root, false);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let st = wait_bounded(&mut c, Duration::from_secs(5));
     let ran = started.exists();
     let _ = std::fs::remove_file(&started);
@@ -190,7 +197,7 @@ fn s1_term_and_root_exit_in_one_wake_term_wins() {
         std::thread::sleep(Duration::from_millis(2));
     }
     let _ = std::fs::remove_file(&done);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
     assert_eq!(st.signal(), Some(libc::SIGTERM), "the root's exit won over TERM: {st:?}");
 }
@@ -202,11 +209,12 @@ fn s1_term_and_root_exit_in_one_wake_term_wins() {
 fn s1_a_term_right_after_registration_ends_the_job() {
     let root = format!("23.{}111001", std::process::id());
     let mut c = in_window("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS", "300", "reg", &["/bin/sleep", &root], false);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     std::thread::sleep(Duration::from_millis(20));
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    // the second TERM: sent only if sheepdog has not ended (and been reaped) yet
+    send_child(&mut c, libc::SIGTERM);
     let st = wait_bounded(&mut c, Duration::from_secs(5));
-    let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+    kill_marked(&[&root]);
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "the supervisor did not end on TERM");
 }
 
@@ -244,10 +252,10 @@ fn s1_term_wakes_the_loop_at_once() {
         }
         std::thread::sleep(Duration::from_millis(30)); // let sheepdog block in its wait
         let k = Instant::now();
-        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+        assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
         let st = wait_bounded(&mut c, Duration::from_secs(5)).expect("sheepdog did not end");
         worst = worst.max(k.elapsed());
-        let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+        kill_marked(&[&root]);
         assert_eq!(st.signal(), Some(libc::SIGTERM));
     }
     assert!(worst < Duration::from_millis(100), "TERM took {worst:?} to end the job (the 250 ms tick, not a wake-up?)");
@@ -275,10 +283,10 @@ fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
         std::thread::sleep(Duration::from_millis(5));
     }
     std::thread::sleep(Duration::from_millis(50)); // the root exists: let sheepdog settle into its wait
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let st = wait_bounded(&mut c, Duration::from_secs(3));
     // KILL, not TERM: a root left stopped would keep TERM pending and the stderr pipe open
-    let _ = Command::new("pkill").args(["-KILL", "-f", &format!("sleep {root}")]).status();
+    kill_marked(&[&root]);
     let mut err = String::new();
     if let Some(mut e) = c.stderr.take() {
         use std::io::Read;
@@ -329,7 +337,7 @@ fn s1_a_term_pending_at_start_means_no_root_in_the_relay_shape() {
     std::thread::sleep(Duration::from_millis(100));
     let ran = started.exists();
     let _ = std::fs::remove_file(&started);
-    let _ = Command::new("pkill").args(["-f", &format!("sleep {job}")]).status();
+    kill_marked(&[&job]);
     assert!(!ran, "the root ran although a TERM was pending before sheepdog started");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM));
 }

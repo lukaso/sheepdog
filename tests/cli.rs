@@ -1,6 +1,12 @@
 //! Basic `run` behaviour. Every spawn here is bounded, so a hang fails the test instead of
 //! hanging the suite (the phase-0 spike once re-exec'd itself forever).
+//!
+//! Every signal goes through the doors in `common` (identity-checked pid, a group this test
+//! created, or a child not yet reaped); nothing is ever sent to pid 1 or less.
 
+mod common;
+
+use common::{found, kill_marked, send, send_child};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -168,14 +174,8 @@ fn a_caller_that_ignores_sigchld_does_not_break_the_supervisor() {
     let survivors = Command::new("ps").args(["-Ao", "pid=,args="]).output().map(|o| {
         String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.split_whitespace().any(|w| w == marker)).count()
     });
-    // cleanup by marker before asserting
-    if let Ok(o) = Command::new("ps").args(["-Ao", "pid=,args="]).output() {
-        for l in String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.split_whitespace().any(|w| w == marker)) {
-            if let Some(p) = l.split_whitespace().next().and_then(|p| p.parse::<i32>().ok()) {
-                unsafe { libc::kill(p, libc::SIGKILL) };
-            }
-        }
-    }
+    // cleanup by marker (and identity) before asserting
+    kill_marked(&[&marker]);
     let _ = std::fs::remove_file(&rec);
     assert_eq!(code, Some(0), "sheepdog did not return the root's code within 5 s");
     assert_eq!(survivors.unwrap_or(1), 0, "the escapee survived");
@@ -261,17 +261,21 @@ fn a_background_job_started_before_sheepdog_is_not_killed() {
     let st = Command::new("sh").args(["-c", &script, sheepdog()]).status().unwrap();
     let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
     let _ = std::fs::remove_file(&pidf);
+    // its identity, read when the pid is found: None if it is already gone
+    let job = found(pid);
     // sheepdog has exited, so a job it killed is reaped by init promptly: wait for that, bounded
     let t = Instant::now();
     let mut alive = true;
     while t.elapsed() < Duration::from_millis(500) {
-        alive = unsafe { libc::kill(pid, 0) } == 0;
+        alive = job.is_some_and(common::alive);
         if !alive {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    if let Some((p, id)) = job {
+        send(p, id, libc::SIGKILL);
+    }
     assert_eq!(st.code(), Some(0));
     assert!(alive, "the caller's background job was killed");
 }
@@ -303,8 +307,10 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
             Some((w.next()?.parse().ok()?, w.next()?.to_string()))
         })
         .collect();
-    for (p, _) in &left {
-        unsafe { libc::kill(*p, libc::SIGKILL) };
+    // identities read right at discovery; a pid that ended in between is not signalled
+    let ids: Vec<(i32, u64)> = left.iter().filter_map(|&(p, _)| found(p)).collect();
+    for &(p, id) in &ids {
+        send(p, id, libc::SIGKILL);
     }
     let _ = std::fs::remove_file(&rec);
     assert_eq!(st.code(), Some(125), "a panic must exit 125");
@@ -334,15 +340,6 @@ fn an_unrepresentable_grace_is_a_usage_error() {
 
 // ---- TERM ends the job (review round 5, P2-A) -----------------------------------------
 
-fn marked_pids(marker: &str) -> Vec<i32> {
-    let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
-    assert!(out.status.success(), "ps failed");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| l.split_whitespace().any(|w| w == marker))
-        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
-        .collect()
-}
 /// Live `/bin/sleep <marker>` processes only. Counting every process whose argv mentions the
 /// marker also counts sheepdog itself when the marker is inside its `sh -c` argument.
 fn sleeps(marker: &str) -> usize {
@@ -356,14 +353,6 @@ fn sleeps(marker: &str) -> usize {
         })
         .count()
 }
-fn kill_marked(markers: &[&str]) {
-    for m in markers {
-        for p in marked_pids(m) {
-            unsafe { libc::kill(p, libc::SIGKILL) };
-        }
-    }
-}
-
 /// Poll `cond` until it holds (up to 10 s). Tests wait for the job to exist instead of
 /// sleeping a fixed time: on macOS the first launch of a freshly built binary is delayed by the
 /// security scan, and a fixed sleep then races the scan (round 6).
@@ -385,7 +374,7 @@ fn term_to_sheepdog_ends_the_job() {
     let mut c = Command::new(sheepdog()).args(["run", "--", "sh", "-c", &inner]).spawn().unwrap();
     wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
     let before = (sleeps(&root), sleeps(&esc));
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let st = c.wait().unwrap();
     std::thread::sleep(Duration::from_millis(200));
     let after = (sleeps(&root), sleeps(&esc));
@@ -421,8 +410,8 @@ mod relay {
         c.args(root).stdout(Stdio::null()).stderr(Stdio::null());
         c
     }
-    /// The sheepdog children of `pid` (the relay's supervisor).
-    fn supervisors_of(pid: i32) -> Vec<i32> {
+    /// The sheepdog children of `pid` (the relay's supervisor), with identities read at discovery.
+    fn supervisors_of(pid: i32) -> Vec<(i32, u64)> {
         let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().expect("ps");
         assert!(out.status.success(), "ps failed");
         String::from_utf8_lossy(&out.stdout)
@@ -431,6 +420,7 @@ mod relay {
                 let w: Vec<&str> = l.split_whitespace().collect();
                 (w.len() >= 3 && w[1] == pid.to_string() && w[2].ends_with("sheepdog")).then(|| w[0].parse().ok()).flatten()
             })
+            .filter_map(found)
             .collect()
     }
     fn m(tag: u32) -> String {
@@ -445,10 +435,8 @@ mod relay {
         let mut relayed = start(Some(&job), &["/bin/sleep", &r2]).spawn().unwrap();
         wait_until("both roots", || sleeps(&r1) == 1 && sleeps(&r2) == 1);
         let sups = supervisors_of(relayed.id() as i32);
-        unsafe {
-            libc::kill(direct.id() as i32, libc::SIGTERM);
-            libc::kill(relayed.id() as i32, libc::SIGTERM);
-        }
+        send_child(&mut direct, libc::SIGTERM);
+        send_child(&mut relayed, libc::SIGTERM);
         let (d, r) = (direct.wait().unwrap(), relayed.wait().unwrap());
         kill_marked(&[&job, &r1, &r2]);
         assert_eq!(sups.len(), 1, "the relay path did not start a supervisor: {sups:?}");
@@ -489,7 +477,7 @@ mod relay {
         wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
         let sups = supervisors_of(relayed.id() as i32);
         let before = (sleeps(&root), sleeps(&esc));
-        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        send_child(&mut relayed, libc::SIGKILL);
         let _ = relayed.wait();
         let deadline = Instant::now() + Duration::from_secs(11);
         let mut after = (1, 1);
@@ -501,8 +489,8 @@ mod relay {
             std::thread::sleep(Duration::from_millis(100));
         }
         kill_marked(&[&job, &root, &esc]);
-        for s in &sups {
-            unsafe { libc::kill(*s, libc::SIGKILL) };
+        for &(p, id) in &sups {
+            send(p, id, libc::SIGKILL);
         }
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
         assert_eq!(before, (1, 1), "the job did not start");
@@ -549,15 +537,15 @@ mod relay {
         fn wait_ready(&self) {
             wait_until("sheepdog inside the window", || self.ready.exists());
         }
-        /// The root, found while it is suspended (state T): its pid.
-        fn suspended_root(&self) -> i32 {
+        /// The root, found while it is suspended (state T): its pid and identity (read at discovery).
+        fn suspended_root(&self) -> (i32, u64) {
             let mut pid = None;
             wait_until("the suspended root", || {
                 let out = Command::new("ps").args(["-Ao", "pid=,stat=,args="]).output().expect("ps");
                 pid = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
                     let w: Vec<&str> = l.split_whitespace().collect();
                     let root = w.len() >= 3 && w[2] != sheepdog() && l.contains(&self.ran.display().to_string());
-                    (root && w[1].starts_with('T')).then(|| w[0].parse().ok()).flatten()
+                    (root && w[1].starts_with('T')).then(|| w[0].parse().ok()).flatten().and_then(found)
                 });
                 pid.is_some()
             });
@@ -567,9 +555,9 @@ mod relay {
         fn resumed(&self) -> bool {
             self.cont.exists()
         }
-        fn cleanup(&self, pids: &[i32]) {
-            for p in pids {
-                unsafe { libc::kill(*p, libc::SIGKILL) };
+        fn cleanup(&self, procs: &[(i32, u64)]) {
+            for &(p, id) in procs {
+                send(p, id, libc::SIGKILL);
             }
             for p in [&self.ready, &self.ran, &self.cont] {
                 let _ = std::fs::remove_file(p);
@@ -578,8 +566,8 @@ mod relay {
         }
     }
     #[cfg(target_os = "macos")]
-    fn alive(p: i32) -> bool {
-        unsafe { libc::kill(p, 0) == 0 }
+    fn alive(p: (i32, u64)) -> bool {
+        common::alive(p)
     }
     #[cfg(target_os = "macos")]
     fn state(p: i32) -> Option<char> {
@@ -597,9 +585,9 @@ mod relay {
         }
         None
     }
-    /// Wait (up to 11 s) until none of `pids` is alive.
+    /// Wait (up to 11 s) until none of `pids` is alive (by identity).
     #[cfg(target_os = "macos")]
-    fn until_gone(pids: &[i32]) {
+    fn until_gone(pids: &[(i32, u64)]) {
         let deadline = Instant::now() + Duration::from_secs(11);
         while Instant::now() < deadline && pids.iter().any(|&p| alive(p)) {
             std::thread::sleep(Duration::from_millis(50));
@@ -675,7 +663,7 @@ mod relay {
             let mut relayed = c.spawn().unwrap();
             w.wait_ready();
             let sups = supervisors_of(relayed.id() as i32);
-            unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+            send_child(&mut relayed, libc::SIGKILL);
             let in_window = sleeps(&w.root) == 0 && !w.ran.exists() && !w.resumed();
             let _ = relayed.wait();
             until_gone(&sups);
@@ -705,7 +693,7 @@ mod relay {
             w.wait_ready();
             let sups = supervisors_of(relayed.id() as i32);
             let root = w.suspended_root();
-            unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+            send_child(&mut relayed, libc::SIGKILL);
             let _ = relayed.wait(); // the relay is gone before the window is judged
             let late = w.resumed();
             until_gone(&sups);
@@ -733,7 +721,7 @@ mod relay {
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+            assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
             let late = w.resumed();
             let st = c.wait().unwrap();
             until_gone(&[root]);
@@ -749,7 +737,8 @@ mod relay {
     /// S2 review rounds 3-5 (macOS): a signal that ends the supervisor between the root's
     /// suspended spawn and its CONT must not leave the root stopped. QUIT, USR1 and ALRM end
     /// sheepdog by default (the caller's dispositions are reset to make sure they do). Since S4,
-    /// INT and HUP no longer end sheepdog: `an_int_or_hup_in_the_spawn_window_is_forwarded_later`.
+    /// INT and HUP no longer end sheepdog:
+    /// `an_int_or_hup_in_the_spawn_window_neither_ends_sheepdog_nor_leaves_the_root_stopped`.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_signal_in_the_spawn_window_leaves_no_stopped_root() {
@@ -760,11 +749,11 @@ mod relay {
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            unsafe { libc::kill(c.id() as i32, sig) };
+            assert!(send_child(&mut c, sig), "sheepdog had already ended");
             let late = w.resumed();
             let st = c.wait().unwrap();
             std::thread::sleep(Duration::from_millis(200));
-            let stopped = alive(root) && state(root) == Some('T');
+            let stopped = alive(root) && state(root.0) == Some('T');
             w.cleanup(&[root]);
             assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
             assert_eq!(st.signal(), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
@@ -772,12 +761,12 @@ mod relay {
         }
     }
 
-    /// S4 (macOS): an INT or HUP to the sheepdog pid in the spawn window is held with the other
-    /// signals, then handled after the CONT like any INT or HUP: it does not end sheepdog, and
-    /// the root runs, not stopped. TERM then ends the job.
+    /// S4 (macOS): an INT or HUP to the sheepdog pid in the spawn window does not end sheepdog,
+    /// and the root is not left stopped: it runs. TERM then ends the job. (The job has no
+    /// escapee, so this cell cannot see whether the signal is forwarded.)
     #[cfg(target_os = "macos")]
     #[test]
-    fn an_int_or_hup_in_the_spawn_window_is_forwarded_later() {
+    fn an_int_or_hup_in_the_spawn_window_neither_ends_sheepdog_nor_leaves_the_root_stopped() {
         for (i, sig) in [libc::SIGINT, libc::SIGHUP].into_iter().enumerate() {
             let w = Window::new(90 + 2 * i as u32);
             let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
@@ -785,14 +774,19 @@ mod relay {
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            unsafe { libc::kill(c.id() as i32, sig) };
+            assert!(send_child(&mut c, sig), "sheepdog had already ended");
             let late = w.resumed();
             wait_until("the root's action", || w.ran.exists());
             std::thread::sleep(Duration::from_millis(300));
-            let sheepdog_alive = c.try_wait().unwrap().is_none();
-            let root_state = state(root);
-            unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
-            let st = wait_bounded(&mut c, Duration::from_secs(15));
+            // after this try_wait, c.id() is signalled only if sheepdog had not ended (then it
+            // is not reaped); an ended sheepdog's status is kept for wait_bounded
+            let ended = c.try_wait().unwrap();
+            let sheepdog_alive = ended.is_none();
+            let root_state = state(root.0);
+            if sheepdog_alive {
+                send_child(&mut c, libc::SIGTERM);
+            }
+            let st = ended.or_else(|| wait_bounded(&mut c, Duration::from_secs(15)));
             w.cleanup(&[root]);
             assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
             assert!(sheepdog_alive, "signal {sig}: it ended sheepdog");
@@ -812,19 +806,20 @@ mod relay {
         let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
-        let pg = c.id() as i32;
+        // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
+        let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
         w.wait_ready();
         let root = w.suspended_root();
-        unsafe { libc::killpg(pg, libc::SIGTSTP) };
+        assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
         let late = w.resumed();
         wait_until("sheepdog stopped", || state(pg) == Some('T'));
         std::thread::sleep(Duration::from_millis(300)); // the job stays stopped: nothing may run
         let ran_while_stopped = w.ran.exists();
-        unsafe { libc::killpg(pg, libc::SIGCONT) };
+        assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
         let st = wait_bounded(&mut c, Duration::from_secs(10));
         let ran_after = w.ran.exists();
         if st.is_none() {
-            unsafe { libc::killpg(pg, libc::SIGKILL) };
+            common::send_group(pg, pg_id, libc::SIGKILL);
         }
         w.cleanup(&[root]);
         assert!(!late, "the stop missed the window (load): sheepdog had already resumed the root");
@@ -846,11 +841,12 @@ mod relay {
         let mut c = w.with(&[fixture(), "puniq-only", &w.root, &recs], false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "3000");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
-        let pg = c.id() as i32;
+        // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
+        let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
         w.wait_ready();
-        unsafe { libc::killpg(pg, libc::SIGTSTP) };
+        assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
         wait_until("sheepdog stopped", || state(pg) == Some('T'));
-        unsafe { libc::killpg(pg, libc::SIGCONT) };
+        assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
         let st = wait_bounded(&mut c, Duration::from_secs(15));
         std::thread::sleep(Duration::from_millis(200));
         let d: Vec<(i32, u64)> = std::fs::read_to_string(&rec)
@@ -863,10 +859,10 @@ mod relay {
             .collect();
         let left = d.iter().filter(|&&(p, id)| sheepdog::ident::same(p, id)).count();
         if st.is_none() {
-            unsafe { libc::killpg(pg, libc::SIGKILL) };
+            common::send_group(pg, pg_id, libc::SIGKILL);
         }
         let _ = std::fs::remove_file(&rec);
-        w.cleanup(&d.iter().map(|x| x.0).collect::<Vec<_>>());
+        w.cleanup(&d); // D recorded itself with its identity
         assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepdog did not finish");
         assert_eq!(d.len(), 1, "D was not created");
         assert_eq!(left, 0, "the root ran before its identity was read, and its disclaimed child survived");
@@ -885,21 +881,21 @@ mod relay {
         let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
-        let pg = c.id() as i32;
+        // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
+        let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
         w.wait_ready();
-        unsafe { libc::killpg(pg, libc::SIGTSTP) };
+        assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
         wait_until("sheepdog stopped", || state(pg) == Some('T'));
-        unsafe {
-            libc::kill(pg, libc::SIGTERM);
-            libc::killpg(pg, libc::SIGCONT);
-        }
+        // sheepdog (the group's leader) is stopped, not ended, so it is not reaped
+        assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+        assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
         wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
         let st = wait_bounded(&mut c, Duration::from_secs(15));
         let resumed_by_sheepdog = w.resumed(); // read after sheepdog's check has run
         std::thread::sleep(Duration::from_millis(200));
         let left = (sleeps(&w.root), sleeps(&esc));
         if st.is_none() {
-            unsafe { libc::killpg(pg, libc::SIGKILL) };
+            common::send_group(pg, pg_id, libc::SIGKILL);
         }
         kill_marked(&[&esc]);
         w.cleanup(&[]);
@@ -924,22 +920,22 @@ mod relay {
             let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
             caller(&mut c, true, block_term);
             let mut c = c.spawn().unwrap();
-            let pg = c.id() as i32;
+            // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
+            let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
             w.wait_ready();
-            unsafe { libc::killpg(pg, libc::SIGTSTP) };
+            assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
             wait_until("sheepdog stopped", || state(pg) == Some('T'));
-            unsafe {
-                libc::kill(pg, libc::SIGTERM);
-                libc::kill(pg, other);
-                libc::killpg(pg, libc::SIGCONT);
-            }
+            // sheepdog (the group's leader) is stopped, not ended, so it is not reaped
+            assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+            assert!(send_child(&mut c, other), "sheepdog had already ended");
+            assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
             wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
             let st = wait_bounded(&mut c, Duration::from_secs(15));
             let late = w.resumed(); // see the note in a_relay_death_and_another_signal_leave_nothing
             std::thread::sleep(Duration::from_millis(200));
             let left = (sleeps(&w.root), sleeps(&esc));
             if st.is_none() {
-                unsafe { libc::killpg(pg, libc::SIGKILL) };
+                common::send_group(pg, pg_id, libc::SIGKILL);
             }
             kill_marked(&[&esc]);
             w.cleanup(&[]);
@@ -964,12 +960,12 @@ mod relay {
         w.wait_ready();
         let sups = supervisors_of(relayed.id() as i32);
         let root = w.suspended_root();
-        unsafe { libc::kill(root, libc::SIGCONT) };
+        assert!(send(root.0, root.1, libc::SIGCONT), "the suspended root is gone");
         wait_until("the root's child", || sleeps(&esc) == 1);
-        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        send_child(&mut relayed, libc::SIGKILL);
         let _ = relayed.wait();
-        for &p in &sups {
-            unsafe { libc::kill(p, libc::SIGINT) };
+        for &(p, id) in &sups {
+            send(p, id, libc::SIGINT);
         }
         until_gone(&sups);
         // written only when sheepdog resumes the root; read after exit it cannot tell a missed
@@ -1000,7 +996,7 @@ mod relay {
             .unwrap();
         w.wait_ready();
         let sups = supervisors_of(relayed.id() as i32);
-        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        send_child(&mut relayed, libc::SIGKILL);
         let _ = relayed.wait();
         let late = registered.exists();
         let _ = std::fs::remove_file(&registered);
@@ -1032,7 +1028,7 @@ mod relay {
             .unwrap();
         wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
         let sups = supervisors_of(relayed.id() as i32);
-        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        send_child(&mut relayed, libc::SIGKILL);
         let _ = relayed.wait();
         let deadline = Instant::now() + Duration::from_secs(11);
         let mut after = (1, 1);
@@ -1044,8 +1040,8 @@ mod relay {
             std::thread::sleep(Duration::from_millis(100));
         }
         kill_marked(&[&job, &root, &esc]);
-        for s in &sups {
-            unsafe { libc::kill(*s, libc::SIGKILL) };
+        for &(p, id) in &sups {
+            send(p, id, libc::SIGKILL);
         }
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
         let err = std::fs::read_to_string(&errf).unwrap_or_default();
@@ -1091,7 +1087,10 @@ mod relay {
     /// the tree is gone, and the relay dies of HUP, as the supervisor did.
     #[test]
     fn the_relay_forwards_hup_only_as_session_leader() {
-        let (j1, j2, r1, r2, e2) = (m(9), m(10), m(11), m(12), m(13));
+        // m(16), not m(13): a_dead_relay_still_ends_the_job_while_polling uses m(13) as its job.
+        // Run in parallel, its `/bin/sleep` makes this count 2, and its cleanup by marker kills
+        // this job's sheepdog (the `sh -c` argv carries the word)
+        let (j1, j2, r1, r2, e2) = (m(9), m(10), m(11), m(12), m(16));
         let mut plain = start(Some(&j1), &["/bin/sleep", &r1]).spawn().unwrap();
         let inner = format!("/bin/sleep {e2} & exec /bin/sleep {r2}");
         let mut leader = unsafe {
@@ -1101,17 +1100,20 @@ mod relay {
             }).spawn().unwrap()
         };
         wait_until("both jobs", || sleeps(&r1) == 1 && sleeps(&r2) == 1 && sleeps(&e2) == 1);
-        unsafe {
-            libc::kill(plain.id() as i32, libc::SIGHUP);
-            libc::kill(leader.id() as i32, libc::SIGHUP);
-        }
+        send_child(&mut plain, libc::SIGHUP);
+        send_child(&mut leader, libc::SIGHUP);
         let leader_st = relay::wait_bounded_any(&mut leader, Duration::from_secs(15));
-        let plain_alive = plain.try_wait().unwrap().is_none() && sleeps(&r1) == 1;
+        // after this try_wait, plain's pid is signalled only if it had not ended (not reaped)
+        let plain_running = plain.try_wait().unwrap().is_none();
+        let plain_alive = plain_running && sleeps(&r1) == 1;
         let left = (sleeps(&r2), sleeps(&e2));
-        unsafe { libc::kill(plain.id() as i32, libc::SIGTERM) };
+        if plain_running {
+            send_child(&mut plain, libc::SIGTERM);
+        }
         let _ = plain.wait();
         if leader_st.is_none() {
-            unsafe { libc::kill(leader.id() as i32, libc::SIGKILL) };
+            // wait_bounded_any saw no exit, so the leader is not reaped
+            send_child(&mut leader, libc::SIGKILL);
             let _ = leader.wait();
         }
         kill_marked(&[&j1, &j2, &r1, &r2, &e2]);
@@ -1174,7 +1176,7 @@ fn a_term_during_the_self_reexec_is_not_lost() {
     let _ = std::fs::remove_file(&started);
     let script = format!("touch '{}'; exec /bin/sleep {root}", started.display());
     let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "300", &root, &["sh", "-c", &script]);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let start = Instant::now();
     let st = loop {
         if let Some(st) = c.try_wait().unwrap() {
@@ -1200,7 +1202,7 @@ fn a_term_just_before_the_wait_is_not_lost() {
     use std::os::unix::process::ExitStatusExt;
     let root = format!("24.{}333002", std::process::id());
     let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "400", &root, &["/bin/sleep", &root]);
-    unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
     let start = Instant::now();
     let st = loop {
         if let Some(st) = c.try_wait().unwrap() {
@@ -1242,10 +1244,11 @@ fn a_forwarded_hup_does_not_leak_the_tree() {
             .unwrap()
     };
     wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
-    unsafe { libc::kill(c.id() as i32, libc::SIGHUP) };
+    assert!(send_child(&mut c, libc::SIGHUP), "the relay had already ended");
     let st = relay::wait_bounded_any(&mut c, Duration::from_secs(15));
     if st.is_none() {
-        unsafe { libc::kill(c.id() as i32, libc::SIGKILL) };
+        // wait_bounded_any saw no exit, so the relay is not reaped
+        send_child(&mut c, libc::SIGKILL);
         let _ = c.wait();
     }
     std::thread::sleep(Duration::from_millis(200));
