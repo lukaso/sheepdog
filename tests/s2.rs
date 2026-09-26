@@ -307,18 +307,21 @@ fn s2_a_self_disclaimed_child_is_caught_by_its_original_parent() {
 }
 
 /// S1 fix review P3-2 (macOS): a failed kqueue TERM registration falls back to polling, so
-/// TERM still ends the job well under the 250 ms tick (debug seam fails EVFILT_SIGNAL only).
+/// TERM still ends the job well under a tick (debug seam fails EVFILT_SIGNAL only).
 #[cfg(target_os = "macos")]
 #[test]
 fn s2_a_failed_term_registration_still_wakes_on_term() {
     let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up
-    // five samples: without the fallback, TERM waits for the next 250 ms tick, whose phase
-    // against the TERM varies, so one sample can land under 100 ms
+    // The tick is widened to 900 ms (debug seam): without the fallback, TERM waits for the next
+    // tick, 0-900 ms away; with it, the loop polls every 50 ms. Five samples under 400 ms: the
+    // fallback passes with room under load, and a mutant passes by luck only if all five TERMs
+    // land in the last 400 ms of a tick (about 1 in 60).
     for _ in 0..5 {
         let j = Job::new();
         let c = Command::new(sheepdog())
             .args(["run", "--", "/bin/sleep", &j.marker])
             .env("SHEEPDOG_TEST_KQ_SIG_EINVAL", "1")
+            .env("SHEEPDOG_TEST_TICK_MS", "900")
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
@@ -336,7 +339,7 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
         assert_eq!(out.status.signal(), Some(libc::SIGTERM));
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains("cannot watch TERM"), "the seam did not fail the TERM registration: {err}");
-        assert!(took < Duration::from_millis(100), "TERM took {took:?} after a failed TERM registration");
+        assert!(took < Duration::from_millis(400), "TERM took {took:?} after a failed TERM registration");
     }
 }
 
@@ -398,6 +401,47 @@ fn s2_a_fast_roots_disclaimed_child_is_killed() {
     }
 }
 
+/// Review S2 round 3, A-P3-2 (macOS): a sheepdog that starts responsible for itself but with no
+/// history (nothing refers to its uniqueid: a launchd job whose program is sheepdog) does not
+/// relay, so the pid its caller holds is the supervisor (a pid-only INT reaches it).
+#[cfg(target_os = "macos")]
+#[test]
+fn s2_a_fresh_self_responsible_start_does_not_relay() {
+    let j = Job::new();
+    let mut c = Command::new(fixture())
+        .args(["dspawn", "wait", sheepdog(), "run", "--", "/bin/sleep", &j.marker])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let t = Instant::now();
+    let root = loop {
+        let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().unwrap();
+        let found = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            (w.len() == 4 && w[2] == "/bin/sleep" && w[3] == j.marker).then(|| (w[0].parse::<i32>().unwrap(), w[1].parse::<i32>().unwrap()))
+        });
+        if let Some(f) = found {
+            break f;
+        }
+        assert!(t.elapsed() < Duration::from_secs(10), "the root never started");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // the fixture spawned sheepdog; find that pid (the fixture's only child)
+    let out = Command::new("ps").args(["-Ao", "pid=,ppid="]).output().unwrap();
+    let spawned: Vec<i32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            (w.len() == 2 && w[1] == c.id().to_string()).then(|| w[0].parse().ok()).flatten()
+        })
+        .collect();
+    unsafe { libc::kill(root.0, libc::SIGKILL) };
+    let _ = c.wait();
+    assert_eq!(spawned.len(), 1, "expected the fixture's one child (sheepdog): {spawned:?}");
+    assert_eq!(root.1, spawned[0], "a fresh self-responsible sheepdog relayed: the root's parent is not the pid its caller holds");
+}
+
 /// Review S2 round 2, B-P2-1 (macOS): the root is suspended until its identity is read. A
 /// debug seam delays that read by 300 ms; without the suspension the root would run, start its
 /// disclaimed child and exit meanwhile, and the child's only fact would be lost.
@@ -450,11 +494,31 @@ fn s2_the_root_starts_with_no_signal_pending() {
     let direct = run(false);
     let supervised = run(true);
     assert_eq!(supervised, direct, "the root started with a signal pending that its caller never sent");
+    // control: the caller's SIGCONT block reaches the root, or a CONT would not stay pending
+    // and the cell above would measure nothing
+    let mask = {
+        let mut c = Command::new(sheepdog());
+        c.args(["run", "--", fixture(), "print-mask"]);
+        let out = unsafe {
+            c.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGCONT);
+                libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                Ok(())
+            })
+            .output()
+            .unwrap()
+        };
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    assert!(mask.lines().any(|l| l.trim() == libc::SIGCONT.to_string()), "control: SIGCONT is not blocked in the root: {mask:?}");
 }
 
-/// Review S2 round 2, A-P3-2: a `SHEEPDOG_RELAY_PID` inherited from the environment (a stale
+/// Review S2 round 2, A-P3-2 (macOS; Linux never reads it): a `SHEEPDOG_RELAY_PID` inherited from the environment (a stale
 /// value, or a relayed sheepdog's) never makes sheepdog believe its relay died. The inherited
 /// value names a relay that is gone (a reaped child's pid), so trusting it would end the job.
+#[cfg(target_os = "macos")]
 #[test]
 fn s2_an_inherited_relay_variable_is_ignored() {
     let mut gone = Command::new("true").spawn().unwrap();
@@ -466,11 +530,12 @@ fn s2_an_inherited_relay_variable_is_ignored() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran", "the command never ran");
-    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.status.code(), Some(0), "sheepdog trusted the inherited relay and ended the job: {:?}", out.status);
 }
 
-/// A sheepdog inside a relayed sheepdog's job runs normally (a sanity check: the inherited
-/// variable names the outer relay, which is alive, so no mutant of the check can fail here).
+/// A sheepdog inside a relayed sheepdog's job runs normally (a sanity check of the nesting
+/// shape; the relay variable is removed before the root is spawned, so it never reaches the
+/// inner sheepdog).
 #[test]
 fn s2_a_nested_sheepdog_under_a_relay_runs() {
     let job = format!("35.{}001", std::process::id());

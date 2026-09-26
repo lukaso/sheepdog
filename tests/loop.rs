@@ -262,7 +262,7 @@ fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
     let mut c = Command::new(sheepdog())
         .args(["run", "--", "/bin/sleep", &root])
         .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let t = Instant::now();
@@ -278,6 +278,12 @@ fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
     unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
     let st = wait_bounded(&mut c, Duration::from_secs(3));
     let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+    let mut err = String::new();
+    if let Some(mut e) = c.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut err);
+    }
+    assert!(err.contains("polling instead"), "the seam did not make the wait poll: {err:?}");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "TERM was ignored after a failed registration");
 }
 

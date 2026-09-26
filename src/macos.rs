@@ -268,7 +268,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
     }
     let me = unsafe { libc::getpid() };
     let own_reexec = std::env::var(REEXEC_MARK).ok().as_deref() == Some(me.to_string().as_str());
-    let self_responsible = !own_reexec && uniq(me).map(|u| u.0).is_some_and(|u| resp_uniq(me) == Some(u));
+    let self_responsible = !own_reexec && uniq(me).map(|u| u.0).is_some_and(|u| resp_uniq(me) == Some(u) && referred_to(me, u));
     if !crate::has_children() && !self_responsible {
         return None;
     }
@@ -298,6 +298,34 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
             }
             sup => Some(relay_loop(sup, relay)),
         }
+    }
+}
+
+/// Does any live process other than `me` refer to uniqueid `u`, as its responsible process or
+/// as its original parent? A self-responsible sheepdog with no such history needs no relay (a
+/// fresh launchd job, S2 review round 3): relaying would only cost the pid-only INT.
+fn referred_to(me: pid_t, u: u64) -> bool {
+    all_pids().into_iter().filter(|&p| p != me && p > 0).any(|p| {
+        uniq(p).is_some_and(|(_, pu)| pu == u) || resp_uniq(p) == Some(u)
+    })
+}
+
+/// Has the relay `r` already exited? Its NOTE_EXIT is refused with ESRCH (also for a zombie).
+fn relay_exited(r: pid_t) -> bool {
+    unsafe {
+        let kq = libc::kqueue();
+        if kq < 0 {
+            return false;
+        }
+        let mut ev: libc::kevent = zeroed();
+        ev.ident = r as usize;
+        ev.filter = libc::EVFILT_PROC;
+        ev.flags = libc::EV_ADD;
+        ev.fflags = libc::NOTE_EXIT;
+        let gone = libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        libc::close(kq);
+        gone
     }
 }
 
@@ -380,6 +408,9 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
         // NOTE_EXIT registration only (TERM still registers: the hazardous combination).
         let mut proc_exiting = false;
         let mut relay_by_ppid = polling && relay.is_some();
+        // the scan tick, 250 ms; debug seam SHEEPDOG_TEST_TICK_MS (under 1 s) widens it, so a
+        // cell can tell "woke at once" from "woke at the next tick" by a wide margin
+        let tick_ns = crate::seam_ms("SHEEPDOG_TEST_TICK_MS").filter(|&ms| ms < 1000).unwrap_or(250) as i64 * 1_000_000;
         let force_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_EINVAL");
         // debug seam: fail only the TERM registration (S1 fix review, P3-2)
         let force_sig_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_SIG_EINVAL");
@@ -465,7 +496,7 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
                 continue;
             }
             let mut ev: libc::kevent = zeroed();
-            let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
+            let tick = libc::timespec { tv_sec: 0, tv_nsec: tick_ns };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
             track(); // membership while running (a tick or an event)
             if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {
@@ -497,6 +528,11 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             std::env::remove_var(REEXEC_MARK);
             let relay = my_relay();
             std::env::remove_var(RELAY_PID);
+            // a relay that is already gone means the job must not start: TERM is now pending
+            // and term_before_spawn ends sheepdog before any root exists (S2 review round 3)
+            if relay.is_some_and(relay_exited) {
+                relay_died();
+            }
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
             }
@@ -513,6 +549,14 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             // pending in the root, a signal its caller never sent. That case keeps the race of
             // a root that exits before its identity is read (PLAN.md §3.2).
             let cont_blocked = unsafe { libc::sigismember(&sig.caller_mask, libc::SIGCONT) } == 1;
+            // Every signal is held from the spawn to the CONT: a signal that ended sheepdog in
+            // between would leave the root stopped for good. Held signals act after the CONT.
+            let mut held: libc::sigset_t = unsafe { zeroed() };
+            unsafe {
+                let mut all: libc::sigset_t = zeroed();
+                libc::sigfillset(&mut all);
+                libc::sigprocmask(libc::SIG_BLOCK, &all, &mut held);
+            }
             let root = spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask);
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS");
             if let Some((u, _)) = uniq(root) {
@@ -521,6 +565,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if !cont_blocked {
                 unsafe { libc::kill(root, libc::SIGCONT) };
             }
+            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
             let mut track = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);

@@ -153,6 +153,11 @@ pub fn seam_sleep(name: &str) {
     }
 }
 
+/// Test seam (debug builds only): the number of milliseconds in env var `name`, if set.
+pub fn seam_ms(name: &str) -> Option<u64> {
+    std::env::var(name).ok().filter(|_| cfg!(debug_assertions)).and_then(|v| v.parse().ok())
+}
+
 /// Test seam (debug builds only): is env var `name` set to "1"?
 pub fn seam_flag(name: &str) -> bool {
     seam(name)

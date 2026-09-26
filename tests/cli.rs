@@ -311,6 +311,15 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     assert!(left.is_empty(), "members were left behind after a panic: {left:?}");
 }
 
+/// The largest grace, one day, is accepted in both spellings.
+#[test]
+fn a_one_day_grace_is_accepted() {
+    for v in ["86400", "86400000ms"] {
+        let st = Command::new(sheepdog()).args(["run", "--grace", v, "--", "true"]).stderr(Stdio::null()).status().unwrap();
+        assert_eq!(st.code(), Some(0), "--grace {v} was refused");
+    }
+}
+
 /// Review S2 A-P3: a duration that is not finite or too large is a usage error, not a panic.
 #[test]
 fn an_unrepresentable_grace_is_a_usage_error() {
@@ -500,6 +509,115 @@ mod relay {
         assert_eq!(after, (0, 0), "killing the relay leaked the job (root, escapee)");
     }
 
+    /// S2 review round 3 (macOS): a relay that dies before the root is spawned (here: during the
+    /// supervisor's re-exec, debug seam) means the job must not start: the root's first action
+    /// never happens. Both with the caller's TERM at its default and with the caller blocking
+    /// TERM (then a root that is spawned anyway would act before any kill reaches it).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_relay_dead_before_the_spawn_starts_no_root() {
+        use std::os::unix::process::CommandExt;
+        for (i, block_term) in [false, true].into_iter().enumerate() {
+            let (job, root) = (m(16 + 2 * i as u32), m(17 + 2 * i as u32));
+            let ready = std::env::temp_dir().join(format!("sd-ready-{}-relay-early-{i}", std::process::id()));
+            let ran = std::env::temp_dir().join(format!("sd-ran-{}-relay-early-{i}", std::process::id()));
+            let _ = std::fs::remove_file(&ready);
+            let _ = std::fs::remove_file(&ran);
+            let script = format!("echo RAN > '{}'; exec /bin/sleep {root}", ran.display());
+            let mut c = start(Some(&job), &["/bin/sh", "-c", &script]);
+            c.env("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600").env("SHEEPDOG_TEST_READY_FILE", &ready);
+            if block_term {
+                unsafe {
+                    c.pre_exec(|| {
+                        let mut set: libc::sigset_t = std::mem::zeroed();
+                        libc::sigemptyset(&mut set);
+                        libc::sigaddset(&mut set, libc::SIGTERM);
+                        libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                        Ok(())
+                    });
+                }
+            }
+            let mut relayed = c.spawn().unwrap();
+            wait_until("the supervisor inside its re-exec window", || ready.exists());
+            let sups = supervisors_of(relayed.id() as i32);
+            unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+            let _ = relayed.wait();
+            let deadline = Instant::now() + Duration::from_secs(11);
+            let alive = |p: i32| unsafe { libc::kill(p, 0) } == 0;
+            while Instant::now() < deadline && sups.iter().any(|&p| alive(p)) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            let (did_run, left, sup_after) = (ran.exists(), sleeps(&root), sups.iter().filter(|&&p| alive(p)).count());
+            let _ = std::fs::remove_file(&ready);
+            let _ = std::fs::remove_file(&ran);
+            kill_marked(&[&job, &root]);
+            for s in &sups {
+                unsafe { libc::kill(*s, libc::SIGKILL) };
+            }
+            assert_eq!(sups.len(), 1, "caller blocks TERM={block_term}: expected one supervisor in the window, found {sups:?}");
+            assert!(!did_run, "caller blocks TERM={block_term}: the root ran although its relay was already dead");
+            assert_eq!((left, sup_after), (0, 0), "caller blocks TERM={block_term}: the job was left (root, supervisor)");
+        }
+    }
+
+    /// S2 review round 3 (macOS): a relay that dies after the pre-spawn check but before the
+    /// wait registers for its exit (debug seam holds the spawn window open) still ends the job:
+    /// the registration fails with ESRCH, which counts as the relay's death.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_relay_dead_before_the_wait_still_ends_the_job() {
+        let (job, root) = (m(21), m(22));
+        let ready = std::env::temp_dir().join(format!("sd-ready-{}-relay-wait", std::process::id()));
+        let _ = std::fs::remove_file(&ready);
+        let mut relayed = start(Some(&job), &["/bin/sleep", &root])
+            .env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800")
+            .env("SHEEPDOG_TEST_READY_FILE", &ready)
+            .spawn()
+            .unwrap();
+        wait_until("the supervisor inside the spawn window", || ready.exists());
+        let sups = supervisors_of(relayed.id() as i32);
+        unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+        let _ = relayed.wait();
+        let deadline = Instant::now() + Duration::from_secs(11);
+        let alive = |p: i32| unsafe { libc::kill(p, 0) } == 0;
+        while Instant::now() < deadline && (sleeps(&root) > 0 || sups.iter().any(|&p| alive(p))) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (left, sup_after) = (sleeps(&root), sups.iter().filter(|&&p| alive(p)).count());
+        let _ = std::fs::remove_file(&ready);
+        kill_marked(&[&job, &root]);
+        for s in &sups {
+            unsafe { libc::kill(*s, libc::SIGKILL) };
+        }
+        assert_eq!(sups.len(), 1, "expected one supervisor in the window, found {sups:?}");
+        assert_eq!((left, sup_after), (0, 0), "a relay dead before the wait leaked the job (root, supervisor)");
+    }
+
+    /// S2 review round 3 (macOS): a signal that ends the supervisor between the root's suspended
+    /// spawn and its CONT (debug seam widens that window) must not leave the root stopped.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_signal_in_the_spawn_window_leaves_no_stopped_root() {
+        let root = m(20);
+        let ready = std::env::temp_dir().join(format!("sd-ready-{}-spawn-window", std::process::id()));
+        let _ = std::fs::remove_file(&ready);
+        let mut c = start(None, &["/bin/sleep", &root]);
+        let mut c = c.env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "1500").env("SHEEPDOG_TEST_READY_FILE", &ready).spawn().unwrap();
+        wait_until("the supervisor inside the spawn window", || ready.exists());
+        unsafe { libc::kill(c.id() as i32, libc::SIGHUP) };
+        let _ = c.wait();
+        std::thread::sleep(Duration::from_millis(200));
+        let out = Command::new("ps").args(["-Ao", "stat=,args="]).output().expect("ps");
+        let stopped = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains(&root) && l.trim_start().starts_with('T'))
+            .count();
+        let _ = std::fs::remove_file(&ready);
+        kill_marked(&[&root]);
+        assert_eq!(stopped, 0, "the root was left stopped after the supervisor died in the spawn window");
+    }
+
     /// S2 review round 2: a dead relay still ends the job when the supervisor's wait has fallen
     /// back to polling (debug seam: the root's exit cannot be watched), where kqueue events are
     /// not read.
@@ -508,7 +626,12 @@ mod relay {
     fn a_dead_relay_still_ends_the_job_while_polling() {
         let (job, root, esc) = (m(13), m(14), m(15));
         let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
-        let mut relayed = start(Some(&job), &["sh", "-c", &inner]).env("SHEEPDOG_TEST_KQ_EINVAL", "1").spawn().unwrap();
+        let errf = std::env::temp_dir().join(format!("sd-relay-poll-{}", std::process::id()));
+        let mut relayed = start(Some(&job), &["sh", "-c", &inner])
+            .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
+            .stderr(std::fs::File::create(&errf).unwrap())
+            .spawn()
+            .unwrap();
         wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
         let sups = supervisors_of(relayed.id() as i32);
         unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
@@ -527,6 +650,9 @@ mod relay {
             unsafe { libc::kill(*s, libc::SIGKILL) };
         }
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
+        let err = std::fs::read_to_string(&errf).unwrap_or_default();
+        let _ = std::fs::remove_file(&errf);
+        assert!(err.contains("polling instead"), "the seam did not make the wait poll: {err:?}");
         assert_eq!(after, (0, 0), "killing the relay leaked the job while polling (root, escapee)");
     }
 
