@@ -547,6 +547,85 @@ fn an_escapee_newer_than_the_last_scan_gets_the_int() {
     assert_eq!(e.0, 1, "the escapee did not get the INT within {took:?} (a timed scan is 900 ms away)");
 }
 
+/// PLAN.md §3.1: the relay never forwards INT, so an INT sent only to the relay's pid reaches
+/// no member (the stated pid-only limit, stricter on this path). A relay that forwarded it
+/// would double every terminal INT, which a ctrl-C cell cannot always see: the two INTs can
+/// merge into one pending signal at the supervisor.
+#[test]
+fn an_int_to_the_relay_pid_reaches_no_member() {
+    let job = Job::new();
+    let bg = new_marker();
+    let mut c = Command::new(fixture());
+    c.args(["bg-then-exec", &bg]).args(run_args(&[], &job.args())).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        c.pre_exec(|| {
+            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    c.process_group(0);
+    let mut relay = c.spawn().unwrap();
+    let rid = identity(relay.id() as i32).expect("the relay's identity");
+    let ((esc, _), (root, _)) = job.ready();
+    let out = Command::new("ps").args(["-Ao", "ppid=,args="]).output().expect("ps");
+    let has_supervisor = String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && w[0] == relay.id().to_string() && w[1].ends_with("sheepdog")
+    });
+    assert!(send(relay.id() as i32, rid, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(700));
+    let (r, e) = (job.counts(root), job.counts(esc));
+    let relay_alive = relay.try_wait().unwrap().is_none();
+    send(relay.id() as i32, rid, libc::SIGTERM);
+    if wait_bounded(&mut relay, Duration::from_secs(15)).is_none() {
+        send(relay.id() as i32, rid, libc::SIGKILL);
+        let _ = relay.wait();
+    }
+    for p in sleeps(&bg) {
+        if let Some(id) = identity(p) {
+            send(p, id, libc::SIGKILL);
+        }
+    }
+    assert!(has_supervisor, "control: this is not the relay path (no sheepdog child of the relay)");
+    assert!(relay_alive, "an INT ended the relay");
+    assert_eq!((r.0, e.0), (0, 0), "an INT to the relay's pid reached (root, escapee)");
+}
+
+/// PHASE1.md §1.3: an INT counts "at any point before sheepdog exits", also one that comes
+/// during the kill. The root dies of INT by itself (sheepdog got none), and while the kill waits
+/// out the grace (the escapee ignores TERM), sheepdog gets an INT: it dies of INT. Control: the
+/// same run without that INT exits 130.
+#[test]
+fn an_int_during_the_kill_still_counts() {
+    for with_int in [false, true] {
+        let job = Job::new();
+        let term_log = PathBuf::from(format!("{}.term", job.rec.display()));
+        let _ = std::fs::remove_file(&term_log);
+        let script = format!("\"$0\" term-counter {} '{}'; kill -INT $$; exec /bin/sleep {}", job.marker, job.rec.display(), job.marker);
+        let (mut c, id) = direct(&["--quiet", "--grace", "2s"], &["/bin/sh".into(), "-c".into(), script, fixture().into()], &[]);
+        wait_for("the grace's TERM", Duration::from_secs(15), || {
+            std::fs::read_to_string(&term_log).ok().filter(|s| s.contains("TERM ")).map(|_| ())
+        });
+        if with_int {
+            assert!(send(c.id() as i32, id, libc::SIGINT), "the INT was not sent");
+        }
+        let st = wait_bounded(&mut c, Duration::from_secs(15));
+        if st.is_none() {
+            send(c.id() as i32, id, libc::SIGKILL);
+            let _ = c.wait();
+        }
+        let _ = std::fs::remove_file(&term_log);
+        use std::os::unix::process::ExitStatusExt;
+        if with_int {
+            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGINT), "an INT during the kill did not count: {st:?}");
+        } else {
+            assert_eq!(st.and_then(|s| s.code()), Some(130), "control: without sheepdog's own INT it exits 130: {st:?}");
+        }
+    }
+}
+
 // ---- the hint (DevEx D9) and its flags ---------------------------------------------------
 
 /// S4 (PLAN.md §3.1, D9): INT to the pid while the root keeps running prints one hint, once
