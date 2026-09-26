@@ -2,6 +2,8 @@
 
 **Status:** r4, 2026-09-25, **ready to build**. Plan review rounds 1–3 (round 3: one P1 with a probed fix, the reviewer's verdict: ready once it is applied). All findings applied (§5). Phase 0 is closed (PLAN.md §7.1). This file turns PLAN.md §7's phase-1 row into an ordered, test-first build. PLAN.md is the spec: where they differ, PLAN.md wins, **except** where this file names a PLAN.md amendment; those amendments are made in the same commit as the step that needs them.
 
+**Progress:** S1 closed (fix review clean). **S2 closed 2026-09-26** after 9 review rounds (e59dd3a … 168f951): the macOS relay (fresh uniqueid when sheepdog starts with a history), a root known from birth (suspended spawn, signals held until its identity is read), the TERM grace, `--grace`, `--leave-strays`; 49 mutants red. Rounds 7–9 found no P1/P2; the last fix (a test message and one PLAN clause) was not re-reviewed. The fix list of round 1 is S2-FIXES.md. Next: S3.
+
 **Phase-1 scope (PLAN.md §7):** `run`, the kill on every exit, signals and job control, `kill <pid>` (proved members, `--dry-run`); cells 1–12, 16, 20–24, 27, 28 (proved part); the no-setup safety cells. **Plus** everything §7.1 carries: the four round-7 P3s, the phase-1 HUP cell (now `#[ignore]`d), the TERM grace, the pid-reuse seam, pidfd, Linux amd64 and PID 1, the grant through a PATH symlink.
 
 **Placed in phase 1 here** (PLAN.md did not place them): `--forward-int-to-root` (S4), `--quiet` (S4, suppresses the D9 hint), `--leave-strays` (S2, the opt-out of the kill on every exit), "a supervisor in the kill set is ended first" (S6).
