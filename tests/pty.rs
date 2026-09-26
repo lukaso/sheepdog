@@ -826,10 +826,11 @@ fn the_hint_reaches_a_harness_in_the_foreground() {
     let sh = pty.child.id();
     job.ready();
     let (sd, sd_id) = wait_for("sheepdog under the harness", Duration::from_secs(15), || supervisor_of(sh));
-    assert!(send(sd, sd_id, libc::SIGINT));
     // the hint is due at 1.5 s: wait for the first output (bounded) and note when it came, so
-    // the output is the hint (it came when the hint was due) and not some earlier error
+    // the output is the hint (it came when the hint was due) and not some earlier error. The
+    // clock starts before the INT, so a delayed test thread cannot make the hint look early.
     let sent = Instant::now();
+    assert!(send(sd, sd_id, libc::SIGINT));
     let mut first: Option<Duration> = None;
     while sent.elapsed() < Duration::from_secs(10) {
         pty.drain();
@@ -839,8 +840,11 @@ fn the_hint_reaches_a_harness_in_the_foreground() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::thread::sleep(Duration::from_millis(100));
-    pty.drain();
+    // then the whole line (it can reach the master in pieces): its group check needs the end
+    while first.is_some() && !pty.out.contains(&b'\n') && sent.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        pty.drain();
+    }
     let shown = String::from_utf8_lossy(&pty.out).to_string();
     send(sd, sd_id, libc::SIGTERM);
     assert!(first.is_some(), "no hint for a pid-only INT from a harness in the foreground");
