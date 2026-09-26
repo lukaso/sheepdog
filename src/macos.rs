@@ -262,7 +262,7 @@ fn my_relay() -> Option<pid_t> {
 /// session leader; never forwards INT (a terminal INT reaches the whole group); dies the way
 /// the supervisor died. macOS has no PDEATHSIG, so the supervisor watches the relay itself and
 /// raises TERM when it dies (`relay_gone`).
-fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
+fn relay_if_needed(sig: &crate::Signals, int_to_root: bool) -> Option<i32> {
     if my_relay().is_some() {
         return None; // the supervisor a relay forked, after its re-exec
     }
@@ -296,7 +296,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => Some(relay_loop(sup, relay)),
+            sup => Some(relay_loop(sup, relay, int_to_root)),
         }
     }
 }
@@ -330,7 +330,7 @@ fn relay_exited(r: pid_t) -> bool {
 
 /// The relay's loop: a kqueue on the supervisor's exit and on TERM/HUP/INT (all blocked; a
 /// kqueue signal event is only a wake-up, the signal is taken with `consume`).
-fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
+fn relay_loop(sup: pid_t, relay: pid_t, int_to_root: bool) -> i32 {
     unsafe {
         let kq = libc::kqueue();
         if kq >= 0 {
@@ -363,7 +363,11 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
             if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
                 libc::kill(sup, libc::SIGHUP);
             }
-            crate::consume(libc::SIGINT); // never forwarded: the terminal sent it to the group
+            // never forwarded (the terminal sent it to the group), except with
+            // --forward-int-to-root, which opts in to double delivery
+            if crate::consume(libc::SIGINT) && int_to_root {
+                libc::kill(sup, libc::SIGINT);
+            }
             if kq >= 0 {
                 // a registration that failed only costs this bounded wait
                 let tick = libc::timespec { tv_sec: 0, tv_nsec: 250_000_000 };
@@ -524,7 +528,7 @@ fn wait(
                     ints.forward(s, pid, members);
                 }
             }
-            ints.tick(true);
+            ints.tick();
             if !polling && proc_exiting {
                 // NOTE_EXIT was refused with ESRCH: the root is exiting; reap it, then decide again
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { st } else { crate::exit_status(125) });
@@ -562,7 +566,7 @@ fn wait(
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     match a.mode.as_deref() {
         None | Some("responsible") => {
-            if let Some(code) = relay_if_needed(sig) {
+            if let Some(code) = relay_if_needed(sig, a.forward_int_to_root) {
                 return code;
             }
             let ok = become_responsible(&a.argv, &sig.caller_mask);

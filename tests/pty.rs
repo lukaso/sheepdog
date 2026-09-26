@@ -71,6 +71,15 @@ fn sleeps(marker: &str) -> Vec<i32> {
         .collect()
 }
 
+/// Is there a sheepdog child of `relay` (the relay path was taken)?
+fn has_supervisor(relay: u32) -> bool {
+    let out = Command::new("ps").args(["-Ao", "ppid=,args="]).output().expect("ps");
+    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && w[0] == relay.to_string() && w[1].ends_with("sheepdog")
+    })
+}
+
 fn new_marker() -> String {
     format!("28.{}{:06}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst))
 }
@@ -441,10 +450,12 @@ fn cell22c_group_signals_without_a_terminal_reach_each_member_once() {
     let (ri, ei) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
     assert!(send_group(pg, pg_id, libc::SIGHUP));
     let (rh, eh) = job.settle(root, esc, |r, e| r.1 >= 1 && e.1 >= 1);
+    let alive = same(pg, pg_id);
     send(pg, pg_id, libc::SIGTERM);
     let _ = wait_bounded(&mut outer, Duration::from_secs(15));
     assert_eq!((ri.0, ei.0), (1, 1), "INT: each member must count exactly one (root, escapee)");
     assert_eq!((rh.1, eh.1), (1, 1), "HUP: each member must count exactly one (root, escapee)");
+    assert!(alive, "HUP must not end the job");
 }
 
 /// Cell 22(d) and (e): the terminal closes. The kernel sends HUP to the session leader (the
@@ -453,11 +464,12 @@ fn cell22c_group_signals_without_a_terminal_reach_each_member_once() {
 fn cell22d_a_closed_terminal_hups_each_member_once() {
     let job = Job::new();
     let mut pty = Pty::shell(&[], &run_args(&[], &job.args()));
-    pty.started();
+    let (sd, sd_id) = pty.started();
     let ((esc, _), (root, _)) = job.ready();
     pty.close_master();
     let forwarded = pty.wait_line("the shell's HUP", Duration::from_secs(10), |l| l == "hup");
     let (r, e) = job.settle(root, esc, |r, e| r.1 >= 1 && e.1 >= 1);
+    assert!(same(sd, sd_id), "HUP must not end the job");
     assert!(forwarded.is_some(), "control: the shell never got the terminal's HUP");
     assert_eq!((r.1, e.1), (1, 1), "each member must count exactly one HUP (root, escapee)");
 }
@@ -487,6 +499,7 @@ fn cell22g_a_session_leader_forwards_hup_to_every_member() {
     let ((esc, _), (root, _)) = job.ready();
     pty.close_master();
     let (r, e) = job.settle(root, esc, |r, e| r.1 >= 1 && e.1 >= 1);
+    assert!(same(pty.child.id() as i32, pty.child_id), "HUP must not end the job");
     assert_eq!((r.1, e.1), (1, 1), "each member must count exactly one HUP (root, escapee)");
 }
 
@@ -499,10 +512,12 @@ fn a_relayed_ctrl_c_reaches_the_escapee_once() {
     let mut cmd = vec![fixture().to_string(), "bg-then-exec".into(), bg.clone()];
     cmd.extend(run_args(&[], &job.args()));
     let mut pty = Pty::shell(&[], &cmd);
-    pty.started();
+    let (relay, _) = pty.started();
     let ((esc, _), (root, _)) = job.ready();
+    let relayed = has_supervisor(relay as u32);
     pty.write(b"\x03");
     let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
+    assert!(relayed, "control: this is not the relay path (no sheepdog child of the relay)");
     for p in sleeps(&bg) {
         if let Some(id) = identity(p) {
             send(p, id, libc::SIGKILL);
@@ -569,11 +584,7 @@ fn an_int_to_the_relay_pid_reaches_no_member() {
     let mut relay = c.spawn().unwrap();
     let rid = identity(relay.id() as i32).expect("the relay's identity");
     let ((esc, _), (root, _)) = job.ready();
-    let out = Command::new("ps").args(["-Ao", "ppid=,args="]).output().expect("ps");
-    let has_supervisor = String::from_utf8_lossy(&out.stdout).lines().any(|l| {
-        let w: Vec<&str> = l.split_whitespace().collect();
-        w.len() >= 2 && w[0] == relay.id().to_string() && w[1].ends_with("sheepdog")
-    });
+    let has_supervisor = has_supervisor(relay.id());
     assert!(send(relay.id() as i32, rid, libc::SIGINT));
     std::thread::sleep(Duration::from_millis(700));
     let (r, e) = (job.counts(root), job.counts(esc));
@@ -671,6 +682,144 @@ fn forward_int_to_root_reaches_the_root_and_prints_no_hint() {
     let err = end(c, id, &job);
     assert_eq!((r.0, e.0), (1, 1), "(root, escapee) INT counts");
     assert!(err.trim().is_empty(), "a hint was printed although the root got the INT: {err:?}");
+}
+
+/// S4 review (A-P2-3): a ctrl-C from the terminal reaches the root, so a root that handles it
+/// and keeps running (a REPL, an editor, a pager) must not trigger the pid-only hint. Nothing but
+/// the terminal's echo of ^C may appear on the terminal (debug seam: the hint is due at 300 ms).
+#[test]
+fn no_hint_for_a_ctrl_c_the_root_survives() {
+    let job = Job::new();
+    let mut cmd = vec!["/usr/bin/env".to_string(), "SHEEPDOG_TEST_HINT_MS=300".into()];
+    cmd.extend(run_args(&[], &job.args()));
+    let mut pty = Pty::shell(&[], &cmd);
+    pty.started();
+    let ((esc, _), (root, _)) = job.ready();
+    pty.write(b"\x03");
+    let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
+    std::thread::sleep(Duration::from_millis(700));
+    pty.drain();
+    let shown = String::from_utf8_lossy(&pty.out).replace("^C", "");
+    assert_eq!((r.0, e.0), (1, 1), "control: the ctrl-C reached (root, escapee)");
+    assert!(shown.trim().is_empty(), "sheepdog printed on the terminal after a ctrl-C the root survived: {shown:?}");
+}
+
+/// S4 review (B-P2-1): death by signal needs the SAME signal. sheepdog consumed an INT, but the
+/// root died of KILL (from outside): sheepdog exits 128+9, it does not die of a signal.
+#[test]
+fn death_by_signal_needs_the_same_signal() {
+    let job = Job::new();
+    let (mut c, id) = direct(&["--quiet"], &job.args(), &[]);
+    let ((esc, _), (root, root_id)) = job.ready();
+    assert!(send(c.id() as i32, id, libc::SIGINT));
+    job.settle(root, esc, |_, e| e.0 >= 1);
+    assert!(send(root, root_id, libc::SIGKILL));
+    let st = wait_bounded(&mut c, Duration::from_secs(15));
+    if st.is_none() {
+        send(c.id() as i32, id, libc::SIGKILL);
+        let _ = c.wait();
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.and_then(|s| s.signal()), None, "sheepdog died of a signal the root did not die of: {st:?}");
+    assert_eq!(st.and_then(|s| s.code()), Some(128 + libc::SIGKILL), "exit code: {st:?}");
+}
+
+/// S4 review (B-P2-3): `--forward-int-to-root` is for INT only. A pid-only HUP still reaches only
+/// the escapee, and the hint is printed.
+#[test]
+fn forward_int_to_root_does_not_forward_hup_to_the_root() {
+    let job = Job::new();
+    let (c, id) = direct(&["--forward-int-to-root"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300")]);
+    let ((esc, _), (root, _)) = job.ready();
+    assert!(send(c.id() as i32, id, libc::SIGHUP));
+    let (r, e) = job.settle(root, esc, |_, e| e.1 >= 1);
+    std::thread::sleep(Duration::from_millis(400));
+    let err = end(c, id, &job);
+    assert_eq!((r.1, e.1), (0, 1), "a pid-only HUP with --forward-int-to-root: (root, escapee)");
+    assert_eq!(err.lines().filter(|l| !l.trim().is_empty()).count(), 1, "the hint must be printed once: {err:?}");
+}
+
+/// S4 review (B-P2-4): the hint names sheepdog's process GROUP, which differs from its pid when
+/// sheepdog is not the group leader (here a shell leads the group and runs sheepdog as a child).
+#[test]
+fn the_hint_names_the_group_not_the_pid() {
+    let job = Job::new();
+    let mut c = Command::new("/bin/sh");
+    let script = "\"$0\" run -- \"$@\"; exit 0";
+    c.args(["-c", script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    unsafe {
+        c.pre_exec(|| {
+            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    c.process_group(0);
+    let mut sh = c.spawn().unwrap();
+    let pg = sh.id() as i32;
+    job.ready();
+    let sd = wait_for("sheepdog under the shell", Duration::from_secs(15), || {
+        let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            (w.len() >= 3 && w[1] == pg.to_string() && w[2].ends_with("sheepdog")).then(|| w[0].parse::<i32>().ok()).flatten()
+        })
+    });
+    let sd_id = identity(sd).expect("sheepdog's identity");
+    assert!(send(sd, sd_id, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(900));
+    send(sd, sd_id, libc::SIGTERM);
+    let st = wait_bounded(&mut sh, Duration::from_secs(15));
+    job.kill();
+    if st.is_none() {
+        let _ = sh.kill();
+        let _ = sh.wait();
+    }
+    let mut err = String::new();
+    if let Some(mut e) = sh.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut err);
+    }
+    assert_ne!(sd, pg, "control: sheepdog must not lead its group here");
+    assert!(err.contains(&format!("-{pg}")), "the hint must name the group {pg}, not the pid {sd}: {err:?}");
+}
+
+/// S4 review (A-P3-1): with `--forward-int-to-root` the relay forwards a pid-only INT (the flag
+/// opts in to double delivery), so the root gets it on the relay path too.
+#[test]
+fn forward_int_to_root_works_through_the_relay() {
+    let job = Job::new();
+    let bg = new_marker();
+    let mut c = Command::new(fixture());
+    c.args(["bg-then-exec", &bg]).args(run_args(&["--forward-int-to-root", "--quiet"], &job.args())).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        c.pre_exec(|| {
+            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    c.process_group(0);
+    let mut relay = c.spawn().unwrap();
+    let rid = identity(relay.id() as i32).expect("the relay's identity");
+    let ((esc, _), (root, _)) = job.ready();
+    let relayed = has_supervisor(relay.id());
+    assert!(send(relay.id() as i32, rid, libc::SIGINT));
+    let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
+    send(relay.id() as i32, rid, libc::SIGTERM);
+    if wait_bounded(&mut relay, Duration::from_secs(15)).is_none() {
+        send(relay.id() as i32, rid, libc::SIGKILL);
+        let _ = relay.wait();
+    }
+    for p in sleeps(&bg) {
+        if let Some(id) = identity(p) {
+            send(p, id, libc::SIGKILL);
+        }
+    }
+    assert!(relayed, "control: this is not the relay path");
+    assert_eq!((r.0, e.0), (1, 1), "a pid-only INT to the relay with --forward-int-to-root: (root, escapee)");
 }
 
 // ---- death by INT (PHASE1.md §1.3) ---------------------------------------------------------

@@ -223,6 +223,9 @@ fn rollback(pid: i32, landed_on: u64) {
 /// freeze's rollback covers a STOP that lands in it.
 #[cfg(target_os = "linux")]
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
+    if pid <= 1 {
+        return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
+    }
     let race = wrong_freeze_race(pid, sig);
     let fd = if race || seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
         None
@@ -272,6 +275,9 @@ fn wrong_freeze_race(pid: i32, sig: c_int) -> bool {
 /// residual; the freeze's rollback covers a STOP that lands on a reused pid).
 #[cfg(target_os = "macos")]
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
+    if pid <= 1 {
+        return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
+    }
     trace(format!("kill {pid} {sig}"));
     if (wrong_freeze_race(pid, sig) || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
         return Sent::Unpinned;
@@ -422,7 +428,7 @@ pub fn kill_tree(
         Err(_) => {
             let known = known.borrow();
             for (&p, &id) in known.iter() {
-                if same(p, id) {
+                if p > 1 && same(p, id) {
                     unsafe { libc::kill(p, libc::SIGKILL) };
                 }
             }
@@ -757,24 +763,21 @@ impl Interrupts {
                 sent.insert((p, id));
             }
         }
-        if !root_got && !self.hinted && self.hint.is_none() {
+        if !root_got && !self.hinted && self.hint.is_none() && !in_foreground() {
             let ms = seam_ms("SHEEPDOG_TEST_HINT_MS").unwrap_or(3000);
             self.hint = Some((Instant::now() + Duration::from_millis(ms), sig));
         }
     }
 
-    /// The D9 hint: once per job, if the root still runs when it is due.
-    pub fn tick(&mut self, root_running: bool) {
+    /// The D9 hint: once per job, when it is due. Only called while the job runs (the root is
+    /// still running: its exit ends the loop first).
+    pub fn tick(&mut self) {
         if let Some((due, sig)) = self.hint {
             if Instant::now() >= due {
                 self.hint = None;
                 self.hinted = true;
-                if root_running && !self.quiet {
-                    let (name, flag) = if sig == libc::SIGINT { ("SIGINT", "INT") } else { ("SIGHUP", "HUP") };
-                    let pg = unsafe { libc::getpgrp() };
-                    say!(
-                        "sheepdog: got {name}; the command is still running. A signal sent only to sheepdog's pid does not reach it: send TERM to end the job, or signal the process group (kill -{flag} -{pg})."
-                    );
+                if !self.quiet {
+                    say!("{}", hint_text(sig, unsafe { libc::getpgrp() }));
                 }
             }
         }
@@ -794,6 +797,34 @@ impl Interrupts {
         if sig.watch_hup && consume(libc::SIGHUP) {
             self.got_hup = true;
         }
+    }
+}
+
+/// The D9 hint for `sig`, naming the process group `pg`.
+/// A group of 1 or 0 is never named: `kill -INT -1` is the broadcast (every process the reader
+/// may signal) and `-0` the reader's own group. That happens as PID 1 in a container.
+fn hint_text(sig: c_int, pg: i32) -> String {
+    let (name, flag) = if sig == libc::SIGINT { ("SIGINT", "INT") } else { ("SIGHUP", "HUP") };
+    let head = format!("sheepdog: got {name}; the command is still running. A signal sent only to sheepdog's pid does not reach it: send TERM to end the job");
+    if pg > 1 {
+        format!("{head}, or signal the process group (kill -{flag} -{pg}).")
+    } else {
+        format!("{head}.")
+    }
+}
+
+/// Is sheepdog's process group the foreground group of its controlling terminal? Then an INT
+/// or HUP came from that terminal (or from someone signalling the group), and it reached the
+/// root too, so the pid-only hint would be false (a REPL or an editor that handles ctrl-C).
+fn in_foreground() -> bool {
+    unsafe {
+        let fd = libc::open(b"/dev/tty\0".as_ptr() as *const libc::c_char, libc::O_RDONLY | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK);
+        if fd < 0 {
+            return false;
+        }
+        let fg = libc::tcgetpgrp(fd);
+        libc::close(fd);
+        fg >= 0 && fg == libc::getpgrp()
     }
 }
 
@@ -894,6 +925,23 @@ mod tests {
     /// clean after ONE empty scan. The scan misses a live member in the pass that reaches the
     /// deadline and in the first deadline scan, then sees it in the second: the result must be
     /// Err. (Calling it clean after one empty scan returns Ok here.)
+    /// S4 review (A-P1-1): the hint never names a broadcast. As PID 1 in a container the
+    /// process group is 1, and `kill -INT -1` signals every process the reader may signal; a
+    /// group of 0 means the reader's own group. A real group (control) is named.
+    #[test]
+    fn the_hint_never_names_a_broadcast_group() {
+        let targets = |pg: i32| -> Vec<i64> {
+            hint_text(libc::SIGINT, pg)
+                .split(|c: char| c.is_whitespace() || "(),.".contains(c))
+                .filter_map(|w| w.strip_prefix('-')?.parse::<i64>().ok())
+                .collect()
+        };
+        assert!(targets(4242).contains(&4242), "control: the hint names a real group");
+        for pg in [0, 1] {
+            assert!(targets(pg).iter().all(|&n| n > 1), "pgid {pg}: the hint named a broadcast target: {:?}", targets(pg));
+        }
+    }
+
     /// No signal ever goes to pid 1 or lower: 0 is sheepdog's own process group and -1 is
     /// every process the user owns (the 2026-09-26 host incident was a kill(-1) elsewhere).
     /// Signal 0 and the real identities, so only the guard can say No.
