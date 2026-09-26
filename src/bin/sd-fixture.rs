@@ -60,8 +60,9 @@ use std::ffi::CString;
 use std::io::Write;
 
 fn record(path: &str, pid: i32) {
-    // no identity, no record: a line with identity 0 would name no process the checker can match
-    let Some(id) = identity(pid) else { return };
+    // identity 0 when the process is already gone (a fast chain's link): the line still counts
+    // the creation, and 0 matches no process, so the checker's identity scan never acts on it
+    let id = identity(pid).unwrap_or(0);
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         let _ = f.write_all(format!("{pid} {id}\n").as_bytes());
     }
