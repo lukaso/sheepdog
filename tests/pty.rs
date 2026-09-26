@@ -841,14 +841,17 @@ fn the_hint_reaches_a_harness_in_the_foreground() {
         std::thread::sleep(Duration::from_millis(20));
     }
     // then the whole line (it can reach the master in pieces): its group check needs the end
-    while first.is_some() && !pty.out.contains(&b'\n') && sent.elapsed() < Duration::from_secs(10) {
+    let line_done = |out: &[u8]| out.iter().position(|b| !b.is_ascii_whitespace()).is_some_and(|i| out[i..].contains(&b'\n'));
+    while first.is_some() && !line_done(&pty.out) && sent.elapsed() < Duration::from_secs(10) {
         std::thread::sleep(Duration::from_millis(20));
         pty.drain();
     }
     let shown = String::from_utf8_lossy(&pty.out).to_string();
     send(sd, sd_id, libc::SIGTERM);
     assert!(first.is_some(), "no hint for a pid-only INT from a harness in the foreground");
-    assert!(first.is_some_and(|t| t >= Duration::from_millis(1000)), "output came {first:?} after the INT, before the hint was due: {shown:?}");
+    // the clock started before the INT and sheepdog sets the due time after it, so a correct
+    // hint comes at or after the full 1.5 s
+    assert!(first.is_some_and(|t| t >= Duration::from_millis(1500)), "output came {first:?} after the INT, before the hint was due: {shown:?}");
     assert!(targets(&shown).is_empty(), "the hint named a group (the harness's is {sh}): {shown:?}");
 }
 
