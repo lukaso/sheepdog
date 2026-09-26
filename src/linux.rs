@@ -270,7 +270,10 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             // as `timeout` sends, must end a stopped job)
                             // the job is ending: continue the supervisor unconditionally (a stop it
                             // may be starting does not matter any more)
-                            libc::SIGTERM => {
+                            // only a TERM the caller did not ignore (Linux still delivers a blocked,
+                            // ignored TERM on the signalfd; forwarding it with a CONT would call
+                            // off a stop in progress)
+                            libc::SIGTERM if sig.watch_term => {
                                 libc::kill(sup, libc::SIGTERM);
                                 libc::kill(sup, libc::SIGCONT);
                             }

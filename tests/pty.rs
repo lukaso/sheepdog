@@ -1879,7 +1879,6 @@ fn a_cont_inside_the_stop_does_not_strand_the_relay() {
     let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
     assert!(send(sup, sup_id, libc::SIGTSTP)); // the supervisor now waits (up to 3 s) for the root
     let waiting = wait_for_opt(Duration::from_secs(5), || log_has(&log, "stop-wait"));
-    assert!(waiting, "control: the supervisor never began its member wait");
     assert!(send(sup, sup_id, libc::SIGSTOP));
     let mirrored = wait_for_opt(Duration::from_secs(3), || state(relay.id() as i32) == Some('T'));
     assert!(send(sup, sup_id, libc::SIGCONT));
@@ -1887,6 +1886,7 @@ fn a_cont_inside_the_stop_does_not_strand_the_relay() {
     let rs = state(relay.id() as i32);
     end_relay(relay, &bg, &[&m]);
     let _ = std::fs::remove_file(&log);
+    assert!(waiting, "control: the supervisor never began its member wait");
     assert!(mirrored, "control: the relay did not mirror the supervisor's STOP");
     assert!(followed, "the relay stayed stopped after the supervisor was continued inside its stop (relay {rs:?})");
 }
@@ -1940,16 +1940,71 @@ fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
     let in_window = wait_for_opt(Duration::from_secs(8), || ready.exists());
     let sup_stopped = state(sup) == Some('T');
     assert!(send(sup, sup_id, libc::SIGCONT));
-    // the relay sits in the seam for 1.5 s from the ready file, then would mirror: well after
-    // that window, both must be running (a relay stopped while the supervisor runs is wrong)
-    std::thread::sleep(Duration::from_millis(3000));
+    // the relay leaves the seam 1.5 s after the ready file and mirrors the stop it read (it is
+    // seen in T), then the supervisor, running, continues it: it leaves T again
+    let mirrored = wait_for_opt(Duration::from_secs(5), || state(relay.id() as i32) == Some('T'));
+    let freed = wait_for_opt(Duration::from_secs(5), || state(relay.id() as i32) != Some('T'));
     let (rs, ss) = (state(relay.id() as i32), state(sup));
     let ticks = t.advance();
     let _ = std::fs::remove_file(&ready);
     end_relay(relay, &bg, &[]);
     assert!(in_window, "control: the relay never reached the mirror");
     assert!(sup_stopped, "control: the supervisor was not stopped when the relay reached the mirror");
+    assert!(mirrored, "control: the relay was never seen mirroring the stop");
+    assert!(freed, "the relay stayed stopped while the supervisor runs");
     assert_ne!(rs, Some('T'), "the relay is stopped while the supervisor runs");
     assert_ne!(ss, Some('T'), "the supervisor is stopped");
     assert!(ticks > 0, "the job does not run");
+}
+
+/// S5 review round 6 (P3-1): a caller that ignores TERM. A TERM to the relay's pid during the
+/// member wait must change nothing (TERM stays ignored for the whole job): the stop goes ahead,
+/// the relay and the supervisor end up stopped, and the stop is never called off. Control: the
+/// same run without the TERM.
+#[test]
+fn an_ignored_term_to_the_relay_does_not_cancel_a_stop() {
+    for with_term in [false, true] {
+        let bg = new_marker();
+        let m = short_marker(6);
+        let log = std::env::temp_dir().join(format!("sd-s5-ignterm-{m}"));
+        let _ = std::fs::remove_file(&log);
+        let mut c = Command::new(fixture());
+        c.args(["bg-then-exec", &bg])
+            .args(run_args(&["--quiet"], &["/bin/sh".into(), "-c".into(), format!("trap '' TSTP; /bin/sleep {m}")]))
+            .env("SHEEPDOG_TEST_STOP_WAIT_MS", "3000")
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            c.pre_exec(|| {
+                for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTSTP, libc::SIGCONT] {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
+                libc::signal(libc::SIGTERM, libc::SIG_IGN); // the caller ignores TERM
+                Ok(())
+            });
+        }
+        c.process_group(0);
+        let mut relay = c.spawn().unwrap();
+        let rid = identity(relay.id() as i32).expect("the relay's identity");
+        wait_for("the root", Duration::from_secs(15), || (sleeps(&m).len() == 1).then_some(()));
+        let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+        assert!(send_group(relay.id() as i32, rid, libc::SIGTSTP));
+        let waiting = wait_for_opt(Duration::from_secs(5), || log_has(&log, "stop-wait"));
+        if with_term {
+            assert!(common::send_child(&mut relay, libc::SIGTERM));
+        }
+        let both = wait_for_opt(Duration::from_secs(6), || state(relay.id() as i32) == Some('T') && state(sup) == Some('T'));
+        let called_off = log_has(&log, "decision continued");
+        // cleanup: TERM is ignored, so KILL (the relay, then the supervisor by identity)
+        common::send_child(&mut relay, libc::SIGKILL);
+        let _ = relay.wait();
+        send(sup, sup_id, libc::SIGKILL);
+        common::kill_marked(&[&bg, &m]);
+        let _ = std::fs::remove_file(&log);
+        assert!(waiting, "term={with_term}: control: the supervisor never began its member wait");
+        assert!(both, "term={with_term}: the job did not stop (relay and supervisor in T)");
+        assert!(!called_off, "term={with_term}: an ignored TERM called the stop off");
+    }
 }

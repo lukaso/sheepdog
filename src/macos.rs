@@ -402,7 +402,8 @@ fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
             // a stopped supervisor must wake to act on it (TERM+CONT to the relay, as `timeout`
             // sends, must end a stopped job)
             // the job is ending: continue the supervisor unconditionally
-            if crate::consume(libc::SIGTERM) {
+            // only a TERM the caller did not ignore
+            if watch_term && crate::consume(libc::SIGTERM) {
                 libc::kill(sup, libc::SIGTERM);
                 libc::kill(sup, libc::SIGCONT);
             }
