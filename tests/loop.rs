@@ -277,7 +277,8 @@ fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
     std::thread::sleep(Duration::from_millis(50)); // the root exists: let sheepdog settle into its wait
     unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
     let st = wait_bounded(&mut c, Duration::from_secs(3));
-    let _ = Command::new("pkill").args(["-f", &format!("sleep {root}")]).status();
+    // KILL, not TERM: a root left stopped would keep TERM pending and the stderr pipe open
+    let _ = Command::new("pkill").args(["-KILL", "-f", &format!("sleep {root}")]).status();
     let mut err = String::new();
     if let Some(mut e) = c.stderr.take() {
         use std::io::Read;

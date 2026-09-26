@@ -301,13 +301,12 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
     }
 }
 
-/// Does any live process other than `me` refer to uniqueid `u`, as its responsible process or
-/// as its original parent? A self-responsible sheepdog with no such history needs no relay (a
-/// fresh launchd job, S2 review round 3): relaying would only cost the pid-only INT.
+/// Is any live process other than `me` responsible to uniqueid `u`? A self-responsible
+/// sheepdog with no such history needs no relay (a fresh launchd job, S2 review round 3):
+/// relaying would only cost the pid-only INT. (A live process whose original parent is `me` is
+/// a child of `me`, which `has_children` already covers.)
 fn referred_to(me: pid_t, u: u64) -> bool {
-    all_pids().into_iter().filter(|&p| p != me && p > 0).any(|p| {
-        uniq(p).is_some_and(|(_, pu)| pu == u) || resp_uniq(p) == Some(u)
-    })
+    all_pids().into_iter().filter(|&p| p != me && p > 0).any(|p| resp_uniq(p) == Some(u))
 }
 
 /// Has the relay `r` already exited? Its NOTE_EXIT is refused with ESRCH (also for a zombie).
@@ -528,10 +527,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             std::env::remove_var(REEXEC_MARK);
             let relay = my_relay();
             std::env::remove_var(RELAY_PID);
-            // a relay that is already gone means the job must not start: TERM is now pending
-            // and term_before_spawn ends sheepdog before any root exists (S2 review round 3)
+            // a relay that is already gone means the job must not start, whatever the caller did
+            // with TERM (S2 review rounds 3-4)
             if relay.is_some_and(relay_exited) {
-                relay_died();
+                return crate::die_by_term(143);
             }
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
@@ -549,12 +548,17 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             // pending in the root, a signal its caller never sent. That case keeps the race of
             // a root that exits before its identity is read (PLAN.md §3.2).
             let cont_blocked = unsafe { libc::sigismember(&sig.caller_mask, libc::SIGCONT) } == 1;
-            // Every signal is held from the spawn to the CONT: a signal that ended sheepdog in
-            // between would leave the root stopped for good. Held signals act after the CONT.
+            // Every signal that ends sheepdog is held from the spawn to the CONT: one that ended
+            // it in between would leave the root stopped for good. Held signals act after the
+            // CONT. The stop signals are not held: a ctrl-Z there stops sheepdog before the CONT,
+            // so the root stays stopped with its job, and the job's CONT resumes both.
             let mut held: libc::sigset_t = unsafe { zeroed() };
             unsafe {
                 let mut all: libc::sigset_t = zeroed();
                 libc::sigfillset(&mut all);
+                for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+                    libc::sigdelset(&mut all, s);
+                }
                 libc::sigprocmask(libc::SIG_BLOCK, &all, &mut held);
             }
             let root = spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask);
@@ -563,6 +567,16 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 tracker.borrow_mut().ever.insert(u);
             }
             if !cont_blocked {
+                // the job may have ended while the root was suspended (its relay died, or TERM
+                // came): then it never runs (S2 review round 4)
+                if relay.is_some_and(relay_exited) || (sig.watch_term && crate::term_pending()) {
+                    unsafe {
+                        libc::kill(root, libc::SIGKILL);
+                        let mut st = 0;
+                        libc::waitpid(root, &mut st, 0);
+                    }
+                    return crate::die_by_term(143);
+                }
                 unsafe { libc::kill(root, libc::SIGCONT) };
             }
             unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };

@@ -509,113 +509,243 @@ mod relay {
         assert_eq!(after, (0, 0), "killing the relay leaked the job (root, escapee)");
     }
 
-    /// S2 review round 3 (macOS): a relay that dies before the root is spawned (here: during the
+    /// The spawn-window cells (macOS). The root is `sh -c 'echo RAN > <ran>; exec /bin/sleep <root>'`,
+    /// so its first action leaves a file. `window` is a debug seam that holds sheepdog in a window
+    /// and writes the ready file when it enters it.
+    #[cfg(target_os = "macos")]
+    struct Window {
+        job: String,
+        root: String,
+        ready: std::path::PathBuf,
+        ran: std::path::PathBuf,
+    }
+    #[cfg(target_os = "macos")]
+    impl Window {
+        fn new(tag: u32) -> Self {
+            let w = Window {
+                job: m(tag),
+                root: m(tag + 1),
+                ready: std::env::temp_dir().join(format!("sd-ready-{}-w{tag}", std::process::id())),
+                ran: std::env::temp_dir().join(format!("sd-ran-{}-w{tag}", std::process::id())),
+            };
+            let _ = std::fs::remove_file(&w.ready);
+            let _ = std::fs::remove_file(&w.ran);
+            w
+        }
+        fn command(&self, relayed: bool, seam: &str, ms: &str) -> Command {
+            let script = format!("echo RAN > '{}'; exec /bin/sleep {}", self.ran.display(), self.root);
+            let mut c = start(relayed.then_some(self.job.as_str()), &["/bin/sh", "-c", &script]);
+            c.env(seam, ms).env("SHEEPDOG_TEST_READY_FILE", &self.ready);
+            c
+        }
+        /// A root whose first instruction is its action (`touch <ran>`): no shell start-up for a
+        /// kill right after a resume to hide behind.
+        fn quick_command(&self, relayed: bool, seam: &str, ms: &str) -> Command {
+            let ran = self.ran.display().to_string();
+            let mut c = start(relayed.then_some(self.job.as_str()), &["/usr/bin/touch", &ran]);
+            c.env(seam, ms).env("SHEEPDOG_TEST_READY_FILE", &self.ready);
+            c
+        }
+        fn wait_ready(&self) {
+            wait_until("sheepdog inside the window", || self.ready.exists());
+        }
+        /// The root, still suspended (state T): proof that an action happened inside the window.
+        fn root_suspended(&self) -> bool {
+            let out = Command::new("ps").args(["-Ao", "stat=,args="]).output().expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|l| l.contains(&self.ran.display().to_string()) && !l.contains("sheepdog") && l.trim_start().starts_with('T'))
+        }
+        fn cleanup(&self) {
+            let _ = std::fs::remove_file(&self.ready);
+            let _ = std::fs::remove_file(&self.ran);
+            kill_marked(&[&self.job, &self.root]);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    fn alive(p: i32) -> bool {
+        unsafe { libc::kill(p, 0) == 0 }
+    }
+    #[cfg(target_os = "macos")]
+    fn wait_bounded(c: &mut std::process::Child, d: Duration) -> Option<std::process::ExitStatus> {
+        let t = Instant::now();
+        while t.elapsed() < d {
+            if let Some(st) = c.try_wait().unwrap() {
+                return Some(st);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+    /// Wait (up to 11 s) until none of `pids` is alive.
+    #[cfg(target_os = "macos")]
+    fn until_gone(pids: &[i32]) {
+        let deadline = Instant::now() + Duration::from_secs(11);
+        while Instant::now() < deadline && pids.iter().any(|&p| alive(p)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// S2 review rounds 3-4 (macOS): a relay that dies before the root is spawned (during the
     /// supervisor's re-exec, debug seam) means the job must not start: the root's first action
-    /// never happens. Both with the caller's TERM at its default and with the caller blocking
-    /// TERM (then a root that is spawned anyway would act before any kill reaches it).
+    /// never happens and the supervisor exits. The caller's TERM at its default, blocked or
+    /// ignored; and a caller that blocks SIGCONT and ignores TERM: then the root is not spawned
+    /// suspended and no TERM can end it, so only the check before the spawn stops it (in the
+    /// other shapes the check before the root's CONT would also stop it). That shape uses a root
+    /// whose first instruction is its action.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_relay_dead_before_the_spawn_starts_no_root() {
         use std::os::unix::process::CommandExt;
-        for (i, block_term) in [false, true].into_iter().enumerate() {
-            let (job, root) = (m(16 + 2 * i as u32), m(17 + 2 * i as u32));
-            let ready = std::env::temp_dir().join(format!("sd-ready-{}-relay-early-{i}", std::process::id()));
-            let ran = std::env::temp_dir().join(format!("sd-ran-{}-relay-early-{i}", std::process::id()));
-            let _ = std::fs::remove_file(&ready);
-            let _ = std::fs::remove_file(&ran);
-            let script = format!("echo RAN > '{}'; exec /bin/sleep {root}", ran.display());
-            let mut c = start(Some(&job), &["/bin/sh", "-c", &script]);
-            c.env("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600").env("SHEEPDOG_TEST_READY_FILE", &ready);
-            if block_term {
-                unsafe {
-                    c.pre_exec(|| {
+        for (i, caller) in ["default", "blocked", "ignored", "cont-blocked, ignored"].into_iter().enumerate() {
+            let w = Window::new(30 + 2 * i as u32);
+            let mut c = if caller == "cont-blocked, ignored" {
+                w.quick_command(true, "SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
+            } else {
+                w.command(true, "SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
+            };
+            let how = caller;
+            unsafe {
+                c.pre_exec(move || {
+                    if how == "blocked" {
                         let mut set: libc::sigset_t = std::mem::zeroed();
                         libc::sigemptyset(&mut set);
                         libc::sigaddset(&mut set, libc::SIGTERM);
                         libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-                        Ok(())
-                    });
-                }
+                    } else if how == "ignored" {
+                        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    } else if how == "cont-blocked, ignored" {
+                        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                        let mut set: libc::sigset_t = std::mem::zeroed();
+                        libc::sigemptyset(&mut set);
+                        libc::sigaddset(&mut set, libc::SIGCONT);
+                        libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                    }
+                    Ok(())
+                });
             }
             let mut relayed = c.spawn().unwrap();
-            wait_until("the supervisor inside its re-exec window", || ready.exists());
+            w.wait_ready();
             let sups = supervisors_of(relayed.id() as i32);
             unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+            let in_window = sleeps(&w.root) == 0 && !w.ran.exists();
             let _ = relayed.wait();
-            let deadline = Instant::now() + Duration::from_secs(11);
-            let alive = |p: i32| unsafe { libc::kill(p, 0) } == 0;
-            while Instant::now() < deadline && sups.iter().any(|&p| alive(p)) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            until_gone(&sups);
             std::thread::sleep(Duration::from_millis(200));
-            let (did_run, left, sup_after) = (ran.exists(), sleeps(&root), sups.iter().filter(|&&p| alive(p)).count());
-            let _ = std::fs::remove_file(&ready);
-            let _ = std::fs::remove_file(&ran);
-            kill_marked(&[&job, &root]);
+            let (did_run, sup_after) = (w.ran.exists(), sups.iter().filter(|&&p| alive(p)).count());
+            w.cleanup();
             for s in &sups {
                 unsafe { libc::kill(*s, libc::SIGKILL) };
             }
-            assert_eq!(sups.len(), 1, "caller blocks TERM={block_term}: expected one supervisor in the window, found {sups:?}");
-            assert!(!did_run, "caller blocks TERM={block_term}: the root ran although its relay was already dead");
-            assert_eq!((left, sup_after), (0, 0), "caller blocks TERM={block_term}: the job was left (root, supervisor)");
+            assert!(in_window, "caller TERM {caller}: the kill missed the window (load): the root already existed");
+            assert_eq!(sups.len(), 1, "caller TERM {caller}: expected one supervisor in the window, found {sups:?}");
+            assert!(!did_run, "caller TERM {caller}: the root ran although its relay was already dead");
+            assert_eq!(sup_after, 0, "caller TERM {caller}: the supervisor was left running");
         }
     }
 
-    /// S2 review round 3 (macOS): a relay that dies after the pre-spawn check but before the
-    /// wait registers for its exit (debug seam holds the spawn window open) still ends the job:
-    /// the registration fails with ESRCH, which counts as the relay's death.
+    /// S2 review round 4 (macOS): a relay that dies while the root is still suspended (after the
+    /// pre-spawn check, before the CONT; debug seam) stops the job there: the root is never
+    /// resumed, so its first action never happens, and nothing is left.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_relay_dead_before_the_wait_still_ends_the_job() {
-        let (job, root) = (m(21), m(22));
-        let ready = std::env::temp_dir().join(format!("sd-ready-{}-relay-wait", std::process::id()));
-        let _ = std::fs::remove_file(&ready);
-        let mut relayed = start(Some(&job), &["/bin/sleep", &root])
-            .env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800")
-            .env("SHEEPDOG_TEST_READY_FILE", &ready)
-            .spawn()
-            .unwrap();
-        wait_until("the supervisor inside the spawn window", || ready.exists());
+    fn a_relay_dead_in_the_spawn_window_starts_no_root() {
+        let w = Window::new(40);
+        let mut relayed = w.quick_command(true, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800").spawn().unwrap();
+        w.wait_ready();
         let sups = supervisors_of(relayed.id() as i32);
+        let in_window = w.root_suspended();
         unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
         let _ = relayed.wait();
-        let deadline = Instant::now() + Duration::from_secs(11);
-        let alive = |p: i32| unsafe { libc::kill(p, 0) } == 0;
-        while Instant::now() < deadline && (sleeps(&root) > 0 || sups.iter().any(|&p| alive(p))) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let (left, sup_after) = (sleeps(&root), sups.iter().filter(|&&p| alive(p)).count());
-        let _ = std::fs::remove_file(&ready);
-        kill_marked(&[&job, &root]);
+        until_gone(&sups);
+        std::thread::sleep(Duration::from_millis(200));
+        let (did_run, left, sup_after) = (w.ran.exists(), sleeps(&w.root), sups.iter().filter(|&&p| alive(p)).count());
+        w.cleanup();
         for s in &sups {
             unsafe { libc::kill(*s, libc::SIGKILL) };
         }
+        assert!(in_window, "the kill missed the window (load): the root was not suspended");
         assert_eq!(sups.len(), 1, "expected one supervisor in the window, found {sups:?}");
-        assert_eq!((left, sup_after), (0, 0), "a relay dead before the wait leaked the job (root, supervisor)");
+        assert!(!did_run, "the root acted although its relay died before it was resumed");
+        assert_eq!((left, sup_after), (0, 0), "the job was left (root, supervisor)");
     }
 
-    /// S2 review round 3 (macOS): a signal that ends the supervisor between the root's suspended
-    /// spawn and its CONT (debug seam widens that window) must not leave the root stopped.
+    /// S2 review round 4 (macOS): a TERM that arrives while the root is still suspended ends the
+    /// job there: the root is never resumed, and sheepdog dies of SIGTERM.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_term_in_the_spawn_window_starts_no_root() {
+        let w = Window::new(42);
+        let mut c = w.quick_command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800").spawn().unwrap();
+        w.wait_ready();
+        let in_window = w.root_suspended();
+        unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+        let st = c.wait().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let (did_run, left) = (w.ran.exists(), sleeps(&w.root));
+        w.cleanup();
+        assert!(in_window, "the TERM missed the window (load): the root was not suspended");
+        assert!(!did_run, "the root acted although TERM came before it was resumed");
+        assert_eq!(left, 0, "the root was left running");
+        assert_eq!(st.signal(), Some(libc::SIGTERM), "sheepdog did not die of SIGTERM: {st:?}");
+    }
+
+    /// S2 review rounds 3-4 (macOS): a signal that ends the supervisor between the root's
+    /// suspended spawn and its CONT must not leave the root stopped (HUP, INT and QUIT all end
+    /// sheepdog by default).
     #[cfg(target_os = "macos")]
     #[test]
     fn a_signal_in_the_spawn_window_leaves_no_stopped_root() {
-        let root = m(20);
-        let ready = std::env::temp_dir().join(format!("sd-ready-{}-spawn-window", std::process::id()));
-        let _ = std::fs::remove_file(&ready);
-        let mut c = start(None, &["/bin/sleep", &root]);
-        let mut c = c.env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "1500").env("SHEEPDOG_TEST_READY_FILE", &ready).spawn().unwrap();
-        wait_until("the supervisor inside the spawn window", || ready.exists());
-        unsafe { libc::kill(c.id() as i32, libc::SIGHUP) };
-        let _ = c.wait();
-        std::thread::sleep(Duration::from_millis(200));
-        let out = Command::new("ps").args(["-Ao", "stat=,args="]).output().expect("ps");
-        let stopped = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| l.contains(&root) && l.trim_start().starts_with('T'))
-            .count();
-        let _ = std::fs::remove_file(&ready);
-        kill_marked(&[&root]);
-        assert_eq!(stopped, 0, "the root was left stopped after the supervisor died in the spawn window");
+        for (i, sig) in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT].into_iter().enumerate() {
+            let w = Window::new(44 + 2 * i as u32);
+            let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800").spawn().unwrap();
+            w.wait_ready();
+            let in_window = w.root_suspended();
+            unsafe { libc::kill(c.id() as i32, sig) };
+            let _ = c.wait();
+            std::thread::sleep(Duration::from_millis(200));
+            let stopped = w.root_suspended();
+            w.cleanup();
+            assert!(in_window, "signal {sig}: the signal missed the window (load): the root was not suspended");
+            assert!(!stopped, "signal {sig}: the root was left stopped after the supervisor died in the spawn window");
+        }
+    }
+
+    /// S2 review round 4 (macOS): a ctrl-Z (TSTP to the job's process group) in the spawn window
+    /// stops the job: the root does not act while the job is stopped, and after the group's
+    /// CONT it runs and sheepdog exits 0 (a regression of round 3, which held TSTP too).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stop_in_the_spawn_window_stops_the_job() {
+        use std::os::unix::process::CommandExt;
+        let w = Window::new(50);
+        let script = format!("echo RAN > '{}'", w.ran.display());
+        let mut c = start(None, &["/bin/sh", "-c", &script]);
+        c.env("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800").env("SHEEPDOG_TEST_READY_FILE", &w.ready);
+        unsafe {
+            c.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let mut c = c.spawn().unwrap();
+        let pg = c.id() as i32;
+        w.wait_ready();
+        let in_window = w.root_suspended();
+        unsafe { libc::killpg(pg, libc::SIGTSTP) };
+        std::thread::sleep(Duration::from_millis(1500)); // past the 800 ms window
+        let ran_while_stopped = w.ran.exists();
+        unsafe { libc::killpg(pg, libc::SIGCONT) };
+        let st = wait_bounded(&mut c, Duration::from_secs(10));
+        let ran_after = w.ran.exists();
+        w.cleanup();
+        if st.is_none() {
+            unsafe { libc::killpg(pg, libc::SIGKILL) };
+        }
+        assert!(in_window, "the stop missed the window (load): the root was not suspended");
+        assert!(!ran_while_stopped, "the root acted while the job was stopped");
+        assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepdog did not finish after the CONT");
+        assert!(ran_after, "the root never ran after the CONT");
     }
 
     /// S2 review round 2: a dead relay still ends the job when the supervisor's wait has fallen

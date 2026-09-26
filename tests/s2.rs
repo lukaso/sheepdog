@@ -312,10 +312,11 @@ fn s2_a_self_disclaimed_child_is_caught_by_its_original_parent() {
 #[test]
 fn s2_a_failed_term_registration_still_wakes_on_term() {
     let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up
-    // The tick is widened to 900 ms (debug seam): without the fallback, TERM waits for the next
-    // tick, 0-900 ms away; with it, the loop polls every 50 ms. Five samples under 400 ms: the
-    // fallback passes with room under load, and a mutant passes by luck only if all five TERMs
-    // land in the last 400 ms of a tick (about 1 in 60).
+    // The tick is widened to 900 ms (debug seam). Without the fallback, TERM waits for the next
+    // tick; the tick starts with the wait and TERM follows the root's start by about 30 ms, so
+    // the mutant takes 700-870 ms every time (measured). With the fallback the loop polls every
+    // 50 ms (measured 34-90 ms at load 97). The 400 ms bound sits between the two; five samples
+    // guard against a single slow sample under load, not against the tick's phase.
     for _ in 0..5 {
         let j = Job::new();
         let c = Command::new(sheepdog())
