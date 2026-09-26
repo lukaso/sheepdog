@@ -10,6 +10,12 @@ use std::mem::{size_of, zeroed};
 
 const PROC_PIDUNIQIDENTIFIERINFO: c_int = 17;
 const SZOMB: u32 = 5;
+const SSTOP: u32 = 4;
+
+/// Stopped by a signal?
+pub fn stopped(pid: pid_t) -> bool {
+    bsd(pid).is_some_and(|b| b.pbi_status == SSTOP)
+}
 /// Set only across the self re-exec; removed before the root starts, so a nested sheepdog
 /// still disclaims.
 const REEXEC_MARK: &str = "SHEEPDOG_REEXEC_PID";
@@ -421,6 +427,7 @@ fn wait(
     group_is_ours: &mut dyn FnMut(i32) -> bool,
     ints: &mut crate::Interrupts,
 ) -> Option<c_int> {
+    let mut jobs = crate::JobControl::default();
     let watch_term = sig.watch_term;
     unsafe {
         let kq = libc::kqueue();
@@ -470,7 +477,14 @@ fn wait(
                     polling = true;
                 }
             }
-            for (on, s) in [(sig.watch_int, libc::SIGINT), (sig.watch_hup, libc::SIGHUP)] {
+            let others = [
+                (sig.watch_int, libc::SIGINT),
+                (sig.watch_hup, libc::SIGHUP),
+                (sig.watch_stop[0], libc::SIGTSTP),
+                (sig.watch_stop[1], libc::SIGTTIN),
+                (sig.watch_stop[2], libc::SIGTTOU),
+            ];
+            for (on, s) in others {
                 if on && !polling {
                     let mut ev: libc::kevent = zeroed();
                     ev.ident = s as usize;
@@ -520,6 +534,16 @@ fn wait(
             let term = watch_term && crate::consume(libc::SIGTERM);
             let int = sig.watch_int && crate::consume(libc::SIGINT);
             let hup = sig.watch_hup && crate::consume(libc::SIGHUP);
+            // all stop signals of one wake are one stop; the first one is raised on sheepdog
+            let mut stop = None;
+            for (i, &s) in crate::STOPS.iter().enumerate() {
+                if sig.watch_stop[i] && crate::consume(s) && stop.is_none() {
+                    stop = Some(s);
+                }
+            }
+            if sig.watch_cont {
+                crate::consume(libc::SIGCONT); // a CONT outside a stop of ours changes nothing
+            }
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(st);
             }
@@ -539,6 +563,10 @@ fn wait(
                 if got {
                     ints.forward(s, pid, members);
                 }
+            }
+            // job control after INT/HUP (the fixed order)
+            if let Some(s) = stop {
+                jobs.stop(s, sig, members, stopped);
             }
             ints.tick(group_is_ours);
             if !polling && proc_exiting {
@@ -618,8 +646,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 libc::sigfillset(&mut all);
                 libc::sigprocmask(libc::SIG_BLOCK, &all, &mut held);
                 libc::sigemptyset(&mut stops);
+                // the caller's mask decides (sheepdog itself blocks the stop signals it watches
+                // for the event loop, so `held` has them all)
                 for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
-                    if libc::sigismember(&held, s) != 1 {
+                    if libc::sigismember(&sig.caller_mask, s) != 1 {
                         libc::sigaddset(&mut stops, s);
                     }
                 }

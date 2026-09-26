@@ -39,7 +39,7 @@
 //! - `counter M R`: phase-1 S4 (cell 22). The root and one escapee (its own session) count
 //!   every INT and HUP they get as lines `INT <pid>` / `HUP <pid>` in `<R>.sig` and keep
 //!   running. The root records the escapee, then itself: two lines in R mean "ready".
-//! - `shell REPORT [bg] [null-stdin] PROG ARGS...`: the pty harness's job-control shell (PHASE1.md
+//! - `shell REPORT [bg] [null-stdin] [tostop] PROG ARGS...`: the pty harness's job-control shell (PHASE1.md
 //!   §2). Run as a session leader with the pty as its controlling terminal. It starts PROG in a
 //!   new process group, makes that group the foreground (unless `bg`), and waits with
 //!   WUNTRACED. It appends `started <pgid> <identity>`, `stopped <sig>`, `exited <code>` or
@@ -50,6 +50,14 @@
 //!   session leader (as liveapp and CI run it): setsid, then PROG in a new process group of
 //!   that session. `<pid> <identity>` of PROG (its pid is its pgid) goes to PIDFILE; exits as
 //!   PROG did.
+//! - `ticker M R [slow-tstp F | regroup-tstp | read | write]`: phase-1 S5 (cells 21, 21′). The
+//!   root starts an escapee (its own session) that appends a line to `<R>.tick` every 20 ms and
+//!   breeds: every 200 ms it forks a child that ticks too (up to 4). Every process is recorded
+//!   in R; the root also names itself in `<R>.root` once its handler is set ("ready"). Then:
+//!   `slow-tstp F`: on TSTP it takes 300 ms, creates F, then stops itself (a pager restoring the
+//!   terminal); `regroup-tstp`: on TSTP it sets TSTP to default and sends it to its whole group
+//!   (`kill(0, SIGTSTP)`); `read`: reads its stdin (TTIN in the background); `write`: writes a
+//!   line to stdout every 50 ms (TTOU in the background with `tostop`); otherwise it waits.
 //! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
 //!   READY once the handler is installed; else waits.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
@@ -313,6 +321,53 @@ fn shell(report: &str, bg: bool, null_stdin: bool, prog: &[String]) -> ! {
             }
             libc::_exit(0);
         }
+    }
+}
+
+static mut TSTP_FILE: [u8; 512] = [0; 512];
+
+/// ticker slow-tstp: 300 ms of "restoring the terminal", then the marker, then a real stop.
+extern "C" fn slow_tstp(_: libc::c_int) {
+    unsafe {
+        libc::usleep(300_000);
+        let f = libc::open(TSTP_FILE.as_ptr() as *const libc::c_char, libc::O_WRONLY | libc::O_CREAT, 0o644);
+        if f >= 0 {
+            libc::close(f);
+        }
+        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+        let mut one: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut one);
+        libc::sigaddset(&mut one, libc::SIGTSTP);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        libc::raise(libc::SIGTSTP);
+        // continued: handle the next ctrl-Z the same way
+        libc::signal(libc::SIGTSTP, slow_tstp as *const () as usize);
+    }
+}
+
+/// ticker regroup-tstp: stop the whole group, as some programs do. TSTP is blocked while its own
+/// handler runs, so it is set to its default and unblocked first: the root then stops inside
+/// the handler (without that, its own TSTP would stay pending and re-run the handler forever).
+extern "C" fn regroup_tstp(_: libc::c_int) {
+    unsafe {
+        libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+        let mut one: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut one);
+        libc::sigaddset(&mut one, libc::SIGTSTP);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        libc::kill(0, libc::SIGTSTP);
+        libc::signal(libc::SIGTSTP, regroup_tstp as *const () as usize);
+    }
+}
+
+/// One ticking process: a line `<pid>` in `tick` every 20 ms, forever.
+unsafe fn tick_forever(tick: &CString) -> ! {
+    libc::alarm(60); // alarms are not inherited by fork: a bounded life for each ticker
+    let fd = libc::open(tick.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+    let line = format!("{}\n", libc::getpid());
+    loop {
+        libc::write(fd, line.as_ptr() as *const libc::c_void, line.len());
+        libc::usleep(20_000);
     }
 }
 
@@ -592,13 +647,87 @@ fn main() {
             }
         }
     }
+    if mode == "ticker" && (a.len() == 4 || a.len() == 5 || a.len() == 6) {
+        let tick = CString::new(format!("{}.tick", a[3])).unwrap();
+        let rec = a[3].clone();
+        unsafe {
+            unblock_all();
+            // a bounded life: every ticker process ends after 60 s while running (each sets its
+            // own alarm: fork clears it); a stopped one is ended by the test's SIGKILL
+            libc::signal(libc::SIGALRM, libc::SIG_DFL);
+            libc::alarm(60);
+            let g = spawn_escapee(&rec, true, || {
+                libc::alarm(60);
+                // breed: up to 4 ticking children, one every 200 ms, each recorded
+                let tick2 = tick.clone();
+                let rec2 = rec.clone();
+                match libc::fork() {
+                    0 => tick_forever(&tick2),
+                    c if c > 0 => record(&rec2, c),
+                    _ => {}
+                }
+                for _ in 0..4 {
+                    libc::usleep(200_000);
+                    match libc::fork() {
+                        0 => tick_forever(&tick2),
+                        c if c > 0 => record(&rec2, c),
+                        _ => {}
+                    }
+                }
+                loop {
+                    libc::pause();
+                }
+            });
+            match g {
+                Some(g) => record(&a[3], g),
+                None => libc::_exit(3),
+            }
+            match a.get(4).map(String::as_str) {
+                Some("slow-tstp") if a.len() == 6 => {
+                    let b = a[5].as_bytes();
+                    TSTP_FILE[..b.len()].copy_from_slice(b);
+                    on(libc::SIGTSTP, slow_tstp as *const () as usize, true);
+                }
+                Some("regroup-tstp") => on(libc::SIGTSTP, regroup_tstp as *const () as usize, true),
+                _ => {}
+            }
+            record(&a[3], libc::getpid());
+            // ready: the root names itself in <R>.root (the escapee's children keep recording)
+            record(&format!("{}.root", a[3]), libc::getpid());
+            match a.get(4).map(String::as_str) {
+                Some("read") => {
+                    let mut b = [0u8; 64];
+                    loop {
+                        libc::read(0, b.as_mut_ptr() as *mut libc::c_void, b.len());
+                    }
+                }
+                Some("write") => loop {
+                    libc::write(1, b"x\n".as_ptr() as *const libc::c_void, 2);
+                    libc::usleep(50_000);
+                },
+                _ => loop {
+                    libc::pause();
+                },
+            }
+        }
+    }
     if mode == "shell" && a.len() >= 4 {
         let mut i = 3;
-        let (mut bg, mut null_stdin) = (false, false);
-        while i < a.len() && (a[i] == "bg" || a[i] == "null-stdin") {
+        let (mut bg, mut null_stdin, mut tostop) = (false, false, false);
+        while i < a.len() && (a[i] == "bg" || a[i] == "null-stdin" || a[i] == "tostop") {
             bg |= a[i] == "bg";
             null_stdin |= a[i] == "null-stdin";
+            tostop |= a[i] == "tostop";
             i += 1;
+        }
+        if tostop {
+            // a background job that writes to the terminal gets TTOU
+            unsafe {
+                let mut t: libc::termios = std::mem::zeroed();
+                libc::tcgetattr(0, &mut t);
+                t.c_lflag |= libc::TOSTOP;
+                libc::tcsetattr(0, libc::TCSANOW, &t);
+            }
         }
         if i >= a.len() {
             usage();

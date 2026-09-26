@@ -597,7 +597,13 @@ pub struct Signals {
     /// INT and HUP, each watched only if the caller left it at its default (S4)
     pub watch_int: bool,
     pub watch_hup: bool,
+    /// the stop signals TSTP, TTIN, TTOU and CONT, each watched only at its default (S5)
+    pub watch_stop: [bool; 3],
+    pub watch_cont: bool,
 }
+
+/// The stop signals job control handles, in the order `watch_stop` lists them.
+pub const STOPS: [c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
 impl Signals {
     /// The signal set the event loop waits on: CHLD plus every watched signal.
@@ -606,7 +612,16 @@ impl Signals {
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
             libc::sigaddset(&mut set, libc::SIGCHLD);
-            for (on, s) in [(self.watch_term, libc::SIGTERM), (self.watch_int, libc::SIGINT), (self.watch_hup, libc::SIGHUP)] {
+            let watched = [
+                (self.watch_term, libc::SIGTERM),
+                (self.watch_int, libc::SIGINT),
+                (self.watch_hup, libc::SIGHUP),
+                (self.watch_stop[0], STOPS[0]),
+                (self.watch_stop[1], STOPS[1]),
+                (self.watch_stop[2], STOPS[2]),
+                (self.watch_cont, libc::SIGCONT),
+            ];
+            for (on, s) in watched {
                 if on {
                     libc::sigaddset(&mut set, s);
                 }
@@ -630,6 +645,8 @@ fn setup_signals() -> Signals {
             watch_term: at_default(libc::SIGTERM),
             watch_int: at_default(libc::SIGINT),
             watch_hup: at_default(libc::SIGHUP),
+            watch_stop: STOPS.map(|s| at_default(s)),
+            watch_cont: at_default(libc::SIGCONT),
         };
         let block = sig.wait_set();
         let mut caller_mask: libc::sigset_t = std::mem::zeroed();
@@ -844,6 +861,93 @@ fn in_foreground() -> bool {
         let fg = libc::tcgetpgrp(fd);
         libc::close(fd);
         fg >= 0 && fg == libc::getpgrp()
+    }
+}
+
+/// Job control (PHASE1.md §1.4): a ctrl-Z (TSTP), or a background job touching the terminal
+/// (TTIN, TTOU), stops the whole job, escapees included, and stops sheepdog itself so the shell
+/// sees the job stopped. The members sheepdog stopped are continued when it is continued; a
+/// member that was already stopped (by the user) stays stopped.
+#[derive(Default)]
+pub struct JobControl {
+    /// members sheepdog stopped and has not continued yet
+    stopped_by_us: Vec<(i32, u64)>,
+}
+
+impl JobControl {
+    /// One stop (all stop signals of one wake are one stop): `sig` is the one sheepdog raises on
+    /// itself, so the shell reports the right reason ("Stopped (tty input)" for TTIN).
+    /// `members` rescans and returns the live members; `stopped(pid)` reads a process's state.
+    pub fn stop(&mut self, sig: c_int, sigs: &Signals, members: &mut dyn FnMut() -> Vec<(i32, u64)>, stopped: fn(i32) -> bool) {
+        let own = unsafe { libc::getpgrp() };
+        let mut seen: std::collections::HashSet<(i32, u64)> = std::collections::HashSet::new();
+        let mut group: Vec<(i32, u64)> = Vec::new();
+        // Escapees (outside sheepdog's group) get SIGSTOP at once, after a fresh rescan, repeated
+        // until no new member appears (a breeding escapee). Group members got the stop from
+        // the terminal; they stop by themselves below. Already stopped: not ours to continue.
+        for _ in 0..32 {
+            let fresh: Vec<(i32, u64)> = members().into_iter().filter(|m| !seen.contains(m)).collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for (p, id) in fresh {
+                seen.insert((p, id));
+                if stopped(p) {
+                    continue;
+                }
+                if unsafe { libc::getpgid(p) } == own {
+                    group.push((p, id));
+                } else if signal(p, id, libc::SIGSTOP) != Sent::No {
+                    self.stopped_by_us.push((p, id));
+                }
+            }
+        }
+        // Group members stop by themselves (a pager restores the terminal in its TSTP handler
+        // first), bounded to 1 s; then those still running get SIGSTOP, a TSTP-ignoring member
+        // included (sheepdog never leaves a member running while its own enforcement stops).
+        let until = Instant::now() + Duration::from_millis(seam_ms("SHEEPDOG_TEST_STOP_WAIT_MS").unwrap_or(1000));
+        while Instant::now() < until && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for &(p, id) in &group {
+            if same(p, id) && !stopped(p) {
+                let _ = signal(p, id, libc::SIGSTOP);
+            }
+            self.stopped_by_us.push((p, id));
+        }
+        // Every stop signal pending now belongs to this stop (a handler that re-sends TSTP to
+        // its group, a second ctrl-Z during the wait): consume them, so they do not stop the
+        // job again after the resume.
+        for (i, &s) in STOPS.iter().enumerate() {
+            if sigs.watch_stop[i] {
+                consume(s);
+            }
+        }
+        self_stop(sig);
+        // Resumed by a CONT, or the stop was discarded (an orphaned group: the kernel decides).
+        // Either way, continue the members sheepdog stopped. A CONT may be pending or not (a
+        // TSTP right after the resume removes it): it is consumed if there, never waited for.
+        if sigs.watch_cont {
+            consume(libc::SIGCONT);
+        }
+        for (p, id) in std::mem::take(&mut self.stopped_by_us) {
+            let _ = signal(p, id, libc::SIGCONT);
+        }
+    }
+}
+
+/// Stop sheepdog itself with `sig` at its default action: unblock only that signal and raise
+/// it; the kernel stops the process, or discards the stop when the process group is orphaned.
+/// Re-blocked once it returns.
+fn self_stop(sig: c_int) {
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        let mut one: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut one);
+        libc::sigaddset(&mut one, sig);
+        libc::raise(sig);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        libc::sigprocmask(libc::SIG_BLOCK, &one, std::ptr::null_mut());
     }
 }
 

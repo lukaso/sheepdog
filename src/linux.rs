@@ -39,6 +39,11 @@ fn group_pids(pg: i32) -> Vec<i32> {
     v
 }
 
+/// Stopped by a signal (state T; t is a ptrace stop)?
+pub fn stopped(pid: i32) -> bool {
+    stat(pid).is_some_and(|(_, st)| st == 'T')
+}
+
 /// Live (not zombie) same-uid descendants of `root`, with their identities.
 fn descendants(root: i32) -> Vec<(i32, u64)> {
     let uid = unsafe { libc::getuid() };
@@ -287,14 +292,23 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     // even if it is no longer a descendant by then (sticky, by identity)
     let mut tracker = crate::Tracker::default();
     let mut ints = crate::Interrupts::new(a, relay);
+    let mut jobs = crate::JobControl::default();
     let tick = crate::tick_ms() as i32;
     let status = loop {
         tracker.refresh(descendants(me));
         let got: Vec<i32> = if fd >= 0 {
             drain(fd)
         } else {
-            [(sig.watch_term, libc::SIGTERM), (sig.watch_int, libc::SIGINT), (sig.watch_hup, libc::SIGHUP)]
-                .into_iter()
+            [
+                (sig.watch_term, libc::SIGTERM),
+                (sig.watch_int, libc::SIGINT),
+                (sig.watch_hup, libc::SIGHUP),
+                (sig.watch_stop[0], libc::SIGTSTP),
+                (sig.watch_stop[1], libc::SIGTTIN),
+                (sig.watch_stop[2], libc::SIGTTOU),
+                (sig.watch_cont, libc::SIGCONT),
+            ]
+            .into_iter()
                 .filter(|&(on, s)| on && crate::consume(s))
                 .map(|(_, s)| s)
                 .collect()
@@ -327,6 +341,13 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
                 });
             }
+        }
+        // job control after INT/HUP (the fixed order); all stop signals of one wake are one stop
+        if let Some(&s) = crate::STOPS.iter().find(|s| got.contains(s)) {
+            jobs.stop(s, sig, &mut || {
+                tracker.refresh(descendants(me));
+                tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
+            }, stopped);
         }
         ints.tick(&mut |pg| crate::only_ours(&group_pids(pg), relay, &tracker.known));
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
