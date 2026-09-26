@@ -174,7 +174,7 @@ pub enum Sent {
 
 /// Debug seam SHEEPDOG_TEST_SIGNAL_LOG: one line per signal decision, so a test can tell which
 /// path a signal took.
-fn trace(line: String) {
+pub fn trace(line: String) {
     if cfg!(debug_assertions) {
         if let Ok(p) = std::env::var("SHEEPDOG_TEST_SIGNAL_LOG") {
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
