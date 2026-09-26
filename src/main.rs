@@ -135,6 +135,48 @@ pub fn signal(pid: i32, id: u64, sig: c_int) {
     if seam("SHEEPDOG_TEST_NOKILL") {
         return;
     }
+    // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,
+    // with the member's identity, as if the member's pid had been reused (S3).
+    let pid = seam_ms("SHEEPDOG_TEST_REUSE_PID").map_or(pid, |p| p as i32);
+    send_checked(pid, id, sig);
+}
+
+/// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
+/// Linux: through a pidfd opened before the check, so a pid reused after the check can never
+/// get the signal. If pidfd_open fails for another reason than a gone process (ENOSYS on an old
+/// kernel, EPERM under a seccomp filter; debug seam SHEEPDOG_TEST_PIDFD_ENOSYS), the check and
+/// `kill` remain (the window between them is the stated residual).
+#[cfg(target_os = "linux")]
+fn send_checked(pid: i32, id: u64, sig: c_int) {
+    let fd = if seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
+        None
+    } else {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+        if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return; // gone
+        }
+        (fd >= 0).then_some(fd)
+    };
+    match fd {
+        Some(fd) => {
+            if same(pid, id) {
+                unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, std::ptr::null::<libc::siginfo_t>(), 0) };
+            }
+            unsafe { libc::close(fd) };
+        }
+        None => {
+            if same(pid, id) {
+                unsafe { libc::kill(pid, sig) };
+            }
+        }
+    }
+}
+
+/// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
+/// macOS: the uniqueid is re-read just before `kill` (the window between them is the stated
+/// residual; the freeze's rollback covers a STOP that lands on a reused pid).
+#[cfg(target_os = "macos")]
+fn send_checked(pid: i32, id: u64, sig: c_int) {
     if same(pid, id) {
         unsafe { libc::kill(pid, sig) };
     }
@@ -179,6 +221,8 @@ pub struct KillOpts {
     pub never_empty: bool,
     /// panic right after the first SIGSTOP pass (the panic-safety test)
     pub panic_after_stop: bool,
+    /// debug seam: a pid put into the freeze as if its STOP had landed on a reused pid
+    pub wrong_freeze: Option<i32>,
 }
 
 impl KillOpts {
@@ -199,6 +243,7 @@ impl KillOpts {
             forget: seam("SHEEPDOG_TEST_FORGET"),
             never_empty: seam("SHEEPDOG_TEST_NEVER_EMPTY"),
             panic_after_stop: seam("SHEEPDOG_TEST_PANIC_AFTER_STOP"),
+            wrong_freeze: seam_ms("SHEEPDOG_TEST_WRONG_FREEZE").map(|p| p as i32),
         }
     }
 }
@@ -349,6 +394,7 @@ fn kill_loop(
     }
     let deadline = deadline + opts.grace;
     let mut empty = 0;
+    let mut wrong_freeze = opts.wrong_freeze;
     loop {
         reap();
         refresh(&mut known.borrow_mut(), scan());
@@ -387,10 +433,18 @@ fn kill_loop(
             continue;
         }
         empty = 0;
-        // freeze what we know, then close over members created meanwhile, then kill all
+        // freeze what we know, then close over members created meanwhile, then kill all. Each
+        // STOP records whether its process was already stopped (§3.3 step 2), for the rollback.
         let before: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+        let mut frozen: Vec<(i32, u64, bool)> = Vec::new();
         for &(p, id) in &before {
+            frozen.push((p, id, sheepdog::ident::stopped(p)));
             send(p, id, libc::SIGSTOP);
+        }
+        if let Some(d) = wrong_freeze.take() {
+            // debug seam: a STOP that landed on a reused pid (identity 0 never matches)
+            frozen.push((d, 0, sheepdog::ident::stopped(d)));
+            unsafe { libc::kill(d, libc::SIGSTOP) };
         }
         if opts.panic_after_stop {
             panic!("test seam: panic after the freeze");
@@ -399,7 +453,16 @@ fn kill_loop(
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
             if !before.iter().any(|&(b, _)| b == p) {
+                frozen.push((p, id, sheepdog::ident::stopped(p)));
                 send(p, id, libc::SIGSTOP);
+            }
+        }
+        // §3.3 step 4, verify: a frozen process that is no longer the member (its STOP may have
+        // landed on a reused pid) gets SIGCONT, but only if it was not stopped before our STOP
+        // and is stopped now (a stranger stopped by someone else stays stopped).
+        for &(p, id, was_stopped) in &frozen {
+            if !was_stopped && !same(p, id) && sheepdog::ident::stopped(p) {
+                unsafe { libc::kill(p, libc::SIGCONT) };
             }
         }
         for &(p, id) in &all {
@@ -571,7 +634,7 @@ mod tests {
         let pid = child.id() as i32;
         let id = sheepdog::ident::identity(pid).unwrap();
         let mut calls = 0;
-        let opts = KillOpts { deadline: Duration::ZERO, grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false };
+        let opts = KillOpts { deadline: Duration::ZERO, grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None };
         let r = kill_tree(
             &opts,
             || {

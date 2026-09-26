@@ -32,6 +32,24 @@ pub fn identity(pid: i32) -> Option<u64> {
     f.get(22 - 3)?.parse().ok()
 }
 
+/// Is `pid` stopped by a signal (state T)?
+#[cfg(target_os = "macos")]
+pub fn stopped(pid: i32) -> bool {
+    let mut b: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let n = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let r = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut b as *mut _ as *mut libc::c_void, n) };
+    r == n && b.pbi_status == 4 // SSTOP
+}
+
+/// Is `pid` stopped by a signal (state T)?
+#[cfg(target_os = "linux")]
+pub fn stopped(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| s.rfind(')').and_then(|i| s[i + 1..].split_whitespace().next().map(|f| f == "T")))
+        .unwrap_or(false)
+}
+
 /// True when `pid` is alive and is still the process that had identity `id`.
 pub fn same(pid: i32, id: u64) -> bool {
     identity(pid) == Some(id)

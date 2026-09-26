@@ -134,6 +134,15 @@ fn is_stopped(pid: i32) -> bool {
 }
 
 static mut TERM_FD: libc::c_int = -1;
+static mut DECOY_FD: libc::c_int = -1;
+
+/// decoy: log the signal number and keep running.
+extern "C" fn log_signal(sig: libc::c_int) {
+    unsafe {
+        let line = format!("{sig}\n");
+        libc::write(DECOY_FD, line.as_ptr() as *const libc::c_void, line.len());
+    }
+}
 
 /// term-logger: record the TERM, take 300 ms to shut down, record the clean exit. A SIGKILL
 /// during those 300 ms (the grace not honoured) leaves no EXIT line.
@@ -363,6 +372,25 @@ fn main() {
                 }
             }
             libc::_exit(0);
+        }
+    }
+    // decoy F: a process that is NOT in any job; it logs every catchable signal it receives to
+    // F.log (one number per line), then writes its pid to F and waits. A SIGSTOP shows as state
+    // T, a SIGKILL as its death.
+    if mode == "decoy" && a.len() == 3 {
+        let log = CString::new(format!("{}.log", a[2])).unwrap();
+        unsafe {
+            DECOY_FD = libc::open(log.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+            for s in [libc::SIGTERM, libc::SIGCONT, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGUSR1, libc::SIGUSR2, libc::SIGALRM] {
+                libc::signal(s, log_signal as *const () as usize);
+            }
+            let mut none: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut none);
+            libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+        }
+        let _ = std::fs::write(&a[2], format!("{}\n", std::process::id()));
+        loop {
+            unsafe { libc::pause() };
         }
     }
     if mode == "print-pending" {
