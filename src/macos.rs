@@ -314,7 +314,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => Some(relay_loop(sup, relay)),
+            sup => Some(relay_loop(sup, relay, sig.watch_term)),
         }
     }
 }
@@ -348,7 +348,7 @@ fn relay_exited(r: pid_t) -> bool {
 
 /// The relay's loop: a kqueue on the supervisor's exit and on TERM/HUP/INT (all blocked; a
 /// kqueue signal event is only a wake-up, the signal is taken with `consume`).
-fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
+fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
     unsafe {
         let kq = libc::kqueue();
         if kq >= 0 {
@@ -380,8 +380,10 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
                     // a TERM (or HUP as leader) already pending is forwarded first, on the next
                     // pass, instead of stopping with it pending (TERM+CONT from `timeout` in this
                     // window would otherwise leave both stopped)
+                    // (only a watched TERM counts). Stated: a TERM+CONT that arrives in the instant
+                    // between this check and the raise still leaves both stopped.
                     let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
-                    if !crate::pending(libc::SIGTERM) && !hup {
+                    if !(watch_term && crate::pending(libc::SIGTERM)) && !hup {
                         crate::self_stop(libc::WSTOPSIG(st));
                         // resumed: the supervisor too, if it is still stopped (a CONT to the
                         // relay's pid alone); never a CONT to a running supervisor, which could
@@ -399,11 +401,10 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
             }
             // a stopped supervisor must wake to act on it (TERM+CONT to the relay, as `timeout`
             // sends, must end a stopped job)
+            // the job is ending: continue the supervisor unconditionally
             if crate::consume(libc::SIGTERM) {
                 libc::kill(sup, libc::SIGTERM);
-                if stopped(sup) {
-                    libc::kill(sup, libc::SIGCONT);
-                }
+                libc::kill(sup, libc::SIGCONT);
             }
             if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
                 libc::kill(sup, libc::SIGHUP);
@@ -598,6 +599,7 @@ fn wait(
             if let Some(s) = stop {
                 jobs.stop(s, sig, pid, members, stopped);
             }
+            jobs.keep_relay_running(stopped);
             ints.tick(group_is_ours);
             if !polling && proc_exiting {
                 // NOTE_EXIT was refused with ESRCH: the root is exiting; reap it, then decide again

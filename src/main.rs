@@ -898,6 +898,17 @@ impl JobControl {
         c
     }
 
+    /// Level-triggered, every loop pass: a relay that is stopped while this supervisor runs is
+    /// always wrong (it mirrors a stop that is over), so continue it. This closes every window in
+    /// which the relay mirrors a stop the supervisor has already left (S5 review round 5).
+    pub fn keep_relay_running(&self, stopped: fn(i32) -> bool) {
+        if let Some(r) = self.relay.filter(|&r| r > 1) {
+            if unsafe { libc::getppid() } == r && stopped(r) {
+                unsafe { libc::kill(r, libc::SIGCONT) };
+            }
+        }
+    }
+
     pub fn continue_relay(&self) {
         if let Some(r) = self.relay.filter(|&r| r > 1) {
             if unsafe { libc::getppid() } == r {
@@ -940,6 +951,7 @@ impl JobControl {
         // first), bounded to 1 s; then those still running get SIGSTOP, a TSTP-ignoring member
         // included (sheepdog never leaves a member running while its own enforcement stops).
         let until = Instant::now() + Duration::from_millis(seam_ms("SHEEPDOG_TEST_STOP_WAIT_MS").unwrap_or(1000));
+        trace("stop-wait".into());
         // A CONT, a TERM or the root's exit ends the wait early: the job was continued, or is
         // over, so no group member is stopped after all (peeked, not consumed: taken below and
         // by the loop).
@@ -951,6 +963,9 @@ impl JobControl {
         // self-stop (a peek here and a consume later could disagree when a stop signal lands in
         // between, and leave a member running while sheepdog is stopped).
         let continued = self.take_cont(sigs);
+        if continued {
+            trace("decision continued".into());
+        }
         let abort = over() || continued;
         seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_CONT_DECISION_MS");
         for &(p, id) in &group {

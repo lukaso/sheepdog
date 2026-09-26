@@ -1550,6 +1550,11 @@ fn ignoring_ticker(t: &Ticker, log: &PathBuf) -> (Child, u64, (i32, u64)) {
     (c, id, root)
 }
 
+/// Does sheepdog's debug log hold the line `line` (its own trace of a state it reached)?
+fn log_has(log: &PathBuf, line: &str) -> bool {
+    std::fs::read_to_string(log).unwrap_or_default().lines().any(|l| l == line)
+}
+
 /// Signals sheepdog sent, from its signal log: (pid, signal).
 fn sent_signals(log: &PathBuf) -> Vec<(i32, i32)> {
     std::fs::read_to_string(log)
@@ -1845,6 +1850,7 @@ fn a_stop_after_the_continue_decision_leaves_no_member_running() {
     // the decision has been taken (the seam's ready file): the next TSTP lands in the gap after it
     let in_gap = wait_for_opt(Duration::from_secs(5), || ready.exists());
     let root_stops_before = sent_signals(&log).iter().filter(|&&(p, s)| p == root && s == libc::SIGSTOP).count();
+    let saw_cont = log_has(&log, "decision continued");
     assert!(send_group(pg, id, libc::SIGTSTP));
     // the new stop: sheepdog and its TSTP-ignoring root end up stopped (polled, bounded)
     let both = wait_for_opt(Duration::from_secs(8), || state(pg) == Some('T') && state(root) == Some('T'));
@@ -1855,6 +1861,7 @@ fn a_stop_after_the_continue_decision_leaves_no_member_running() {
     assert!(began, "control: the first stop did not run");
     assert!(in_gap, "control: the continue decision was never reached");
     assert_eq!(root_stops_before, 0, "control: the first (called-off) stop stopped the root");
+    assert!(saw_cont, "control: the decision did not see the CONT (the stop was not called off)");
     assert!(both, "after the second TSTP: sheepdog {sd_state:?}, root {root_state:?} (both must be stopped)");
 }
 
@@ -1865,17 +1872,21 @@ fn a_stop_after_the_continue_decision_leaves_no_member_running() {
 fn a_cont_inside_the_stop_does_not_strand_the_relay() {
     let bg = new_marker();
     let m = short_marker(8);
-    let (relay, _) = relay_direct(&bg, &["/bin/sh".into(), "-c".into(), format!("trap '' TSTP; /bin/sleep {m}")], None);
+    let log = std::env::temp_dir().join(format!("sd-s5-inside-{m}"));
+    let _ = std::fs::remove_file(&log);
+    let (relay, _) = relay_direct(&bg, &["/bin/sh".into(), "-c".into(), format!("trap '' TSTP; /bin/sleep {m}")], Some(&log));
     wait_for("the root", Duration::from_secs(15), || (sleeps(&m).len() == 1).then_some(()));
     let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
     assert!(send(sup, sup_id, libc::SIGTSTP)); // the supervisor now waits (up to 3 s) for the root
-    std::thread::sleep(Duration::from_millis(200));
+    let waiting = wait_for_opt(Duration::from_secs(5), || log_has(&log, "stop-wait"));
+    assert!(waiting, "control: the supervisor never began its member wait");
     assert!(send(sup, sup_id, libc::SIGSTOP));
     let mirrored = wait_for_opt(Duration::from_secs(3), || state(relay.id() as i32) == Some('T'));
     assert!(send(sup, sup_id, libc::SIGCONT));
     let followed = wait_for_opt(Duration::from_secs(3), || state(relay.id() as i32) != Some('T'));
     let rs = state(relay.id() as i32);
     end_relay(relay, &bg, &[&m]);
+    let _ = std::fs::remove_file(&log);
     assert!(mirrored, "control: the relay did not mirror the supervisor's STOP");
     assert!(followed, "the relay stayed stopped after the supervisor was continued inside its stop (relay {rs:?})");
 }
@@ -1909,4 +1920,36 @@ fn term_and_cont_to_the_relay_before_it_mirrors_end_the_job() {
     assert_ne!(rs, Some('T'), "control: the relay had already mirrored the stop");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "TERM and CONT before the mirror did not end the job: {st:?}");
     assert_eq!(left, 0, "members were left after the job ended");
+}
+
+/// S5 review round 5 (P3-1): the supervisor is continued alone (a CONT to its pid) while the relay
+/// is about to mirror its stop (a debug seam holds the relay there). The relay must not end up
+/// stopped while the supervisor runs: the job runs on and nothing waits on a stopped relay.
+#[test]
+fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
+    let t = Ticker::new();
+    let bg = new_marker();
+    let ready = std::env::temp_dir().join(format!("sd-s5-mirror2-{}", t.marker));
+    let _ = std::fs::remove_file(&ready);
+    let r = ready.display().to_string();
+    let (relay, id) = relay_direct_env(&bg, &t.args(&[]), None, &[("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", &r)]);
+    t.ready();
+    t.ticking();
+    let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+    assert!(send_group(relay.id() as i32, id, libc::SIGTSTP));
+    let in_window = wait_for_opt(Duration::from_secs(8), || ready.exists());
+    let sup_stopped = state(sup) == Some('T');
+    assert!(send(sup, sup_id, libc::SIGCONT));
+    // the relay sits in the seam for 1.5 s from the ready file, then would mirror: well after
+    // that window, both must be running (a relay stopped while the supervisor runs is wrong)
+    std::thread::sleep(Duration::from_millis(3000));
+    let (rs, ss) = (state(relay.id() as i32), state(sup));
+    let ticks = t.advance();
+    let _ = std::fs::remove_file(&ready);
+    end_relay(relay, &bg, &[]);
+    assert!(in_window, "control: the relay never reached the mirror");
+    assert!(sup_stopped, "control: the supervisor was not stopped when the relay reached the mirror");
+    assert_ne!(rs, Some('T'), "the relay is stopped while the supervisor runs");
+    assert_ne!(ss, Some('T'), "the supervisor is stopped");
+    assert!(ticks > 0, "the job does not run");
 }
