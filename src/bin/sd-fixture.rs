@@ -56,7 +56,7 @@
 //!   in R; the root also names itself in `<R>.root` once its handler is set ("ready"). Then:
 //!   `slow-tstp F`: on TSTP it takes 300 ms, creates F, then stops itself (a pager restoring the
 //!   terminal); `regroup-tstp`: on TSTP it sets TSTP to default and sends it to its whole group
-//!   (`kill(0, SIGTSTP)`); `read`: reads its stdin (TTIN in the background); `write`: writes a
+//!   (`kill(0, SIGTSTP)`) after 100 ms; `read`: reads its stdin (TTIN in the background); `write`: writes a
 //!   line to stdout every 50 ms (TTOU in the background with `tostop`); otherwise it waits.
 //! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
 //!   READY once the handler is installed; else waits.
@@ -355,6 +355,9 @@ extern "C" fn regroup_tstp(_: libc::c_int) {
         libc::sigemptyset(&mut one);
         libc::sigaddset(&mut one, libc::SIGTSTP);
         libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        // first some work (restoring the terminal): the second TSTP then reaches sheepdog while
+        // it is stopping the job, not together with the terminal's
+        libc::usleep(100_000);
         libc::kill(0, libc::SIGTSTP);
         libc::signal(libc::SIGTSTP, regroup_tstp as *const () as usize);
     }

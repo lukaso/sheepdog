@@ -1231,12 +1231,14 @@ fn cell21d_a_regrouped_tstp_is_one_stop() {
 }
 
 /// Cell 21(e), rewritten for phase 1 (no --timeout): an orphaned process group (sheepdog leads
-/// its own session, no terminal) gets a TSTP. The kernel discards the self-stop, so sheepdog
-/// continues the members it stopped and the job ends when its 1 s root exits: no hang.
+/// its own session, no terminal) gets a TSTP. The root does not stop (the kernel discards its
+/// TSTP), so after its wait sheepdog SIGSTOPs it; the kernel discards sheepdog's own stop, no
+/// CONT ever comes, and sheepdog still continues the root: the job ends when the 3 s root
+/// exits, no hang.
 #[test]
 fn cell21e_a_tstp_in_an_orphaned_group_does_not_hang() {
     let mut c = Command::new(sheepdog());
-    c.args(["run", "--quiet", "--", "/bin/sleep", "1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.args(["run", "--quiet", "--", "/bin/sleep", "3"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCONT] {
