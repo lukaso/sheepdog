@@ -154,6 +154,7 @@ It **lists**; it kills nothing unless asked.
   - It records who was already in T, then does the self-stop above. On CONT it continues only the members it stopped.
   - TSTP is ignored while the kill loop runs.
   - **Stated limit:** a bare SIGSTOP of the group (not TSTP) stops the supervisor without any handler, so escapees keep running until CONT.
+  - **Stated limit (S5, measured on Linux):** "orphaned" is the kernel's word, and it depends on the session of the process that adopts the job. When the job's parent dies and the job is re-parented to a process in the **same** session (a container's init, a subreaper), the group is not orphaned, the stop is kept, and the job waits for a CONT, as it would without sheepdog. Re-parented outside the session (launchd, or an init in another session), the stop is discarded and the job runs on.
   - `--timeout` counts **running time only**: the supervisor measures the gap around its own stop (verified in round 5). In an orphaned group the stop is discarded, so all time counts.
 - **Exit codes** follow `timeout(1)`, and **a machine-readable status carries the detail** (exit codes are ambiguous by nature: a command can exit 124 or 125 by itself):
   - the command's own code, or 128+n if it died from signal n;

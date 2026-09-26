@@ -330,7 +330,7 @@ static mut TSTP_FILE: [u8; 512] = [0; 512];
 extern "C" fn slow_tstp(_: libc::c_int) {
     unsafe {
         libc::usleep(300_000);
-        let f = libc::open(TSTP_FILE.as_ptr() as *const libc::c_char, libc::O_WRONLY | libc::O_CREAT, 0o644);
+        let f = libc::open(std::ptr::addr_of!(TSTP_FILE) as *const libc::c_char, libc::O_WRONLY | libc::O_CREAT, 0o644);
         if f >= 0 {
             libc::close(f);
         }
@@ -688,7 +688,8 @@ fn main() {
             match a.get(4).map(String::as_str) {
                 Some("slow-tstp") if a.len() == 6 => {
                     let b = a[5].as_bytes();
-                    TSTP_FILE[..b.len()].copy_from_slice(b);
+                    // NUL-terminated by the zeroed static (paths are far below 512 bytes)
+                    std::ptr::copy_nonoverlapping(b.as_ptr(), std::ptr::addr_of_mut!(TSTP_FILE) as *mut u8, b.len().min(511));
                     on(libc::SIGTSTP, slow_tstp as *const () as usize, true);
                 }
                 Some("regroup-tstp") => on(libc::SIGTSTP, regroup_tstp as *const () as usize, true),

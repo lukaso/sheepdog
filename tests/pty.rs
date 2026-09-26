@@ -1284,9 +1284,12 @@ fn cell21f_ctrl_z_under_a_shell_wrapper_stops_the_escapees() {
 }
 
 /// Cell 21'(g), rewritten: the parent is killed while sheepdog waits for the members to stop (the
-/// root ignores TSTP, so sheepdog waits its full second). No terminal is involved: a shell in a
-/// group of its own runs sheepdog, and the group gets TSTP. Once the shell is gone the group is
-/// orphaned, the self-stop is discarded, and the job ends when the 2 s root exits: no hang.
+/// root ignores TSTP, so sheepdog waits its full second). No terminal is involved: a shell leads
+/// a session of its own and runs sheepdog; the group gets TSTP. Once the shell is gone, sheepdog
+/// is re-parented outside that session, so the group is orphaned, the self-stop is discarded,
+/// and the job ends when the 2 s root exits: no hang. (The session matters: re-parented to a
+/// process in the same session, as to a container's init, the group is not orphaned and the
+/// kernel keeps the stop, with or without sheepdog: stated in PLAN.)
 #[test]
 fn cell21g_a_parent_killed_during_the_stop_does_not_hang() {
     let root_marker = new_marker();
@@ -1301,7 +1304,12 @@ fn cell21g_a_parent_killed_during_the_stop_does_not_hang() {
             Ok(())
         });
     }
-    c.process_group(0);
+    unsafe {
+        c.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
     let mut sh = c.spawn().unwrap();
     let (pg, pg_id) = (sh.id() as i32, identity(sh.id() as i32).expect("the shell's identity"));
     let (sd, sd_id) = wait_for("sheepdog under the shell", Duration::from_secs(15), || supervisor_of(sh.id()));
