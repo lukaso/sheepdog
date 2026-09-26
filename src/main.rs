@@ -800,8 +800,18 @@ mod tests {
                         let _ = m.wait();
                         std::fs::write("/proc/sys/kernel/ns_last_pid", format!("{}", mp - 1)).unwrap();
                         let s = std::process::Command::new("/bin/sleep").arg("301").spawn().unwrap();
-                        assert_eq!(s.id() as i32, mp, "control: the stranger did not get the member's pid");
+                        let (spid, got_pid) = (s.id() as i32, s.id() as i32 == mp);
+                        // kept before the controls, so a failed control cannot leak it (the
+                        // cleanup below kills it)
+                        *stranger.borrow_mut() = Some(s);
+                        if !got_pid {
+                            unsafe { libc::kill(spid, libc::SIGKILL) };
+                        }
+                        assert!(got_pid, "control: the stranger did not get the member's pid");
                         std::thread::sleep(Duration::from_millis(20));
+                        if sheepdog::ident::same(mp, mid) {
+                            unsafe { libc::kill(mp, libc::SIGKILL) };
+                        }
                         assert!(!sheepdog::ident::same(mp, mid), "control: the stranger shares the member's start tick");
                         if leg == "other-stopped" {
                             unsafe { libc::kill(mp, libc::SIGSTOP) };
@@ -809,7 +819,6 @@ mod tests {
                                 std::thread::sleep(Duration::from_millis(1));
                             }
                         }
-                        *stranger.borrow_mut() = Some(s);
                         std::env::set_var("SHEEPDOG_TEST_WRONG_FREEZE", mp.to_string());
                         let sent = signal(p, id, sig);
                         std::env::remove_var("SHEEPDOG_TEST_WRONG_FREEZE");
