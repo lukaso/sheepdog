@@ -1764,3 +1764,83 @@ fn a_tstp_to_the_relay_pid_stops_nothing() {
     assert_ne!(ss, Some('T'), "a pid-only TSTP to the relay stopped the supervisor");
     assert!(ticks > 0, "the job stopped ticking");
 }
+
+/// S5 review round 3 (P2-1): relay path, the supervisor alone is stopped and continued (signals
+/// to its pid: a debugger's shape). The relay mirrors the stop and must follow the continue, so
+/// the caller gets the job's exit when the root ends. Both STOP/CONT and TSTP/CONT.
+#[test]
+fn a_supervisor_stopped_and_continued_alone_does_not_strand_the_relay() {
+    for stop in [libc::SIGSTOP, libc::SIGTSTP] {
+        let bg = new_marker();
+        let m = short_marker(3);
+        let (mut relay, _) = relay_direct(&bg, &["/bin/sleep".into(), m.clone()], None);
+        wait_for("the root", Duration::from_secs(15), || (sleeps(&m).len() == 1).then_some(()));
+        let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+        assert!(send(sup, sup_id, stop));
+        // mirrored (the relay follows a stopped supervisor within a tick)
+        let mirrored = wait_for_opt(Duration::from_secs(6), || state(relay.id() as i32) == Some('T'));
+        assert!(send(sup, sup_id, libc::SIGCONT));
+        let st = wait_bounded(&mut relay, Duration::from_secs(8));
+        let rs = if st.is_none() { state(relay.id() as i32) } else { None };
+        end_relay(relay, &bg, &[&m]);
+        assert!(mirrored, "stop {stop}: control: the relay did not mirror the supervisor's stop");
+        assert_eq!(st.and_then(|s| s.code()), Some(0), "stop {stop}: the caller did not get the job's exit (relay state {rs:?})");
+    }
+}
+
+/// S5 review round 3 (P2-2): relay path, the job is stopped (a group TSTP), then TERM and CONT to
+/// the relay's pid (what coreutils `timeout` does): the job ends, the relay dies of TERM, and
+/// nothing is left.
+#[test]
+fn term_and_cont_to_a_stopped_relay_end_the_job() {
+    let t = Ticker::new();
+    let bg = new_marker();
+    let (mut relay, id) = relay_direct(&bg, &t.args(&[]), None);
+    t.ready();
+    t.ticking();
+    let (sup, _) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+    assert!(send_group(relay.id() as i32, id, libc::SIGTSTP));
+    let stopped = wait_for_opt(Duration::from_secs(8), || state(relay.id() as i32) == Some('T') && state(sup) == Some('T'));
+    assert!(common::send_child(&mut relay, libc::SIGTERM));
+    assert!(common::send_child(&mut relay, libc::SIGCONT));
+    let st = wait_bounded(&mut relay, Duration::from_secs(8));
+    std::thread::sleep(Duration::from_millis(300));
+    let left = t.recorded().iter().filter(|&&(p, id)| same(p, id)).count();
+    end_relay(relay, &bg, &[]);
+    use std::os::unix::process::ExitStatusExt;
+    assert!(stopped, "control: the relayed job did not stop");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "TERM and CONT did not end the stopped relayed job: {st:?}");
+    assert_eq!(left, 0, "members were left after the job ended");
+}
+
+/// S5 review round 3 (P3-1): the decision "the job was continued" is taken once. A CONT during
+/// the member wait, then a new TSTP in the gap after that decision (widened by a debug seam): the
+/// new TSTP is a new stop (not swallowed by the called-off one), and when sheepdog stops, its
+/// TSTP-ignoring root is stopped too (never a member left running while sheepdog stops).
+#[test]
+fn a_stop_after_the_continue_decision_leaves_no_member_running() {
+    let t = Ticker::new();
+    let log = std::env::temp_dir().join(format!("sd-s5-racelog-{}", t.marker));
+    let _ = std::fs::remove_file(&log);
+    let mut cmd = vec!["/bin/sh".to_string(), "-c".into(), "trap '' TSTP; exec \"$0\" \"$@\"".into()];
+    cmd.extend(t.args(&[]));
+    let l = log.display().to_string();
+    let (c, id) = direct(&["--quiet"], &cmd, &[("SHEEPDOG_TEST_STOP_WAIT_MS", "1000"), ("SHEEPDOG_TEST_SIGNAL_LOG", &l), ("SHEEPDOG_TEST_SLEEP_AFTER_CONT_DECISION_MS", "600")]);
+    let (root, _) = t.ready();
+    t.ticking();
+    let pg = c.id() as i32;
+    assert!(send_group(pg, id, libc::SIGTSTP));
+    let began = wait_for_opt(Duration::from_secs(5), || sent_signals(&log).iter().any(|&(p, s)| p != root && s == libc::SIGSTOP));
+    assert!(send_group(pg, id, libc::SIGCONT));
+    std::thread::sleep(Duration::from_millis(250)); // inside the widened 600 ms gap after the decision
+    assert!(send_group(pg, id, libc::SIGTSTP));
+    // settle: the new stop runs its 1 s wait, then sheepdog stops (or does not)
+    std::thread::sleep(Duration::from_millis(2500));
+    let (sd_state, root_state) = (state(pg), state(root));
+    end_direct(c, id, &t.marker);
+    let _ = std::fs::remove_file(&log);
+    assert!(began, "control: the first stop did not run");
+    // the second TSTP is a new stop (not swallowed by the called-off one): the job stops, root too
+    assert_eq!(sd_state, Some('T'), "the TSTP after the continue did not stop the job");
+    assert_eq!(root_state, Some('T'), "sheepdog is stopped while its TSTP-ignoring root runs");
+}

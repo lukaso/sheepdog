@@ -377,6 +377,8 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
             if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
                 if libc::WIFSTOPPED(st) {
                     crate::self_stop(libc::WSTOPSIG(st));
+                    // resumed: the supervisor too (a CONT to the relay's pid alone)
+                    libc::kill(sup, libc::SIGCONT);
                     continue;
                 }
                 if kq >= 0 {
@@ -384,11 +386,15 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
                 }
                 return crate::die_like(st);
             }
+            // a stopped supervisor must wake to act on it (TERM+CONT to the relay, as `timeout`
+            // sends, must end a stopped job)
             if crate::consume(libc::SIGTERM) {
                 libc::kill(sup, libc::SIGTERM);
+                libc::kill(sup, libc::SIGCONT);
             }
             if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
                 libc::kill(sup, libc::SIGHUP);
+                libc::kill(sup, libc::SIGCONT);
             }
             // never forwarded: the terminal sent it to the group. Not with --forward-int-to-root
             // either: a copy that reaches the supervisor after it took the terminal's INT would
@@ -436,7 +442,7 @@ fn wait(
     group_is_ours: &mut dyn FnMut(i32) -> bool,
     ints: &mut crate::Interrupts,
 ) -> Option<c_int> {
-    let mut jobs = crate::JobControl::default();
+    let mut jobs = crate::JobControl::new(relay);
     let watch_term = sig.watch_term;
     unsafe {
         let kq = libc::kqueue();
@@ -550,8 +556,8 @@ fn wait(
                     stop = Some(s);
                 }
             }
-            if sig.watch_cont {
-                crate::consume(libc::SIGCONT); // a CONT outside a stop of ours changes nothing
+            if sig.watch_cont && crate::consume(libc::SIGCONT) {
+                jobs.continue_relay(); // continued on its own: the relay must not stay stopped
             }
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(st);

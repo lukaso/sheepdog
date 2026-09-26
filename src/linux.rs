@@ -233,6 +233,8 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                     if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
                         if libc::WIFSTOPPED(st) {
                             crate::self_stop(libc::WSTOPSIG(st));
+                            // resumed: the supervisor too (a CONT to the relay's pid alone)
+                            libc::kill(sup, libc::SIGCONT);
                             continue;
                         }
                         if fd >= 0 {
@@ -250,11 +252,15 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                     };
                     for s in got {
                         match s {
+                            // a stopped supervisor must wake to act on it (TERM+CONT to the relay,
+                            // as `timeout` sends, must end a stopped job)
                             libc::SIGTERM => {
                                 libc::kill(sup, libc::SIGTERM);
+                                libc::kill(sup, libc::SIGCONT);
                             }
                             libc::SIGHUP if libc::getsid(0) == relay => {
                                 libc::kill(sup, libc::SIGHUP);
+                                libc::kill(sup, libc::SIGCONT);
                             }
                             // SIGCHLD, INT (never forwarded, also with --forward-int-to-root: a late
                             // copy would reach the escapees twice), a HUP we are not the leader for
@@ -301,7 +307,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     // even if it is no longer a descendant by then (sticky, by identity)
     let mut tracker = crate::Tracker::default();
     let mut ints = crate::Interrupts::new(a, relay);
-    let mut jobs = crate::JobControl::default();
+    let mut jobs = crate::JobControl::new(relay);
     let tick = crate::tick_ms() as i32;
     let status = loop {
         tracker.refresh(descendants(me));
@@ -350,6 +356,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
                 });
             }
+        }
+        if got.contains(&libc::SIGCONT) {
+            jobs.continue_relay(); // continued on its own: the relay must not stay stopped
         }
         // job control after INT/HUP (the fixed order); all stop signals of one wake are one stop
         if let Some(&s) = crate::STOPS.iter().find(|s| got.contains(s)) {

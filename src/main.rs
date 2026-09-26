@@ -874,9 +874,28 @@ fn in_foreground() -> bool {
 pub struct JobControl {
     /// members sheepdog stopped and has not continued yet
     stopped_by_us: Vec<(i32, u64)>,
+    /// the relay, when this supervisor has one
+    relay: Option<i32>,
 }
 
 impl JobControl {
+    pub fn new(relay: Option<i32>) -> Self {
+        JobControl { stopped_by_us: Vec::new(), relay }
+    }
+
+    /// sheepdog was continued (its self-stop returned, or its loop took a CONT): continue the
+    /// relay too. The relay mirrors the supervisor's stop, and a supervisor continued on its own
+    /// (a debugger, a signal to its pid) must not leave the relay stopped: the caller waits on
+    /// the relay. Only while the relay is still our parent (a parent's pid cannot be reused
+    /// while we live).
+    pub fn continue_relay(&self) {
+        if let Some(r) = self.relay.filter(|&r| r > 1) {
+            if unsafe { libc::getppid() } == r {
+                unsafe { libc::kill(r, libc::SIGCONT) };
+            }
+        }
+    }
+
     /// One stop (all stop signals of one wake are one stop): `sig` is the one sheepdog raises on
     /// itself, so the shell reports the right reason ("Stopped (tty input)" for TTIN).
     /// `members` rescans and returns the live members; `stopped(pid)` reads a process's state.
@@ -918,7 +937,12 @@ impl JobControl {
         while Instant::now() < until && !over() && !cont() && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let abort = over() || cont();
+        // One decision, on a consumed fact: "continued" skips both the group SIGSTOPs and the
+        // self-stop (a peek here and a consume later could disagree when a stop signal lands in
+        // between, and leave a member running while sheepdog is stopped).
+        let continued = sigs.watch_cont && consume(libc::SIGCONT);
+        let abort = over() || continued;
+        seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_CONT_DECISION_MS");
         for &(p, id) in &group {
             if !abort && same(p, id) && !stopped(p) {
                 let _ = signal(p, id, libc::SIGSTOP);
@@ -941,9 +965,10 @@ impl JobControl {
         }
         // Every stop signal pending now belongs to this stop (a handler that re-sends TSTP to
         // its group, a second ctrl-Z during the wait): consume them, so they do not stop the
-        // job again after the resume.
+        // job again after the resume. Not when this stop was called off: a stop signal after
+        // the continue is a new stop, for the loop's next pass.
         for (i, &s) in STOPS.iter().enumerate() {
-            if sigs.watch_stop[i] {
+            if sigs.watch_stop[i] && !abort {
                 consume(s);
             }
         }
@@ -951,9 +976,10 @@ impl JobControl {
         // job during the wait; raising the stop now would remove that CONT and leave sheepdog
         // stopped for good). A CONT in the instant between this check and the raise is lost
         // that way (stated).
-        let continued = sigs.watch_cont && consume(libc::SIGCONT);
-        if !continued && !over() {
+        let late = sigs.watch_cont && consume(libc::SIGCONT);
+        if !abort && !late && !over() {
             self_stop(sig);
+            self.continue_relay();
         }
         // Resumed by a CONT, or the stop was discarded (an orphaned group: the kernel decides).
         // Either way, continue the members sheepdog stopped. A CONT may be pending or not (a
