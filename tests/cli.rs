@@ -624,6 +624,9 @@ mod relay {
                     libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
                 }
                 if own_group {
+                    for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+                        libc::signal(s, libc::SIG_DFL);
+                    }
                     libc::setpgid(0, 0);
                 }
                 Ok(())
@@ -703,8 +706,8 @@ mod relay {
             let sups = supervisors_of(relayed.id() as i32);
             let root = w.suspended_root();
             unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
+            let _ = relayed.wait(); // the relay is gone before the window is judged
             let late = w.resumed();
-            let _ = relayed.wait();
             until_gone(&sups);
             until_gone(&[root]);
             let (did_run, root_left, sup_after) = (w.ran.exists(), alive(root), sups.iter().filter(|&&p| alive(p)).count());
@@ -861,8 +864,8 @@ mod relay {
             libc::killpg(pg, libc::SIGCONT);
         }
         wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
-        let late = w.resumed();
         let st = wait_bounded(&mut c, Duration::from_secs(15));
+        let resumed_by_sheepdog = w.resumed(); // read after sheepdog's check has run
         std::thread::sleep(Duration::from_millis(200));
         let left = (sleeps(&w.root), sleeps(&esc));
         if st.is_none() {
@@ -870,9 +873,45 @@ mod relay {
         }
         kill_marked(&[&esc]);
         w.cleanup(&[]);
-        assert!(!late, "sheepdog resumed the root itself although TERM was pending");
+        assert!(!resumed_by_sheepdog, "sheepdog resumed the root itself although TERM was pending");
         assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "sheepdog did not die of SIGTERM");
         assert_eq!(left, (0, 0), "the job was left (root, the root's child)");
+    }
+
+    /// S2 review round 6 (macOS): the same early end, with another deadly signal (INT, HUP,
+    /// QUIT) sent to sheepdog together with the TERM: sheepdog still kills the whole job and dies
+    /// of TERM; the other signal must not end it before the kill.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_term_and_another_signal_after_a_stop_leave_nothing() {
+        for (i, other) in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT].into_iter().enumerate() {
+            let w = Window::new(64 + 3 * i as u32);
+            let esc = m(66 + 3 * i as u32);
+            let script = format!("/bin/sleep {esc} & exec /bin/sleep {}", w.root);
+            let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
+            caller(&mut c, true, false);
+            let mut c = c.spawn().unwrap();
+            let pg = c.id() as i32;
+            w.wait_ready();
+            unsafe { libc::killpg(pg, libc::SIGTSTP) };
+            wait_until("sheepdog stopped", || state(pg) == Some('T'));
+            unsafe {
+                libc::kill(pg, libc::SIGTERM);
+                libc::kill(pg, other);
+                libc::killpg(pg, libc::SIGCONT);
+            }
+            wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
+            let st = wait_bounded(&mut c, Duration::from_secs(15));
+            std::thread::sleep(Duration::from_millis(200));
+            let left = (sleeps(&w.root), sleeps(&esc));
+            if st.is_none() {
+                unsafe { libc::killpg(pg, libc::SIGKILL) };
+            }
+            kill_marked(&[&esc]);
+            w.cleanup(&[]);
+            assert_eq!(left, (0, 0), "signal {other}: the job was left (root, the root's child)");
+            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "signal {other}: sheepdog did not die of SIGTERM");
+        }
     }
 
     /// S2 review round 5 (macOS): a relay that dies after the root is resumed but before the
@@ -882,11 +921,19 @@ mod relay {
     #[test]
     fn a_relay_dead_before_the_wait_still_ends_the_job() {
         let w = Window::new(58);
-        let mut relayed = w.with(&["/bin/sleep", &w.root], true, "SHEEPDOG_TEST_SLEEP_BEFORE_RELAY_REG_MS", "800").spawn().unwrap();
+        let registered = std::env::temp_dir().join(format!("sd-reg-{}-w58", std::process::id()));
+        let _ = std::fs::remove_file(&registered);
+        let mut relayed = w
+            .with(&["/bin/sleep", &w.root], true, "SHEEPDOG_TEST_SLEEP_BEFORE_RELAY_REG_MS", "800")
+            .env("SHEEPDOG_TEST_RELAY_REG_FILE", &registered)
+            .spawn()
+            .unwrap();
         w.wait_ready();
         let sups = supervisors_of(relayed.id() as i32);
         unsafe { libc::kill(relayed.id() as i32, libc::SIGKILL) };
         let _ = relayed.wait();
+        let late = registered.exists();
+        let _ = std::fs::remove_file(&registered);
         until_gone(&sups);
         let deadline = Instant::now() + Duration::from_secs(11);
         while Instant::now() < deadline && sleeps(&w.root) > 0 {
@@ -894,6 +941,7 @@ mod relay {
         }
         let (left, sup_after) = (sleeps(&w.root), sups.iter().filter(|&&p| alive(p)).count());
         w.cleanup(&sups);
+        assert!(!late, "the kill missed the window (load): the wait had already registered the relay's exit");
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
         assert_eq!((left, sup_after), (0, 0), "a relay dead before the wait's registration leaked the job (root, supervisor)");
     }

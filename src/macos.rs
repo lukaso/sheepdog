@@ -455,7 +455,14 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
                 ev.filter = libc::EVFILT_PROC;
                 ev.flags = libc::EV_ADD | libc::EV_ONESHOT;
                 ev.fflags = libc::NOTE_EXIT;
-                if libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) != 0 {
+                let reg = libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+                if cfg!(debug_assertions) {
+                    // debug seam: mark that the relay's exit is now registered (or refused)
+                    if let Ok(f) = std::env::var("SHEEPDOG_TEST_RELAY_REG_FILE") {
+                        let _ = std::fs::File::create(f);
+                    }
+                }
+                if reg != 0 {
                     if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
                         relay_died();
                     } else {
@@ -598,7 +605,12 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     unsafe { libc::kill(root, libc::SIGCONT) };
                 }
             }
-            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
+            // On an early end every signal stays held through the kill and the death by TERM:
+            // releasing them now would let another deadly one (INT, HUP, QUIT) end sheepdog
+            // before the tree is killed (S2 review round 6).
+            if !ended {
+                unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
+            }
             let mut track = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);
