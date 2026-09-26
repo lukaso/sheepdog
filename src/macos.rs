@@ -314,7 +314,10 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => Some(relay_loop(sup, relay)),
+            sup => {
+                crate::release_job_control_signals(sig);
+                Some(relay_loop(sup, relay))
+            }
         }
     }
 }
@@ -566,7 +569,7 @@ fn wait(
             }
             // job control after INT/HUP (the fixed order)
             if let Some(s) = stop {
-                jobs.stop(s, sig, members, stopped);
+                jobs.stop(s, sig, pid, members, stopped);
             }
             ints.tick(group_is_ours);
             if !polling && proc_exiting {

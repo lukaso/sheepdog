@@ -866,8 +866,10 @@ fn in_foreground() -> bool {
 
 /// Job control (PHASE1.md §1.4): a ctrl-Z (TSTP), or a background job touching the terminal
 /// (TTIN, TTOU), stops the whole job, escapees included, and stops sheepdog itself so the shell
-/// sees the job stopped. The members sheepdog stopped are continued when it is continued; a
-/// member that was already stopped (by the user) stays stopped.
+/// sees the job stopped. The members sheepdog stopped are continued when it is continued. A
+/// member that was already stopped when sheepdog looked is not recorded: one stopped by the
+/// user stays stopped, and a group member that stopped by itself (the terminal's TSTP) gets its
+/// CONT with the group's, as without sheepdog.
 #[derive(Default)]
 pub struct JobControl {
     /// members sheepdog stopped and has not continued yet
@@ -878,10 +880,13 @@ impl JobControl {
     /// One stop (all stop signals of one wake are one stop): `sig` is the one sheepdog raises on
     /// itself, so the shell reports the right reason ("Stopped (tty input)" for TTIN).
     /// `members` rescans and returns the live members; `stopped(pid)` reads a process's state.
-    pub fn stop(&mut self, sig: c_int, sigs: &Signals, members: &mut dyn FnMut() -> Vec<(i32, u64)>, stopped: fn(i32) -> bool) {
+    pub fn stop(&mut self, sig: c_int, sigs: &Signals, root: i32, members: &mut dyn FnMut() -> Vec<(i32, u64)>, stopped: fn(i32) -> bool) {
         let own = unsafe { libc::getpgrp() };
         let mut seen: std::collections::HashSet<(i32, u64)> = std::collections::HashSet::new();
         let mut group: Vec<(i32, u64)> = Vec::new();
+        // The job is over (TERM comes first in the fixed order; the root has exited): do not
+        // stop. Neither consumes anything: the event loop's next pass takes the TERM or the exit.
+        let over = || (sigs.watch_term && term_pending()) || root_ended(root);
         // Escapees (outside sheepdog's group) get SIGSTOP at once, after a fresh rescan, repeated
         // until no new member appears (a breeding escapee). Group members got the stop from
         // the terminal; they stop by themselves below. Already stopped: not ours to continue.
@@ -906,7 +911,7 @@ impl JobControl {
         // first), bounded to 1 s; then those still running get SIGSTOP, a TSTP-ignoring member
         // included (sheepdog never leaves a member running while its own enforcement stops).
         let until = Instant::now() + Duration::from_millis(seam_ms("SHEEPDOG_TEST_STOP_WAIT_MS").unwrap_or(1000));
-        while Instant::now() < until && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
+        while Instant::now() < until && !over() && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
             std::thread::sleep(Duration::from_millis(5));
         }
         for &(p, id) in &group {
@@ -914,6 +919,20 @@ impl JobControl {
                 let _ = signal(p, id, libc::SIGSTOP);
             }
             self.stopped_by_us.push((p, id));
+        }
+        // Members born during the wait (a group member still running its handler can fork):
+        // rescan until stable again, and stop every new one, in the group or not.
+        for _ in 0..32 {
+            let fresh: Vec<(i32, u64)> = members().into_iter().filter(|m| !seen.contains(m)).collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for (p, id) in fresh {
+                seen.insert((p, id));
+                if !stopped(p) && signal(p, id, libc::SIGSTOP) != Sent::No {
+                    self.stopped_by_us.push((p, id));
+                }
+            }
         }
         // Every stop signal pending now belongs to this stop (a handler that re-sends TSTP to
         // its group, a second ctrl-Z during the wait): consume them, so they do not stop the
@@ -923,7 +942,14 @@ impl JobControl {
                 consume(s);
             }
         }
-        self_stop(sig);
+        // Not stopping after all: the job is over, or a CONT already came (someone continued the
+        // job during the wait; raising the stop now would remove that CONT and leave sheepdog
+        // stopped for good). A CONT in the instant between this check and the raise is lost
+        // that way (stated).
+        let continued = sigs.watch_cont && consume(libc::SIGCONT);
+        if !continued && !over() {
+            self_stop(sig);
+        }
         // Resumed by a CONT, or the stop was discarded (an orphaned group: the kernel decides).
         // Either way, continue the members sheepdog stopped. A CONT may be pending or not (a
         // TSTP right after the resume removes it): it is consumed if there, never waited for.
@@ -933,6 +959,40 @@ impl JobControl {
         for (p, id) in std::mem::take(&mut self.stopped_by_us) {
             let _ = signal(p, id, libc::SIGCONT);
         }
+    }
+}
+
+/// Has the root exited (a zombie not yet reaped)? Reads without reaping (WNOWAIT), so the event
+/// loop still reaps it and takes its status.
+fn root_ended(root: i32) -> bool {
+    if root <= 1 {
+        return false;
+    }
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::waitid(libc::P_PID, root as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    #[cfg(target_os = "linux")]
+    let pid = unsafe { info.si_pid() };
+    #[cfg(target_os = "macos")]
+    let pid = info.si_pid;
+    // macOS also reports a STOPPED child here (measured: a root sheepdog had just SIGSTOPped
+    // counted as ended), so the state must be an exit
+    let ended = [libc::CLD_EXITED, libc::CLD_KILLED, libc::CLD_DUMPED].contains(&info.si_code);
+    r == 0 && pid == root && ended
+}
+
+/// Give the relay the caller's state for the job-control signals: it is a member of the job's
+/// process group like any other and must stop on a ctrl-Z (the shell waits on it), so it must
+/// not keep the blocks sheepdog set for its own event loop (S5 review).
+pub fn release_job_control_signals(sig: &Signals) {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCONT] {
+            if libc::sigismember(&sig.caller_mask, s) != 1 {
+                libc::sigaddset(&mut set, s);
+            }
+        }
+        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
 }
 

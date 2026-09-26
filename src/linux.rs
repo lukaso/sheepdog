@@ -220,6 +220,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                 Err(125)
             }
             sup => {
+                crate::release_job_control_signals(sig);
                 // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
                 let fd = signal_fd(&set);
                 crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
@@ -344,7 +345,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         }
         // job control after INT/HUP (the fixed order); all stop signals of one wake are one stop
         if let Some(&s) = crate::STOPS.iter().find(|s| got.contains(s)) {
-            jobs.stop(s, sig, &mut || {
+            jobs.stop(s, sig, root, &mut || {
                 tracker.refresh(descendants(me));
                 tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
             }, stopped);

@@ -56,7 +56,8 @@
 //!   in R; the root also names itself in `<R>.root` once its handler is set ("ready"). Then:
 //!   `slow-tstp F`: on TSTP it takes 300 ms, creates F, then stops itself (a pager restoring the
 //!   terminal); `regroup-tstp`: on TSTP it sets TSTP to default and sends it to its whole group
-//!   (`kill(0, SIGTSTP)`) after 100 ms; `read`: reads its stdin (TTIN in the background); `write`: writes a
+//!   (`kill(0, SIGTSTP)`) after 100 ms; `fork-on-tstp`: 200 ms after a TSTP it forks a ticking
+//!   child (recorded) and keeps running; `read`: reads its stdin (TTIN in the background); `write`: writes a
 //!   line to stdout every 50 ms (TTOU in the background with `tostop`); otherwise it waits.
 //! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
 //!   READY once the handler is installed; else waits.
@@ -342,6 +343,33 @@ extern "C" fn slow_tstp(_: libc::c_int) {
         libc::raise(libc::SIGTSTP);
         // continued: handle the next ctrl-Z the same way
         libc::signal(libc::SIGTSTP, slow_tstp as *const () as usize);
+    }
+}
+
+static mut FORK_TICK: [u8; 512] = [0; 512];
+static mut FORK_REC: [u8; 512] = [0; 512];
+
+/// ticker fork-on-tstp: 200 ms after a TSTP, fork a ticking child (recorded), and keep running
+/// (the root does not stop by itself, so sheepdog SIGSTOPs it after its wait).
+extern "C" fn fork_on_tstp(_: libc::c_int) {
+    unsafe {
+        libc::usleep(200_000);
+        match libc::fork() {
+            0 => {
+                libc::alarm(60);
+                let fd = libc::open(std::ptr::addr_of!(FORK_TICK) as *const libc::c_char, libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+                let line = format!("{}\n", libc::getpid());
+                loop {
+                    libc::write(fd, line.as_ptr() as *const libc::c_void, line.len());
+                    libc::usleep(20_000);
+                }
+            }
+            c if c > 0 => {
+                let rec = std::ffi::CStr::from_ptr(std::ptr::addr_of!(FORK_REC) as *const libc::c_char).to_string_lossy().into_owned();
+                record(&rec, c);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -651,6 +679,12 @@ fn main() {
         }
     }
     if mode == "ticker" && (a.len() == 4 || a.len() == 5 || a.len() == 6) {
+        // regroup-tstp sends TSTP to its whole group: only when its parent (sheepdog) leads that
+        // group, never in a group it did not make (a test runner's: that would stop the runner)
+        if a.get(4).map(String::as_str) == Some("regroup-tstp") && unsafe { libc::getpgrp() != libc::getppid() } {
+            eprintln!("sd-fixture: regroup-tstp refused: the parent does not lead this process group");
+            std::process::exit(5);
+        }
         let tick = CString::new(format!("{}.tick", a[3])).unwrap();
         let rec = a[3].clone();
         unsafe {
@@ -693,6 +727,12 @@ fn main() {
                     on(libc::SIGTSTP, slow_tstp as *const () as usize, true);
                 }
                 Some("regroup-tstp") => on(libc::SIGTSTP, regroup_tstp as *const () as usize, true),
+                Some("fork-on-tstp") => {
+                    let t = format!("{}.tick", a[3]);
+                    std::ptr::copy_nonoverlapping(t.as_ptr(), std::ptr::addr_of_mut!(FORK_TICK) as *mut u8, t.len().min(511));
+                    std::ptr::copy_nonoverlapping(a[3].as_ptr(), std::ptr::addr_of_mut!(FORK_REC) as *mut u8, a[3].len().min(511));
+                    on(libc::SIGTSTP, fork_on_tstp as *const () as usize, true);
+                }
                 _ => {}
             }
             record(&a[3], libc::getpid());

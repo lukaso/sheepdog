@@ -33,6 +33,18 @@ fn targets(text: &str) -> Vec<i64> {
     text.split(|c: char| c.is_whitespace() || "(),.".contains(c)).filter_map(|w| w.strip_prefix('-')?.parse::<i64>().ok()).collect()
 }
 
+/// Poll `f` until it holds (true) or `limit` passes (false).
+fn wait_for_opt(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
+    let start = Instant::now();
+    while !f() {
+        if start.elapsed() > limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
 fn wait_for<T>(what: &str, limit: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
@@ -1138,6 +1150,16 @@ fn state(pid: i32) -> Option<char> {
     String::from_utf8_lossy(&out.stdout).trim().chars().next()
 }
 
+/// The child of `parent` whose argv ends a word with `prog` (e.g. "sleep"), with its identity.
+fn child_of(parent: i32, prog: &str) -> Option<(i32, u64)> {
+    let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        let p: i32 = w.first()?.parse().ok()?;
+        (w.len() >= 3 && w[1] == parent.to_string() && w[2].ends_with(prog)).then(|| common::found(p)).flatten()
+    })
+}
+
 /// `fg`: let the fixture shell continue the job, and wait until it has.
 fn fg(pty: &mut Pty, n: usize) {
     pty.fg();
@@ -1177,18 +1199,21 @@ fn cell21b_an_escapee_stopped_by_the_user_stays_stopped() {
     pty.started();
     t.ready();
     t.ticking();
-    // one ticking process of the escapee tree, stopped by "the user"
+    // one ticking process of the escapee tree, stopped by "the user": a recorded pair (its
+    // identity read when it was made), that also ticks
     let tick = std::fs::read_to_string(format!("{}.tick", t.rec.display())).unwrap_or_default();
-    let (p, id) = tick.lines().filter_map(|l| l.trim().parse::<i32>().ok()).find_map(common::found).expect("a ticking escapee");
+    let ticking: Vec<i32> = tick.lines().filter_map(|l| l.trim().parse().ok()).collect();
+    let (p, id) = t.recorded().into_iter().find(|(p, _)| ticking.contains(p)).expect("a recorded, ticking escapee");
     assert!(send(p, id, libc::SIGSTOP));
     wait_for("the user's stop", Duration::from_secs(5), || (state(p) == Some('T')).then_some(()));
     pty.write(b"\x1a");
     pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
     fg(&mut pty, 1);
-    std::thread::sleep(Duration::from_millis(300));
+    // the resume is finished once the others tick again (bounded); only then read the state
+    let t0 = t.ticks();
+    let resumed = wait_for_opt(Duration::from_secs(10), || t.ticks() > t0 + 2);
     let st = state(p);
-    let others = t.advance();
-    assert!(others > 0, "control: the rest of the job did not resume after fg");
+    assert!(resumed, "control: the rest of the job did not resume after fg");
     assert_eq!(st, Some('T'), "an escapee the user had stopped was continued by fg");
 }
 
@@ -1234,11 +1259,14 @@ fn cell21d_a_regrouped_tstp_is_one_stop() {
 /// its own session, no terminal) gets a TSTP. The root does not stop (the kernel discards its
 /// TSTP), so after its wait sheepdog SIGSTOPs it; the kernel discards sheepdog's own stop, no
 /// CONT ever comes, and sheepdog still continues the root: the job ends when the 3 s root
-/// exits, no hang.
+/// exits, no hang. Sheepdog's signal log is the evidence that the stop path ran (the root was
+/// stopped and continued).
 #[test]
 fn cell21e_a_tstp_in_an_orphaned_group_does_not_hang() {
+    let log = std::env::temp_dir().join(format!("sd-s5-21e-{}", new_marker()));
+    let _ = std::fs::remove_file(&log);
     let mut c = Command::new(sheepdog());
-    c.args(["run", "--quiet", "--", "/bin/sleep", "3"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.args(["run", "--quiet", "--", "/bin/sleep", "3"]).env("SHEEPDOG_TEST_SIGNAL_LOG", &log).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCONT] {
@@ -1250,14 +1278,19 @@ fn cell21e_a_tstp_in_an_orphaned_group_does_not_hang() {
     }
     let mut c = c.spawn().unwrap();
     let id = identity(c.id() as i32).expect("sheepdog's identity");
-    std::thread::sleep(Duration::from_millis(200));
+    // ready: the root runs (so sheepdog watches TSTP and has a member to stop)
+    let (root, root_id) = wait_for("the root", Duration::from_secs(15), || child_of(c.id() as i32, "sleep"));
     assert!(send_group(c.id() as i32, id, libc::SIGTSTP));
     let st = wait_bounded(&mut c, Duration::from_secs(10));
     if st.is_none() {
-        send(c.id() as i32, id, libc::SIGCONT);
-        send(c.id() as i32, id, libc::SIGTERM);
-        let _ = wait_bounded(&mut c, Duration::from_secs(10));
+        common::send_child(&mut c, libc::SIGKILL);
+        let _ = c.wait();
+        send(root, root_id, libc::SIGKILL);
     }
+    let lines = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    let sent = |sig: i32| lines.lines().any(|l| l.split_whitespace().collect::<Vec<_>>() == ["kill", &root.to_string(), &sig.to_string()] || l.split_whitespace().collect::<Vec<_>>() == ["pidfd", &root.to_string(), &sig.to_string()]);
+    assert!(sent(libc::SIGSTOP) && sent(libc::SIGCONT), "control: the stop path did not run (the root was not stopped and continued): {lines:?}");
     assert_eq!(st.and_then(|s| s.code()), Some(0), "the orphaned job hung or failed after a TSTP: {st:?}");
 }
 
@@ -1283,19 +1316,19 @@ fn cell21f_ctrl_z_under_a_shell_wrapper_stops_the_escapees() {
     assert!(after > 0, "control: the escapee tree did not tick again after fg");
 }
 
-/// Cell 21'(g), rewritten: the parent is killed while sheepdog waits for the members to stop (the
-/// root ignores TSTP, so sheepdog waits its full second). No terminal is involved: a shell leads
-/// a session of its own and runs sheepdog; the group gets TSTP. Once the shell is gone, sheepdog
-/// is re-parented outside that session, so the group is orphaned, the self-stop is discarded,
-/// and the job ends when the 2 s root exits: no hang. (The session matters: re-parented to a
-/// process in the same session, as to a container's init, the group is not orphaned and the
-/// kernel keeps the stop, with or without sheepdog: stated in PLAN.)
-#[test]
-fn cell21g_a_parent_killed_during_the_stop_does_not_hang() {
-    let root_marker = new_marker();
-    let script = format!("\"$0\" run --quiet -- /bin/sh -c \"trap '' TSTP; /bin/sleep 2; : {root_marker}\"; true");
-    let mut c = Command::new("/bin/sh");
-    c.args(["-c", &script, sheepdog()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+/// The shape of cell 21'(g): a session leader (`nosession`) starts `sh` in a group of its own,
+/// and `sh` runs sheepdog. While `sh` lives the group is not orphaned (sh's parent is in the same
+/// session, in another group); once `sh` is gone, sheepdog is re-parented outside the session
+/// and the group is orphaned. The root ignores TSTP, so sheepdog waits for it (widened to 3 s by
+/// the debug seam). Returns (nosession, sh, sheepdog, root marker); the group has had its TSTP
+/// and `sh` is seen stopped.
+fn orphan_shape() -> (Child, (i32, u64), (i32, u64), String) {
+    let m5 = format!("5.{}{:06}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst));
+    let pidfile = std::env::temp_dir().join(format!("sd-s5-21g-{m5}"));
+    let _ = std::fs::remove_file(&pidfile);
+    let script = format!("\"$0\" run --quiet -- /bin/sh -c \"trap '' TSTP; /bin/sleep {m5}\"; true");
+    let mut c = Command::new(fixture());
+    c.args(["nosession", pidfile.to_str().unwrap(), "/bin/sh", "-c", &script, sheepdog()]).env("SHEEPDOG_TEST_STOP_WAIT_MS", "3000").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCONT] {
@@ -1304,35 +1337,63 @@ fn cell21g_a_parent_killed_during_the_stop_does_not_hang() {
             Ok(())
         });
     }
-    unsafe {
-        c.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
+    let leader = c.spawn().unwrap();
+    let sh: (i32, u64) = wait_for("the shell's pid file", Duration::from_secs(15), || {
+        let s = std::fs::read_to_string(&pidfile).ok()?;
+        let mut w = s.split_whitespace();
+        Some((w.next()?.parse().ok()?, w.next()?.parse().ok()?))
+    });
+    let _ = std::fs::remove_file(&pidfile);
+    let sd = wait_for("sheepdog under the shell", Duration::from_secs(15), || supervisor_of(sh.0 as u32));
+    wait_for("the root", Duration::from_secs(15), || (sleeps(&m5).len() == 1).then_some(()));
+    assert!(send_group(sh.0, sh.1, libc::SIGTSTP));
+    // the group got it and is not orphaned: sh (default TSTP) stops
+    wait_for("the shell's stop", Duration::from_secs(10), || (state(sh.0) == Some('T')).then_some(()));
+    (leader, sh, sd, m5)
+}
+
+fn orphan_cleanup(mut leader: Child, sh: (i32, u64), sd: (i32, u64), m5: &str) {
+    if same(sd.0, sd.1) {
+        send(sd.0, sd.1, libc::SIGCONT);
+        send(sd.0, sd.1, libc::SIGTERM);
+        std::thread::sleep(Duration::from_millis(300));
+        send(sd.0, sd.1, libc::SIGKILL);
     }
-    let mut sh = c.spawn().unwrap();
-    let (pg, pg_id) = (sh.id() as i32, identity(sh.id() as i32).expect("the shell's identity"));
-    let (sd, sd_id) = wait_for("sheepdog under the shell", Duration::from_secs(15), || supervisor_of(sh.id()));
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(send_group(pg, pg_id, libc::SIGTSTP));
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(common::send_child(&mut sh, libc::SIGKILL), "the parent shell was not killed");
-    let _ = sh.wait();
-    let t = Instant::now();
-    while same(sd, sd_id) && t.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(20));
+    send(sh.0, sh.1, libc::SIGKILL);
+    common::kill_marked(&[m5]);
+    if wait_bounded(&mut leader, Duration::from_secs(5)).is_none() {
+        common::send_child(&mut leader, libc::SIGKILL);
+        let _ = leader.wait();
     }
-    let hung = same(sd, sd_id);
-    if hung {
-        send(sd, sd_id, libc::SIGCONT);
-        send(sd, sd_id, libc::SIGTERM);
-    }
-    assert!(!hung, "the job hung after its parent was killed during the stop");
+}
+
+/// Control for 21'(g): the same shape, the parent is NOT killed: the group is not orphaned, so
+/// the stop is kept and sheepdog is seen stopped (proving 21'(g) starts from a group that is
+/// not orphaned).
+#[test]
+fn cell21g_control_a_live_parent_keeps_the_stop() {
+    let (leader, sh, sd, m5) = orphan_shape();
+    let seen = wait_for_opt(Duration::from_secs(8), || state(sd.0) == Some('T'));
+    orphan_cleanup(leader, sh, sd, &m5);
+    assert!(seen, "sheepdog was never seen stopped: the group was orphaned before the parent was killed");
+}
+
+/// Cell 21'(g), rewritten: the parent is killed while sheepdog waits for the members to stop.
+/// The group becomes orphaned during the stop, sheepdog's own stop is discarded, and the job
+/// ends when its ~5 s root exits: no hang. (Re-parented to a process in the SAME session, as to
+/// a container's init, the group would not be orphaned: stated in PLAN.)
+#[test]
+fn cell21g_a_parent_killed_during_the_stop_does_not_hang() {
+    let (leader, sh, sd, m5) = orphan_shape();
+    assert!(send(sh.0, sh.1, libc::SIGKILL), "the parent shell was not killed");
+    let ended = wait_for_opt(Duration::from_secs(15), || !same(sd.0, sd.1));
+    orphan_cleanup(leader, sh, sd, &m5);
+    assert!(ended, "the job hung after its parent was killed during the stop");
 }
 
 /// Cell 21'(h): ctrl-Z again right after `fg` stops the job again, and after the second `fg`
-/// the escapees that sheepdog stopped run again (a TSTP right after the resume can remove the
-/// pending CONT; sheepdog continues its members anyway).
+/// the escapees that sheepdog stopped run again. (The second ctrl-Z comes after sheepdog took
+/// the CONT; a stop that returns with no CONT at all is 21(e)'s case.)
 #[test]
 fn cell21h_ctrl_z_right_after_fg_stops_again_and_fg_resumes() {
     let t = Ticker::new();
@@ -1366,6 +1427,9 @@ fn ttin_stops_the_job_and_its_escapees() {
     let stopped = pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
     std::thread::sleep(Duration::from_millis(1300));
     let while_stopped = t.advance();
+    fg(&mut pty, 1);
+    let after = t.advance();
+    assert!(after > 0, "control: the escapee tree does not tick after fg");
     assert_eq!(stopped, Some(format!("stopped {}", libc::SIGTTIN)), "the job did not stop for tty input");
     assert_eq!(while_stopped, 0, "the escapee tree ticked while the job was stopped");
 }
@@ -1381,6 +1445,162 @@ fn ttou_stops_the_job_and_its_escapees() {
     let stopped = pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
     std::thread::sleep(Duration::from_millis(1300));
     let while_stopped = t.advance();
+    fg(&mut pty, 1);
+    let after = t.advance();
+    assert!(after > 0, "control: the escapee tree does not tick after fg");
     assert_eq!(stopped, Some(format!("stopped {}", libc::SIGTTOU)), "the job did not stop for tty output");
     assert_eq!(while_stopped, 0, "the escapee tree ticked while the job was stopped");
+}
+
+/// The regroup-tstp fixture sends TSTP to its whole group, so it refuses to run in a group its
+/// parent does not lead (here: the test runner's own group, which one TSTP would stop).
+#[test]
+fn the_regroup_fixture_refuses_a_group_it_did_not_make() {
+    let t = Ticker::new();
+    let st = Command::new(fixture()).args(&t.args(&["regroup-tstp"])[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    assert_eq!(st.code(), Some(5), "the fixture did not refuse: {st:?}");
+    assert!(t.recorded().is_empty(), "the fixture started processes before refusing");
+}
+
+/// A marker that is also a short sleep: `<secs>.<digits>`, so a leaked `/bin/sleep` ends soon.
+fn short_marker(secs: u32) -> String {
+    format!("{secs}.{}{:06}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst))
+}
+
+/// A direct sheepdog whose root ignores TSTP and sleeps `m` seconds (so sheepdog waits for it),
+/// with the member wait widened to `wait_ms`. Returns once the root runs.
+fn tstp_ignoring_job(m: &str, wait_ms: &str) -> (Child, u64) {
+    let script = format!("trap '' TSTP; /bin/sleep {m}");
+    let r = direct(&["--quiet"], &["/bin/sh".into(), "-c".into(), script], &[("SHEEPDOG_TEST_STOP_WAIT_MS", wait_ms)]);
+    wait_for("the root", Duration::from_secs(15), || (sleeps(m).len() == 1).then_some(()));
+    r
+}
+
+fn end_direct(mut c: Child, id: u64, m: &str) {
+    if common::alive((c.id() as i32, id)) {
+        common::send_child(&mut c, libc::SIGCONT);
+        common::send_child(&mut c, libc::SIGTERM);
+        if wait_bounded(&mut c, Duration::from_secs(10)).is_none() {
+            common::send_child(&mut c, libc::SIGKILL);
+        }
+    }
+    let _ = c.wait();
+    common::kill_marked(&[m]);
+}
+
+/// S5 review (A-P1-1): ctrl-Z on the relay path. The shell's job is the relay: it must stop
+/// (the relay keeps the caller's stop signals), so the prompt returns; the escapees stop, and
+/// after `fg` they run again.
+#[test]
+fn ctrl_z_on_the_relay_path_stops_the_job() {
+    let t = Ticker::new();
+    let bg = new_marker();
+    let mut cmd = vec![fixture().to_string(), "bg-then-exec".into(), bg.clone()];
+    cmd.extend(run_args(&["--quiet"], &t.args(&[])));
+    let mut pty = Pty::shell(&[], &cmd);
+    let (relay, _) = pty.started();
+    t.ready();
+    t.ticking();
+    let sup = supervisor_of(relay as u32);
+    pty.write(b"\x1a");
+    let stopped = pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
+    let while_stopped = if stopped.is_some() {
+        std::thread::sleep(Duration::from_millis(1300));
+        t.advance()
+    } else {
+        usize::MAX
+    };
+    if stopped.is_some() {
+        fg(&mut pty, 1);
+    }
+    let after = t.advance();
+    if let Some((p, id)) = sup {
+        send(p, id, libc::SIGCONT);
+    }
+    for p in sleeps(&bg) {
+        if let Some(id) = identity(p) {
+            send(p, id, libc::SIGKILL);
+        }
+    }
+    assert!(sup.is_some(), "control: not the relay path");
+    assert!(stopped.is_some(), "the shell never saw the job stop on the relay path: {:?}", pty.lines());
+    assert_eq!(while_stopped, 0, "the escapee tree ticked while the job was stopped");
+    assert!(after > 0, "the escapee tree did not tick again after fg");
+}
+
+/// S5 review (A-P1-2): TSTP and then CONT to the group while sheepdog waits for a member to
+/// stop (the root ignores TSTP): the job was continued, so sheepdog must not stop itself.
+#[test]
+fn a_cont_during_the_stop_wait_cancels_the_stop() {
+    let m = short_marker(6);
+    let (c, id) = tstp_ignoring_job(&m, "3000");
+    let pg = c.id() as i32;
+    assert!(send_group(pg, id, libc::SIGTSTP));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(send_group(pg, id, libc::SIGCONT));
+    // the wait is 3 s: by 4 s sheepdog has either stopped itself (the defect) or not
+    std::thread::sleep(Duration::from_millis(3700));
+    let st = state(pg);
+    end_direct(c, id, &m);
+    assert_ne!(st, Some('T'), "sheepdog stopped itself although the job was continued");
+}
+
+/// S5 review (A-P2-2): a TERM that arrives while sheepdog waits for a member to stop ends the
+/// job at once (TERM comes first in the fixed order); sheepdog does not stop with it pending.
+#[test]
+fn a_term_during_the_stop_wait_ends_the_job() {
+    let m = short_marker(6);
+    let (mut c, id) = tstp_ignoring_job(&m, "3000");
+    let pg = c.id() as i32;
+    assert!(send_group(pg, id, libc::SIGTSTP));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(common::send_child(&mut c, libc::SIGTERM));
+    let st = wait_bounded(&mut c, Duration::from_secs(2));
+    let left = sleeps(&m).len();
+    if st.is_none() {
+        end_direct(c, id, &m);
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "a TERM during the stop wait did not end the job: {st:?}");
+    assert_eq!(left, 0, "the root survived the TERM");
+}
+
+/// S5 review (A-P2-2): the root exits while sheepdog waits for it to stop: the job is over, so
+/// sheepdog exits as the root did instead of stopping itself.
+#[test]
+fn a_root_exit_during_the_stop_wait_ends_the_job() {
+    let m = short_marker(0);
+    let script = format!("trap '' TSTP; /bin/sleep 0.5; : {m}");
+    let (mut c, id) = direct(&["--quiet"], &["/bin/sh".into(), "-c".into(), script], &[("SHEEPDOG_TEST_STOP_WAIT_MS", "3000")]);
+    let pg = c.id() as i32;
+    wait_for("the root", Duration::from_secs(15), || child_of(pg, "sh").map(|_| ()));
+    assert!(send_group(pg, id, libc::SIGTSTP));
+    let st = wait_bounded(&mut c, Duration::from_secs(2));
+    if st.is_none() {
+        end_direct(c, id, &m);
+    }
+    assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepdog did not end with its root: {st:?}");
+}
+
+/// S5 review (A-P2-1): a member born during the stop wait (the root's TSTP handler forks a
+/// ticker 200 ms in, and keeps running) must be stopped too: nothing ticks while the job is
+/// stopped.
+#[test]
+fn a_member_born_during_the_stop_wait_is_stopped() {
+    let t = Ticker::new();
+    let mut pty = Pty::shell(&[], &run_args(&["--quiet"], &t.args(&["fork-on-tstp"])));
+    pty.started();
+    t.ready();
+    t.ticking();
+    pty.write(b"\x1a");
+    let stopped = pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
+    std::thread::sleep(Duration::from_millis(300));
+    let while_stopped = t.advance();
+    let born = t.recorded().len();
+    fg(&mut pty, 1);
+    let after = t.advance();
+    assert!(stopped.is_some(), "the job did not stop");
+    assert!(born >= 3, "control: the root's TSTP handler did not fork its ticker ({born} recorded)");
+    assert_eq!(while_stopped, 0, "a member born during the stop wait kept running while the job was stopped");
+    assert!(after > 0, "control: nothing ticked after fg");
 }
