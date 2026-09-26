@@ -50,41 +50,6 @@ pub fn stopped(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
-/// When `pid` started, in the unit of `now_stamp()` (macOS: microseconds since the epoch).
-#[cfg(target_os = "macos")]
-pub fn start_stamp(pid: i32) -> Option<u64> {
-    let mut b: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-    let n = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let r = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut b as *mut _ as *mut libc::c_void, n) };
-    (r == n).then(|| b.pbi_start_tvsec * 1_000_000 + b.pbi_start_tvusec)
-}
-
-/// Now, in the unit of `start_stamp()`.
-#[cfg(target_os = "macos")]
-pub fn now_stamp() -> u64 {
-    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    d.as_micros() as u64
-}
-
-/// When `pid` started, in the unit of `now_stamp()` (Linux: clock ticks since boot, field 22
-/// of /proc/<pid>/stat).
-#[cfg(target_os = "linux")]
-pub fn start_stamp(pid: i32) -> Option<u64> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    s[s.rfind(')')? + 2..].split_whitespace().nth(22 - 3)?.parse().ok()
-}
-
-/// Now, in the unit of `start_stamp()`: clock ticks since boot, rounded up, so a process that
-/// existed at this moment never has a later start.
-#[cfg(target_os = "linux")]
-pub fn now_stamp() -> u64 {
-    let mut t: libc::timespec = unsafe { std::mem::zeroed() };
-    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut t) };
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
-    let ns = t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64;
-    ns.div_ceil(1_000_000_000 / hz)
-}
-
 /// True when `pid` is alive and is still the process that had identity `id`.
 pub fn same(pid: i32, id: u64) -> bool {
     identity(pid) == Some(id)

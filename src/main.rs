@@ -138,13 +138,6 @@ pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
     // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,
     // with the member's identity, as if the member's pid had been reused (S3).
     let pid = seam_ms("SHEEPDOG_TEST_REUSE_PID").map_or(pid, |p| p as i32);
-    // Test seam (debug builds only): SHEEPDOG_TEST_WRONG_FREEZE=<pid> lets the STOP to that pid
-    // skip the identity check, as a STOP does that lands on a pid reused between the check and
-    // the kill (S3): it is delivered unpinned, so the rollback must consider it.
-    if sig == libc::SIGSTOP && seam_ms("SHEEPDOG_TEST_WRONG_FREEZE") == Some(pid as u64) {
-        trace(format!("kill {pid} {sig}"));
-        return if unsafe { libc::kill(pid, sig) } == 0 { Sent::Unpinned } else { Sent::No };
-    }
     send_checked(pid, id, sig)
 }
 
@@ -172,8 +165,25 @@ fn trace(line: String) {
     }
 }
 
-/// The rollback's CONT to a process that failed the identity check after our STOP (PLAN.md
-/// §3.3 step 4). It cannot be identity-checked: the check is what failed.
+/// An unpinned STOP to member (`p`, `id`) was delivered: read who is at `p` now. If it is still
+/// the member, the STOP reached it and there is nothing to roll back, ever. If it is another
+/// process, the STOP landed on that process (a pid reused between the check and the kill):
+/// record its identity for the rollback (PLAN.md §3.3 step 2). Debug seam
+/// SHEEPDOG_TEST_FREEZE_PID_REUSED records the wrong-freeze seam's STOP as landing on another
+/// process than the one now at the pid.
+fn landed(frozen: &mut Vec<(i32, u64, bool)>, p: i32, id: u64, was_stopped: bool) {
+    let mut on = sheepdog::ident::identity(p);
+    if id == 0 && seam("SHEEPDOG_TEST_FREEZE_PID_REUSED") {
+        on = on.map(|u| u.wrapping_add(1));
+    }
+    if let Some(on) = on.filter(|&on| on != id) {
+        trace(format!("record {p}"));
+        frozen.push((p, on, was_stopped));
+    }
+}
+
+/// The rollback's CONT to the process a STOP of ours landed on by mistake (PLAN.md §3.3 step
+/// 4). It is not the member, so the member's identity check cannot guard it.
 fn rollback(pid: i32) {
     if seam("SHEEPDOG_TEST_NOKILL") {
         return;
@@ -191,7 +201,8 @@ fn rollback(pid: i32) {
 /// freeze's rollback covers a STOP that lands in it.
 #[cfg(target_os = "linux")]
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
-    let fd = if seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
+    let race = wrong_freeze_race(pid, sig);
+    let fd = if race || seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
         None
     } else {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
@@ -221,10 +232,17 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
         }
     }
     trace(format!("kill {pid} {sig}"));
-    if same(pid, id) && unsafe { libc::kill(pid, sig) } == 0 {
+    if (race || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
         return Sent::Unpinned;
     }
     Sent::No
+}
+
+/// Test seam (debug builds only): SHEEPDOG_TEST_WRONG_FREEZE=<pid> makes the identity check of
+/// the STOP to that pid pass on the kill path, as a pid reused between the check and the kill
+/// would (S3): the STOP lands on a process that is not the member.
+fn wrong_freeze_race(pid: i32, sig: c_int) -> bool {
+    sig == libc::SIGSTOP && seam_ms("SHEEPDOG_TEST_WRONG_FREEZE") == Some(pid as u64)
 }
 
 /// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
@@ -233,7 +251,7 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
 #[cfg(target_os = "macos")]
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
     trace(format!("kill {pid} {sig}"));
-    if same(pid, id) && unsafe { libc::kill(pid, sig) } == 0 {
+    if (wrong_freeze_race(pid, sig) || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
         return Sent::Unpinned;
     }
     Sent::No
@@ -498,17 +516,11 @@ fn kill_loop(
         if let Some(d) = wrong_freeze.take() {
             before.push((d, 0)); // debug seam: its STOP lands as on a reused pid (see signal())
         }
-        // With each recorded STOP goes the moment it was sent: a process at that pid that started
-        // later cannot have got it (the member died and its pid was reused), so it is never
-        // resumed. Debug seam SHEEPDOG_TEST_FREEZE_STAMP_ZERO records the wrong-freeze seam's STOP
-        // as sent before anything started.
-        let stamp_zero = seam("SHEEPDOG_TEST_FREEZE_STAMP_ZERO");
-        let mut frozen: Vec<(i32, u64, bool, u64)> = Vec::new();
+        let mut frozen: Vec<(i32, u64, bool)> = Vec::new();
         for &(p, id) in &before {
             let was_stopped = sheepdog::ident::stopped(p);
             if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
-                let at = if stamp_zero && id == 0 { 0 } else { sheepdog::ident::now_stamp() };
-                frozen.push((p, id, was_stopped, at));
+                landed(&mut frozen, p, id, was_stopped);
             }
         }
         if opts.panic_after_stop {
@@ -520,17 +532,15 @@ fn kill_loop(
             if !before.iter().any(|&(b, _)| b == p) {
                 let was_stopped = sheepdog::ident::stopped(p);
                 if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
-                    frozen.push((p, id, was_stopped, sheepdog::ident::now_stamp()));
+                    landed(&mut frozen, p, id, was_stopped);
                 }
             }
         }
-        // §3.3 step 4, verify: a frozen process that is no longer the member (its STOP may have
-        // landed on a reused pid) gets SIGCONT, but only if it was not stopped before our STOP,
-        // it already existed when our STOP was sent, and it is stopped now (a stranger stopped
-        // by someone else stays stopped).
-        for &(p, id, was_stopped, at) in &frozen {
-            let existed = sheepdog::ident::start_stamp(p).is_some_and(|s| s <= at);
-            if !was_stopped && !same(p, id) && existed && sheepdog::ident::stopped(p) {
+        // §3.3 step 4, verify: the process our STOP landed on, when it was not the member, gets
+        // SIGCONT if it is still that very process, it was not stopped before our STOP, and it
+        // is stopped now (a later process at the pid, or one stopped by someone else, stays).
+        for &(p, landed_on, was_stopped) in &frozen {
+            if !was_stopped && same(p, landed_on) && sheepdog::ident::stopped(p) {
                 rollback(p);
             }
         }

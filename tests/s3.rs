@@ -213,6 +213,8 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
             let frozen = format!("kill {} {}", decoy.pid, libc::SIGSTOP);
             assert!(log.iter().any(|l| l == &frozen), "control: the pre-stopped decoy never reached the freeze: {log:?}");
         } else {
+            let recorded = format!("record {}", decoy.pid);
+            assert!(log.iter().any(|l| l == &recorded), "the STOP that landed on the decoy was not recorded for the rollback: {log:?}");
             let rolled = format!("rollback {}", decoy.pid);
             assert!(log.iter().any(|l| l == &rolled), "control: the rollback never considered the decoy: {log:?}");
             assert!(!stopped, "a running decoy caught in the freeze was left stopped (no rollback)");
@@ -224,11 +226,12 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
     }
 }
 
-/// PLAN.md §3.3 step 4: the rollback resumes only a process that existed when our STOP was
-/// sent. A process that started later cannot have got it: the member got the STOP, died, and
-/// its pid went to a stranger that someone else stopped. Debug seam
-/// SHEEPDOG_TEST_FREEZE_STAMP_ZERO records the wrong freeze's STOP as sent before the decoy
-/// started (the seam's own STOP stands in for the other actor's): the decoy must stay stopped.
+/// PLAN.md §3.3 step 4: the rollback resumes only the very process our STOP landed on (its
+/// identity is read right after the STOP). A process that took the pid later cannot have got
+/// it: the member got the STOP, died, and its pid went to a stranger that someone else
+/// stopped. Debug seam SHEEPDOG_TEST_FREEZE_PID_REUSED records the wrong freeze's STOP as
+/// landing on another process than the decoy (the seam's own STOP stands in for the other
+/// actor's): the decoy must stay stopped.
 #[test]
 fn s3_a_process_started_after_our_stop_is_not_rolled_back() {
     let mut decoy = Decoy::start("late");
@@ -238,7 +241,7 @@ fn s3_a_process_started_after_our_stop_is_not_rolled_back() {
         .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
         .arg(&j.rec)
         .env("SHEEPDOG_TEST_WRONG_FREEZE", decoy.pid.to_string())
-        .env("SHEEPDOG_TEST_FREEZE_STAMP_ZERO", "1")
+        .env("SHEEPDOG_TEST_FREEZE_PID_REUSED", "1")
         .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -285,6 +288,9 @@ fn s3_frozen_members_are_not_rolled_back() {
         let path = if unpinned { "kill" } else { "pidfd" };
         let stop = format!("{path} {} {}", rec[0].0, libc::SIGSTOP);
         assert!(log.iter().any(|l| l == &stop), "enosys={enosys}: control: the escapee's STOP did not go by {path}: {log:?}");
+        // a STOP that reached its member is never recorded, so the rollback cannot touch it
+        let recorded: Vec<&String> = log.iter().filter(|l| l.starts_with("record ")).collect();
+        assert!(recorded.is_empty(), "enosys={enosys}: STOPs that reached members were recorded for the rollback: {recorded:?}");
         let rolled: Vec<&String> = log.iter().filter(|l| l.starts_with("rollback ")).collect();
         assert!(rolled.is_empty(), "enosys={enosys}: the rollback resumed frozen members: {rolled:?}");
     }
