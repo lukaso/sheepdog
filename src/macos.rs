@@ -376,9 +376,20 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
             // find nothing and the relay would never see the exit)
             if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
                 if libc::WIFSTOPPED(st) {
-                    crate::self_stop(libc::WSTOPSIG(st));
-                    // resumed: the supervisor too (a CONT to the relay's pid alone)
-                    libc::kill(sup, libc::SIGCONT);
+                    crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS");
+                    // a TERM (or HUP as leader) already pending is forwarded first, on the next
+                    // pass, instead of stopping with it pending (TERM+CONT from `timeout` in this
+                    // window would otherwise leave both stopped)
+                    let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
+                    if !crate::pending(libc::SIGTERM) && !hup {
+                        crate::self_stop(libc::WSTOPSIG(st));
+                        // resumed: the supervisor too, if it is still stopped (a CONT to the
+                        // relay's pid alone); never a CONT to a running supervisor, which could
+                        // call off a new stop
+                        if stopped(sup) {
+                            libc::kill(sup, libc::SIGCONT);
+                        }
+                    }
                     continue;
                 }
                 if kq >= 0 {
@@ -390,11 +401,15 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
             // sends, must end a stopped job)
             if crate::consume(libc::SIGTERM) {
                 libc::kill(sup, libc::SIGTERM);
-                libc::kill(sup, libc::SIGCONT);
+                if stopped(sup) {
+                    libc::kill(sup, libc::SIGCONT);
+                }
             }
             if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
                 libc::kill(sup, libc::SIGHUP);
-                libc::kill(sup, libc::SIGCONT);
+                if stopped(sup) {
+                    libc::kill(sup, libc::SIGCONT);
+                }
             }
             // never forwarded: the terminal sent it to the group. Not with --forward-int-to-root
             // either: a copy that reaches the supervisor after it took the terminal's INT would

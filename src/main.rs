@@ -888,6 +888,16 @@ impl JobControl {
     /// (a debugger, a signal to its pid) must not leave the relay stopped: the caller waits on
     /// the relay. Only while the relay is still our parent (a parent's pid cannot be reused
     /// while we live).
+    /// Consume a pending CONT; if there was one, sheepdog was continued, so continue the relay
+    /// too. Every CONT the supervisor takes goes through here (S5 review round 4).
+    fn take_cont(&self, sigs: &Signals) -> bool {
+        let c = sigs.watch_cont && consume(libc::SIGCONT);
+        if c {
+            self.continue_relay();
+        }
+        c
+    }
+
     pub fn continue_relay(&self) {
         if let Some(r) = self.relay.filter(|&r| r > 1) {
             if unsafe { libc::getppid() } == r {
@@ -940,7 +950,7 @@ impl JobControl {
         // One decision, on a consumed fact: "continued" skips both the group SIGSTOPs and the
         // self-stop (a peek here and a consume later could disagree when a stop signal lands in
         // between, and leave a member running while sheepdog is stopped).
-        let continued = sigs.watch_cont && consume(libc::SIGCONT);
+        let continued = self.take_cont(sigs);
         let abort = over() || continued;
         seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_CONT_DECISION_MS");
         for &(p, id) in &group {
@@ -976,7 +986,7 @@ impl JobControl {
         // job during the wait; raising the stop now would remove that CONT and leave sheepdog
         // stopped for good). A CONT in the instant between this check and the raise is lost
         // that way (stated).
-        let late = sigs.watch_cont && consume(libc::SIGCONT);
+        let late = self.take_cont(sigs);
         if !abort && !late && !over() {
             self_stop(sig);
             self.continue_relay();
@@ -984,9 +994,7 @@ impl JobControl {
         // Resumed by a CONT, or the stop was discarded (an orphaned group: the kernel decides).
         // Either way, continue the members sheepdog stopped. A CONT may be pending or not (a
         // TSTP right after the resume removes it): it is consumed if there, never waited for.
-        if sigs.watch_cont {
-            consume(libc::SIGCONT);
-        }
+        self.take_cont(sigs);
         for (p, id) in std::mem::take(&mut self.stopped_by_us) {
             let _ = signal(p, id, libc::SIGCONT);
         }
@@ -994,7 +1002,7 @@ impl JobControl {
 }
 
 /// Is `sig` pending (blocked, not yet consumed)? Only looks.
-fn pending(sig: c_int) -> bool {
+pub fn pending(sig: c_int) -> bool {
     unsafe {
         let mut p: libc::sigset_t = std::mem::zeroed();
         libc::sigpending(&mut p);

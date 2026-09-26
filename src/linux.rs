@@ -232,9 +232,20 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                     let mut st = 0;
                     if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
                         if libc::WIFSTOPPED(st) {
-                            crate::self_stop(libc::WSTOPSIG(st));
-                            // resumed: the supervisor too (a CONT to the relay's pid alone)
-                            libc::kill(sup, libc::SIGCONT);
+                            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS");
+                            // a TERM (or HUP as leader) already pending is forwarded first, on the
+                            // next pass, instead of stopping with it pending (TERM+CONT from
+                            // `timeout` in this window would otherwise leave both stopped)
+                            let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
+                            if !crate::pending(libc::SIGTERM) && !hup {
+                                crate::self_stop(libc::WSTOPSIG(st));
+                                // resumed: the supervisor too, if it is still stopped (a CONT to
+                                // the relay's pid alone); never a CONT to a running supervisor,
+                                // which could call off a new stop
+                                if stopped(sup) {
+                                    libc::kill(sup, libc::SIGCONT);
+                                }
+                            }
                             continue;
                         }
                         if fd >= 0 {
@@ -256,11 +267,15 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             // as `timeout` sends, must end a stopped job)
                             libc::SIGTERM => {
                                 libc::kill(sup, libc::SIGTERM);
-                                libc::kill(sup, libc::SIGCONT);
+                                if stopped(sup) {
+                                    libc::kill(sup, libc::SIGCONT);
+                                }
                             }
                             libc::SIGHUP if libc::getsid(0) == relay => {
                                 libc::kill(sup, libc::SIGHUP);
-                                libc::kill(sup, libc::SIGCONT);
+                                if stopped(sup) {
+                                    libc::kill(sup, libc::SIGCONT);
+                                }
                             }
                             // SIGCHLD, INT (never forwarded, also with --forward-int-to-root: a late
                             // copy would reach the escapees twice), a HUP we are not the leader for
