@@ -208,11 +208,11 @@ fn s3_a_wrong_freeze_is_rolled_back() {
         }
         let stopped = state(decoy.pid) == Some('T');
         {
+            assert!(!stopped, "pre_stopped={pre_stopped}: the decoy our STOP landed on was left stopped (no rollback): {log:?}");
             let recorded = format!("record {}", decoy.pid);
             assert!(log.iter().any(|l| l == &recorded), "the STOP that landed on the decoy was not recorded for the rollback: {log:?}");
             let rolled = format!("rollback {}", decoy.pid);
-            assert!(log.iter().any(|l| l == &rolled), "control: the rollback never considered the decoy: {log:?}");
-            assert!(!stopped, "pre_stopped={pre_stopped}: the decoy our STOP landed on was left stopped (no rollback)");
+            assert!(log.iter().any(|l| l == &rolled), "the rollback never considered the decoy: {log:?}");
             assert!(
                 decoy.signals().iter().any(|s| s == &libc::SIGCONT.to_string()),
                 "control: the decoy never got the freeze's rollback CONT, so the seam did not put it in the freeze"

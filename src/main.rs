@@ -511,10 +511,10 @@ fn kill_loop(
             continue;
         }
         empty = 0;
-        // freeze what we know, then close over members created meanwhile, then kill all. Each
-        // STOP delivered unpinned (a pid reused after its check would have got it) records
-        // whether its process was already stopped (§3.3 step 2), for the rollback; a pinned STOP
-        // reached the member and has nothing to roll back.
+        // freeze what we know, then close over members created meanwhile, then kill all. After a
+        // STOP delivered unpinned (a pid reused after its check would have got it), `landed`
+        // records the process it landed on if that is not the member (§3.3 step 2), for the
+        // rollback; a pinned STOP reached the member and has nothing to roll back.
         let mut before: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         if let Some(d) = wrong_freeze.take() {
             before.push((d, 0)); // debug seam: its STOP lands as on a reused pid (see signal())
@@ -531,7 +531,9 @@ fn kill_loop(
         refresh(&mut known.borrow_mut(), scan());
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
-            if !before.iter().any(|&(b, _)| b == p) {
+            // by pid AND identity: a new member at a pid the first pass stopped for another process
+            // gets its own STOP
+            if !before.iter().any(|&(b, bid)| b == p && bid == id) {
                 if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
                     landed(&mut frozen, p, id);
                 }
@@ -542,8 +544,12 @@ fn kill_loop(
         // is). Whether it was stopped before our STOP cannot be known (its pid changed hands
         // after our check), so it is always resumed: leaving it stopped for good is the worse
         // error. It need not show as stopped yet: SIGCONT also discards a STOP still pending.
+        // A recorded process that is a member now (another member's pid came to it) stays
+        // frozen until its KILL: a resumed member could fork.
         for &(p, landed_on) in &frozen {
-            rollback(p, landed_on);
+            if !all.iter().any(|&(q, qid)| q == p && qid == landed_on) {
+                rollback(p, landed_on);
+            }
         }
         for &(p, id) in &all {
             let _ = send(p, id, libc::SIGKILL);
@@ -753,7 +759,10 @@ mod tests {
             return;
         }
         std::env::set_var("SHEEPDOG_TEST_PIDFD_ENOSYS", "1");
-        for leg in ["member-stopped", "other-stopped", "both-running"] {
+        let log = std::env::temp_dir().join(format!("sd-race-log-{}", std::process::id()));
+        std::env::set_var("SHEEPDOG_TEST_SIGNAL_LOG", &log);
+        for leg in ["member-stopped", "other-stopped", "both-running", "stranger-is-member"] {
+            let _ = std::fs::remove_file(&log);
             let mut m = std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap();
             let mp = m.id() as i32;
             std::thread::sleep(Duration::from_millis(50));
@@ -772,7 +781,14 @@ mod tests {
                 &opts,
                 || {
                     calls += 1;
-                    if calls == 1 { vec![(mp, mid)] } else { vec![] }
+                    if calls == 1 {
+                        vec![(mp, mid)]
+                    } else if leg == "stranger-is-member" && stranger.borrow().is_some() {
+                        // the stranger is itself a member of the job (another member forked it)
+                        sheepdog::ident::identity(mp).map(|sid| vec![(mp, sid)]).unwrap_or_default()
+                    } else {
+                        vec![]
+                    }
                 },
                 || {},
                 || None,
@@ -807,11 +823,21 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             let state = proc_state(mp);
             let mut s = stranger.borrow_mut().take().expect("control: the reuse was never staged");
+            let alive = matches!(s.try_wait(), Ok(None));
             let _ = s.kill();
             let _ = s.wait();
+            let trace = std::fs::read_to_string(&log).unwrap_or_default();
             assert_eq!(sent_stop.get(), Some(Sent::Unpinned), "{leg}: control: the STOP went by kill");
             assert_eq!(r, Ok(()), "{leg}");
-            assert_ne!(state, 'T', "{leg}: the stranger our STOP landed on was left stopped");
+            if leg == "stranger-is-member" {
+                // a member is killed, never resumed on the way
+                assert!(!alive, "{leg}: the member was not killed");
+                assert!(!trace.contains("rollback "), "{leg}: a member was resumed before its KILL: {trace}");
+            } else {
+                assert!(alive, "{leg}: the stranger our STOP landed on was killed: {trace}");
+                assert!(matches!(state, 'S' | 'R'), "{leg}: the stranger our STOP landed on was left in state {state}");
+            }
         }
+        let _ = std::fs::remove_file(&log);
     }
 }
