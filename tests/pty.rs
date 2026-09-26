@@ -159,6 +159,21 @@ impl Job {
 impl Drop for Job {
     fn drop(&mut self) {
         self.kill();
+        // a job whose record is incomplete (a cell that failed before `ready`) is found by its
+        // marker: only `sd-fixture counter <marker>` processes, identity read at the scan
+        let out = Command::new("ps").args(["-Ao", "pid=,args="]).output();
+        if let Ok(out) = out {
+            for l in String::from_utf8_lossy(&out.stdout).lines() {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                if w.len() >= 4 && w[1].ends_with("sd-fixture") && w[2] == "counter" && w[3] == self.marker {
+                    if let Some((p, id)) = w[0].parse::<i32>().ok().and_then(|p| Some((p, identity(p)?))) {
+                        if p > 1 {
+                            send(p, id, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
         let _ = std::fs::remove_file(&self.rec);
         let _ = std::fs::remove_file(Self::sig_path(&self.rec));
     }

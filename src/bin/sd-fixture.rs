@@ -60,7 +60,8 @@ use std::ffi::CString;
 use std::io::Write;
 
 fn record(path: &str, pid: i32) {
-    let id = identity(pid).unwrap_or(0);
+    // no identity, no record: a line with identity 0 would name no process the checker can match
+    let Some(id) = identity(pid) else { return };
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         let _ = f.write_all(format!("{pid} {id}\n").as_bytes());
     }
@@ -271,17 +272,19 @@ fn shell(report: &str, bg: bool, null_stdin: bool, prog: &[String]) -> ! {
         append(report, &format!("started {child}"));
         let fg = format!("{report}.fg");
         loop {
+            // poll, so a HUP that lands between two waits is seen within 5 ms (a blocking wait
+            // would miss it until the job changes state)
+            if HUP_SEEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                libc::kill(-child, libc::SIGHUP);
+                append(report, "hup");
+            }
             let mut st = 0;
-            let r = libc::waitpid(child, &mut st, libc::WUNTRACED);
+            let r = libc::waitpid(child, &mut st, libc::WUNTRACED | libc::WNOHANG);
+            if r == 0 || (r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)) {
+                libc::usleep(5000);
+                continue;
+            }
             if r < 0 {
-                if HUP_SEEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                    libc::kill(-child, libc::SIGHUP);
-                    append(report, "hup");
-                    continue;
-                }
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
                 append(report, "wait-failed");
                 libc::_exit(1);
             }
