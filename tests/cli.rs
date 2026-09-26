@@ -905,7 +905,7 @@ mod relay {
             }
             wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
             let st = wait_bounded(&mut c, Duration::from_secs(15));
-            let late = w.resumed(); // written only when sheepdog resumes the root: the window was missed
+            let late = w.resumed(); // see the note in a_relay_death_and_another_signal_leave_nothing
             std::thread::sleep(Duration::from_millis(200));
             let left = (sleeps(&w.root), sleeps(&esc));
             if st.is_none() {
@@ -913,7 +913,7 @@ mod relay {
             }
             kill_marked(&[&esc]);
             w.cleanup(&[]);
-            assert!(!late, "caller blocks TERM={block_term}, signal {other}: the signals missed the window (load): sheepdog resumed the root");
+            assert!(!late, "caller blocks TERM={block_term}, signal {other}: sheepdog resumed the root: the signals missed the window (load), or sheepdog skipped the early end");
             assert_eq!(left, (0, 0), "caller blocks TERM={block_term}, signal {other}: the job was left (root, the root's child)");
             assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "caller blocks TERM={block_term}, signal {other}: sheepdog did not die of SIGTERM");
         }
@@ -942,13 +942,15 @@ mod relay {
             unsafe { libc::kill(p, libc::SIGINT) };
         }
         until_gone(&sups);
-        let late = w.resumed(); // written only when sheepdog resumes the root: the window was missed
+        // written only when sheepdog resumes the root; read after exit it cannot tell a missed
+        // window from a skipped early end, so the message names both
+        let late = w.resumed();
         std::thread::sleep(Duration::from_millis(200));
         let left = (sleeps(&w.root), sleeps(&esc));
         kill_marked(&[&esc]);
         w.cleanup(&[&sups[..], &[root]].concat());
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
-        assert!(!late, "the relay kill and the INT missed the window (load): sheepdog resumed the root");
+        assert!(!late, "sheepdog resumed the root: the relay kill and the INT missed the window (load), or sheepdog skipped the early end");
         assert_eq!(left, (0, 0), "the job was left (root, the root's child)");
     }
 
