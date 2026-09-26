@@ -55,6 +55,7 @@
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
+//!   `bg-apart-then-exec` is the same, but the background job moves to a group of its own.
 
 use sheepdog::ident::identity;
 use std::ffi::CString;
@@ -639,11 +640,14 @@ fn main() {
             }
         }
     }
-    if mode == "bg-then-exec" && a.len() >= 4 {
+    if (mode == "bg-then-exec" || mode == "bg-apart-then-exec") && a.len() >= 4 {
         use std::os::unix::process::CommandExt;
         let m = CString::new(a[2].as_str()).unwrap();
         unsafe {
             if libc::fork() == 0 {
+                if mode == "bg-apart-then-exec" {
+                    libc::setpgid(0, 0); // the background job leaves the caller's group
+                }
                 let null = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
                 libc::dup2(null, 1);
                 libc::dup2(null, 2);

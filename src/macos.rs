@@ -78,6 +78,18 @@ fn bsd(pid: pid_t) -> Option<libc::proc_bsdinfo> {
     (r == n).then_some(b)
 }
 
+/// The pids in process group `pg`.
+fn group_pids(pg: pid_t) -> Vec<pid_t> {
+    const PROC_PGRP_ONLY: u32 = 2; // <sys/proc_info.h>
+    let n = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pg as u32, std::ptr::null_mut(), 0) };
+    let mut buf = vec![0 as pid_t; (n.max(0) as usize) / size_of::<pid_t>() + 64];
+    let bytes = (buf.len() * size_of::<pid_t>()) as c_int;
+    let got = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pg as u32, buf.as_mut_ptr() as *mut c_void, bytes) };
+    buf.truncate((got.max(0) as usize) / size_of::<pid_t>());
+    buf.retain(|&p| p > 0);
+    buf
+}
+
 fn all_pids() -> Vec<pid_t> {
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     let mut buf = vec![0 as pid_t; (n.max(0) as usize) * 2 + 64];
@@ -406,6 +418,7 @@ fn wait(
     sig: &crate::Signals,
     relay: Option<pid_t>,
     members: &mut dyn FnMut() -> Vec<(pid_t, u64)>,
+    group_is_ours: &mut dyn FnMut(i32) -> bool,
     ints: &mut crate::Interrupts,
 ) -> Option<c_int> {
     let watch_term = sig.watch_term;
@@ -527,7 +540,7 @@ fn wait(
                     ints.forward(s, pid, members);
                 }
             }
-            ints.tick();
+            ints.tick(group_is_ours);
             if !polling && proc_exiting {
                 // NOTE_EXIT was refused with ESRCH: the root is exiting; reap it, then decide again
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { st } else { crate::exit_status(125) });
@@ -656,7 +669,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 t.known.iter().map(|(&p, &id)| (p, id)).collect()
             };
             let mut ints = crate::Interrupts::new(a, relay);
-            let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ints) };
+            let mut ours = |pg: i32| crate::only_ours(&group_pids(pg), relay, &tracker.borrow().known);
+            let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints) };
             if a.leave_strays && status.is_some() {
                 return crate::finish(status, Ok(()), &mut ints, sig);
             }
@@ -684,7 +698,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let root = spawn(&a.cmd, true, false, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let mut ints = crate::Interrupts::none();
-            let status = wait(root, sig, None, &mut Vec::new, &mut ints);
+            let status = wait(root, sig, None, &mut Vec::new, &mut |_| false, &mut ints);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal, Default::default());
             crate::finish(status, result, &mut ints, sig)
         }

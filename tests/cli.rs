@@ -261,7 +261,7 @@ fn a_background_job_started_before_sheepdog_is_not_killed() {
     let go = std::env::temp_dir().join(format!("sd-bg-go-{}", std::process::id()));
     let _ = std::fs::remove_file(&pidf);
     let _ = std::fs::remove_file(&go);
-    let script = format!("/bin/sleep 30 & echo $! > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; exec \"$0\" run -- true", pidf.display(), go.display());
+    let script = format!("/bin/sleep 30 & echo $! > '{}'; n=0; while [ ! -e '{}' ] && [ $n -lt 1000 ]; do /bin/sleep 0.01; n=$((n+1)); done; [ $n -lt 1000 ] || exit 3; exec \"$0\" run -- true", pidf.display(), go.display());
     let mut c = Command::new("sh").args(["-c", &script, sheepdog()]).spawn().unwrap();
     wait_until("the background job's pid", || std::fs::read_to_string(&pidf).is_ok_and(|s| s.ends_with('\n')));
     let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();

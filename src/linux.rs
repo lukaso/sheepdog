@@ -22,6 +22,23 @@ fn stat(pid: i32) -> Option<(i32, char)> {
     Some((ppid, state))
 }
 
+/// The pids in process group `pg` (any state, any user), from /proc.
+fn group_pids(pg: i32) -> Vec<i32> {
+    let mut v = Vec::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for e in dir.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            // after "comm)": state, ppid, pgrp
+            let g = s.rfind(')').and_then(|i| s.get(i + 2..)).and_then(|r| r.split_whitespace().nth(2)).and_then(|g| g.parse::<i32>().ok());
+            if g == Some(pg) {
+                v.push(pid);
+            }
+        }
+    }
+    v
+}
+
 /// Live (not zombie) same-uid descendants of `root`, with their identities.
 fn descendants(root: i32) -> Vec<(i32, u64)> {
     let uid = unsafe { libc::getuid() };
@@ -311,7 +328,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 });
             }
         }
-        ints.tick();
+        ints.tick(&mut |pg| crate::only_ours(&group_pids(pg), relay, &tracker.known));
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
         if fd >= 0 {
             poll_fd(fd, tick);

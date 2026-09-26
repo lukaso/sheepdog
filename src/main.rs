@@ -779,13 +779,17 @@ impl Interrupts {
 
     /// The D9 hint: once per job, when it is due. Only called while the job runs: the root was
     /// running at this pass's check (it can exit in the instant after; stated, harmless).
-    pub fn tick(&mut self) {
+    /// `group_is_ours(pg)` answers, at that moment, whether every process in group `pg` is
+    /// sheepdog, its relay or a member: only then is the group named.
+    pub fn tick(&mut self, group_is_ours: &mut dyn FnMut(i32) -> bool) {
         if let Some((due, sig)) = self.hint {
             if Instant::now() >= due {
                 self.hint = None;
                 self.hinted = true;
                 if !self.quiet {
-                    say!("{}", hint_text(sig, self.own_group.then(|| unsafe { libc::getpgrp() })));
+                    let pg = unsafe { libc::getpgrp() };
+                    let named = (self.own_group && pg > 1 && group_is_ours(pg)).then_some(pg);
+                    say!("{}", hint_text(sig, named));
                 }
             }
         }
@@ -806,6 +810,16 @@ impl Interrupts {
             self.got_hup = true;
         }
     }
+}
+
+/// Is every process in `group` (the pids of one process group) sheepdog, its relay, or a known
+/// member? A caller's process in the group (a background job started before sheepdog with no
+/// job control, an orphan the caller left behind) means `kill -INT -<pgid>` would reach it, so
+/// the hint must not name the group (S4 review round 3). An empty list (the scan failed) is no.
+pub fn only_ours(group: &[i32], relay: Option<i32>, known: &HashMap<i32, u64>) -> bool {
+    let me = unsafe { libc::getpid() };
+    !group.is_empty()
+        && group.iter().all(|&p| p == me || Some(p) == relay || known.get(&p).is_some_and(|&id| same(p, id)))
 }
 
 /// The D9 hint for `sig`, naming the process group `pg`.

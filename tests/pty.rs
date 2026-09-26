@@ -827,10 +827,15 @@ fn the_hint_reaches_a_harness_in_the_foreground() {
     job.ready();
     let (sd, sd_id) = wait_for("sheepdog under the harness", Duration::from_secs(15), || supervisor_of(sh));
     assert!(send(sd, sd_id, libc::SIGINT));
-    std::thread::sleep(Duration::from_millis(900));
+    // the hint is due at 300 ms: nothing before it (so the output is the hint, not some error)
+    std::thread::sleep(Duration::from_millis(100));
+    pty.drain();
+    let early = String::from_utf8_lossy(&pty.out).to_string();
+    std::thread::sleep(Duration::from_millis(800));
     pty.drain();
     let shown = String::from_utf8_lossy(&pty.out).to_string();
     send(sd, sd_id, libc::SIGTERM);
+    assert!(early.trim().is_empty(), "output before the hint was due: {early:?}");
     assert!(!shown.trim().is_empty(), "no hint for a pid-only INT from a harness in the foreground");
     assert!(targets(&shown).is_empty(), "the hint named a group (the harness's is {sh}): {shown:?}");
 }
@@ -853,15 +858,11 @@ fn the_hint_is_printed_for_a_background_job() {
     assert_eq!(targets(&shown), vec![sd as i64], "a background job must print the hint naming its group {sd}: {shown:?}");
 }
 
-/// S4 review round 2: on the relay path the relay leads the group, so the group is sheepdog's
-/// own: a pid-only INT to the supervisor prints a hint that names the relay's group (which is
-/// not the supervisor's pid).
-#[test]
-fn the_hint_names_the_relays_group() {
-    let job = Job::new();
-    let bg = new_marker();
+/// Start `bg-then-exec` (or `bg-apart-then-exec`) with sheepdog running `job`, in a new process
+/// group led by the relay, stderr piped, the hint due after 300 ms. Returns the relay.
+fn relay_job(mode: &str, bg: &str, job: &Job) -> (Child, u64) {
     let mut c = Command::new(fixture());
-    c.args(["bg-then-exec", &bg]).args(run_args(&[], &job.args())).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    c.args([mode, bg]).args(run_args(&[], &job.args())).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
@@ -871,8 +872,13 @@ fn the_hint_names_the_relays_group() {
         });
     }
     c.process_group(0);
-    let mut relay = c.spawn().unwrap();
+    let relay = c.spawn().unwrap();
     let rid = identity(relay.id() as i32).expect("the relay's identity");
+    (relay, rid)
+}
+
+/// A pid-only INT to the relay's supervisor, then the relay's stderr (the job ended by TERM).
+fn relay_hint(mut relay: Child, rid: u64, bg: &str, job: &Job) -> (String, i32) {
     job.ready();
     let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
     assert!(send(sup, sup_id, libc::SIGINT));
@@ -883,7 +889,7 @@ fn the_hint_names_the_relays_group() {
         let _ = relay.wait();
     }
     job.kill();
-    for p in sleeps(&bg) {
+    for p in sleeps(bg) {
         if let Some(id) = identity(p) {
             send(p, id, libc::SIGKILL);
         }
@@ -893,9 +899,83 @@ fn the_hint_names_the_relays_group() {
         use std::io::Read;
         let _ = e.read_to_string(&mut err);
     }
-    let pg = relay.id();
-    assert_ne!(sup as u32, pg, "control: the supervisor does not lead its group here");
+    (err, sup)
+}
+
+/// The pgid of `pid`, or -1.
+fn pgid(pid: i32) -> i32 {
+    unsafe { libc::getpgid(pid) }
+}
+
+/// S4 review round 2: on the relay path the relay leads the group. When nothing but the relay
+/// and the job is in it (the caller's background job moved to a group of its own), it is
+/// sheepdog's own group, and a pid-only INT to the supervisor names it (not the supervisor's pid).
+#[test]
+fn the_hint_names_the_relays_group() {
+    let job = Job::new();
+    let bg = new_marker();
+    let (relay, rid) = relay_job("bg-apart-then-exec", &bg, &job);
+    let pg = relay.id() as i32;
+    wait_for("the background job", Duration::from_secs(15), || (sleeps(&bg).len() == 1).then_some(()));
+    let apart = sleeps(&bg).iter().all(|&p| pgid(p) != pg);
+    let (err, sup) = relay_hint(relay, rid, &bg, &job);
+    assert!(apart, "control: the caller's background job is still in the relay's group");
+    assert_ne!(sup, pg, "control: the supervisor does not lead its group here");
     assert_eq!(targets(&err), vec![pg as i64], "the hint must name the relay's group {pg} (not the supervisor {sup}): {err:?}");
+}
+
+/// S4 review round 3 (P2-1): a group that also holds a process of the caller is not named, even
+/// when the relay leads it. Here the caller's background job (started before sheepdog, with no
+/// job control) shares the relay's group: `kill -INT -<pgid>` would reach it.
+#[test]
+fn the_hint_names_no_group_that_holds_the_callers_job() {
+    let job = Job::new();
+    let bg = new_marker();
+    let (relay, rid) = relay_job("bg-then-exec", &bg, &job);
+    let pg = relay.id() as i32;
+    wait_for("the background job", Duration::from_secs(15), || (sleeps(&bg).len() == 1).then_some(()));
+    let shared = sleeps(&bg).iter().all(|&p| pgid(p) == pg);
+    let (err, _) = relay_hint(relay, rid, &bg, &job);
+    assert!(shared, "control: the caller's background job is not in the relay's group");
+    assert_eq!(err.lines().filter(|l| !l.trim().is_empty()).count(), 1, "the hint must be printed once: {err:?}");
+    assert!(targets(&err).is_empty(), "the hint named a group that holds the caller's job: {err:?}");
+}
+
+/// S4 review round 3 (P2-1): the same without a relay. The caller left an orphan in its group
+/// (`(job &)`) and then exec'd sheepdog, which therefore leads a group that holds the orphan.
+#[test]
+fn the_hint_names_no_group_that_holds_the_callers_orphan() {
+    let job = Job::new();
+    let bg = new_marker();
+    let script = format!("(/bin/sleep {bg} >/dev/null 2>&1 &); exec \"$0\" run -- \"$@\"");
+    let mut c = Command::new("/bin/sh");
+    c.args(["-c", &script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    unsafe {
+        c.pre_exec(|| {
+            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    c.process_group(0);
+    let child = c.spawn().unwrap();
+    let id = identity(child.id() as i32).expect("sheepdog's identity");
+    let pg = child.id() as i32;
+    job.ready();
+    wait_for("the orphan", Duration::from_secs(15), || (sleeps(&bg).len() == 1).then_some(()));
+    let shared = sleeps(&bg).iter().all(|&p| pgid(p) == pg);
+    assert!(send(pg, id, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(900));
+    let err = end(child, id, &job);
+    for p in sleeps(&bg) {
+        if let Some(i) = identity(p) {
+            send(p, i, libc::SIGKILL);
+        }
+    }
+    assert!(shared, "control: the orphan is not in sheepdog's group");
+    assert_eq!(err.lines().filter(|l| !l.trim().is_empty()).count(), 1, "the hint must be printed once: {err:?}");
+    assert!(targets(&err).is_empty(), "the hint named a group that holds the caller's orphan: {err:?}");
 }
 
 // ---- death by INT (PHASE1.md §1.3) ---------------------------------------------------------

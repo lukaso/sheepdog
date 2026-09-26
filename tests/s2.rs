@@ -354,7 +354,7 @@ fn s2_a_callers_earlier_processes_survive() {
             let _ = std::fs::remove_file(&pidf);
             let _ = std::fs::remove_file(&go);
             let close = if shape == "orphan" { ")" } else { "" };
-            let script = format!("{bg} '{}'{close}; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; exec \"{}\" run -- true", pidf.display(), go.display(), sheepdog());
+            let script = format!("{bg} '{}'{close}; n=0; while [ ! -e '{}' ] && [ $n -lt 1000 ]; do /bin/sleep 0.01; n=$((n+1)); done; [ $n -lt 1000 ] || exit 3; exec \"{}\" run -- true", pidf.display(), go.display(), sheepdog());
             let mut c = if disclaimed {
                 let mut c = Command::new(fixture());
                 c.args(["dspawn", "wait", "/bin/sh", "-c", &script]);

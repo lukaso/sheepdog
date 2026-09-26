@@ -38,7 +38,7 @@ pub fn send(pid: i32, id: u64, sig: i32) -> bool {
 /// Signal a process group this test created: its leader must still be the recorded process.
 pub fn send_group(pgid: i32, leader_id: u64, sig: i32) -> bool {
     assert!(pgid > 1, "refusing to signal group {pgid}");
-    same(pgid, leader_id) && unsafe { libc::getpgid(pgid) } == pgid && unsafe { libc::kill(-pgid, sig) } == 0
+    leader_id != 0 && same(pgid, leader_id) && unsafe { libc::getpgid(pgid) } == pgid && unsafe { libc::kill(-pgid, sig) } == 0
 }
 
 /// Signal a child this test spawned, only while it is not reaped. `try_wait` reaps a child that
