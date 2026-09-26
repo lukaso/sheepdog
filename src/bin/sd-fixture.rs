@@ -49,7 +49,8 @@
 //! - `nosession PIDFILE PROG ARGS...`: start PROG with no controlling terminal and not as a
 //!   session leader (as liveapp and CI run it): setsid, then PROG in a new process group of
 //!   that session. PROG's pid (= its pgid) goes to PIDFILE; exits as PROG did.
-//! - `int-exit CODE M`: exit CODE on INT (a root that handles ctrl-C itself); else sleep.
+//! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
+//!   READY once the handler is installed; else waits.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -618,11 +619,13 @@ fn main() {
             libc::_exit(libc::WEXITSTATUS(st));
         }
     }
-    if mode == "int-exit" && a.len() == 4 {
+    if mode == "int-exit" && a.len() == 5 {
         unsafe {
             INT_EXIT = a[2].parse().unwrap_or(1);
             on(libc::SIGINT, int_exit as *const () as usize, true);
             unblock_all();
+            // ready only once the handler is in place: an earlier INT would kill it by default
+            let _ = std::fs::write(&a[4], "");
             // no exec (it would reset the handler); the marker stays in this argv
             loop {
                 libc::pause();

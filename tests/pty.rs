@@ -693,9 +693,13 @@ fn ctrl_c_makes_sheepdog_die_of_int() {
 #[test]
 fn a_root_that_exits_130_on_ctrl_c_makes_sheepdog_exit_130() {
     let m = new_marker();
-    let mut pty = Pty::shell(&[], &run_args(&[], &[fixture().to_string(), "int-exit".into(), "130".into(), m.clone()]));
+    let ready = std::env::temp_dir().join(format!("sd-s4-ready-{m}"));
+    let _ = std::fs::remove_file(&ready);
+    let mut pty = Pty::shell(&[], &run_args(&[], &[fixture().to_string(), "int-exit".into(), "130".into(), m.clone(), ready.display().to_string()]));
     pty.started();
-    wait_for("the root", Duration::from_secs(15), || (marked(&m).len() >= 2).then_some(()));
+    // the root's INT handler is installed (an INT before it would kill the root by default)
+    wait_for("the root's handler", Duration::from_secs(15), || ready.exists().then_some(()));
+    let _ = std::fs::remove_file(&ready);
     pty.write(b"\x03");
     let end = pty.outcome(Duration::from_secs(10));
     assert_eq!(end, Some("exited 130".to_string()), "sheepdog must exit as the root did");
