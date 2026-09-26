@@ -172,11 +172,12 @@ fn s3_a_reused_pid_gets_no_signal() {
     }
 }
 
-/// PLAN.md §3.3 step 4: a process that fails the identity check after the freeze (its STOP may
-/// have landed on a reused pid) gets SIGCONT only if it was not stopped before sheepdog's STOP.
-/// Debug seam SHEEPDOG_TEST_WRONG_FREEZE puts the decoy into the freeze as such a process.
+/// PLAN.md §3.3 step 4: the process a STOP landed on by mistake (a pid reused between the check
+/// and the kill; debug seam SHEEPDOG_TEST_WRONG_FREEZE) is resumed, whether or not it was
+/// stopped before: its prior state cannot be known, and leaving it stopped for good is the
+/// worse error. A running decoy and a pre-stopped one both end running.
 #[test]
-fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
+fn s3_a_wrong_freeze_is_rolled_back() {
     for pre_stopped in [false, true] {
         let mut decoy = Decoy::start("freeze");
         let siglog = log_path("freeze");
@@ -206,18 +207,12 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
             panic!("pre_stopped={pre_stopped}: the decoy was killed: {e}");
         }
         let stopped = state(decoy.pid) == Some('T');
-        let conts = decoy.signals().iter().filter(|s| *s == &libc::SIGCONT.to_string()).count();
-        if pre_stopped {
-            assert!(stopped, "a decoy stopped before sheepdog's STOP was resumed by the rollback");
-            assert_eq!(conts, 0, "a decoy stopped before sheepdog's STOP got a CONT");
-            let frozen = format!("kill {} {}", decoy.pid, libc::SIGSTOP);
-            assert!(log.iter().any(|l| l == &frozen), "control: the pre-stopped decoy never reached the freeze: {log:?}");
-        } else {
+        {
             let recorded = format!("record {}", decoy.pid);
             assert!(log.iter().any(|l| l == &recorded), "the STOP that landed on the decoy was not recorded for the rollback: {log:?}");
             let rolled = format!("rollback {}", decoy.pid);
             assert!(log.iter().any(|l| l == &rolled), "control: the rollback never considered the decoy: {log:?}");
-            assert!(!stopped, "a running decoy caught in the freeze was left stopped (no rollback)");
+            assert!(!stopped, "pre_stopped={pre_stopped}: the decoy our STOP landed on was left stopped (no rollback)");
             assert!(
                 decoy.signals().iter().any(|s| s == &libc::SIGCONT.to_string()),
                 "control: the decoy never got the freeze's rollback CONT, so the seam did not put it in the freeze"

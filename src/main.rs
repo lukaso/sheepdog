@@ -171,25 +171,28 @@ fn trace(line: String) {
 /// record its identity for the rollback (PLAN.md §3.3 step 2). Debug seam
 /// SHEEPDOG_TEST_FREEZE_PID_REUSED records the wrong-freeze seam's STOP as landing on another
 /// process than the one now at the pid.
-fn landed(frozen: &mut Vec<(i32, u64, bool)>, p: i32, id: u64, was_stopped: bool) {
+fn landed(frozen: &mut Vec<(i32, u64)>, p: i32, id: u64) {
     let mut on = sheepdog::ident::identity(p);
     if id == 0 && seam("SHEEPDOG_TEST_FREEZE_PID_REUSED") {
         on = on.map(|u| u.wrapping_add(1));
     }
     if let Some(on) = on.filter(|&on| on != id) {
         trace(format!("record {p}"));
-        frozen.push((p, on, was_stopped));
+        frozen.push((p, on));
     }
 }
 
 /// The rollback's CONT to the process a STOP of ours landed on by mistake (PLAN.md §3.3 step
-/// 4). It is not the member, so the member's identity check cannot guard it.
-fn rollback(pid: i32) {
+/// 4), guarded by that process's own identity, the same way as any signal (on Linux through a
+/// pidfd, so a pid that changes hands again cannot get it).
+fn rollback(pid: i32, landed_on: u64) {
     if seam("SHEEPDOG_TEST_NOKILL") {
         return;
     }
-    trace(format!("rollback {pid}"));
-    unsafe { libc::kill(pid, libc::SIGCONT) };
+    if same(pid, landed_on) {
+        trace(format!("rollback {pid}"));
+        let _ = send_checked(pid, landed_on, libc::SIGCONT);
+    }
 }
 
 /// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
@@ -516,11 +519,10 @@ fn kill_loop(
         if let Some(d) = wrong_freeze.take() {
             before.push((d, 0)); // debug seam: its STOP lands as on a reused pid (see signal())
         }
-        let mut frozen: Vec<(i32, u64, bool)> = Vec::new();
+        let mut frozen: Vec<(i32, u64)> = Vec::new();
         for &(p, id) in &before {
-            let was_stopped = sheepdog::ident::stopped(p);
             if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
-                landed(&mut frozen, p, id, was_stopped);
+                landed(&mut frozen, p, id);
             }
         }
         if opts.panic_after_stop {
@@ -530,19 +532,18 @@ fn kill_loop(
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
             if !before.iter().any(|&(b, _)| b == p) {
-                let was_stopped = sheepdog::ident::stopped(p);
                 if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
-                    landed(&mut frozen, p, id, was_stopped);
+                    landed(&mut frozen, p, id);
                 }
             }
         }
         // §3.3 step 4, verify: the process our STOP landed on, when it was not the member, gets
-        // SIGCONT if it is still that very process, it was not stopped before our STOP, and it
-        // is stopped now (a later process at the pid, or one stopped by someone else, stays).
-        for &(p, landed_on, was_stopped) in &frozen {
-            if !was_stopped && same(p, landed_on) && sheepdog::ident::stopped(p) {
-                rollback(p);
-            }
+        // SIGCONT if it is still that very process (a later process at the pid is left as it
+        // is). Whether it was stopped before our STOP cannot be known (its pid changed hands
+        // after our check), so it is always resumed: leaving it stopped for good is the worse
+        // error. It need not show as stopped yet: SIGCONT also discards a STOP still pending.
+        for &(p, landed_on) in &frozen {
+            rollback(p, landed_on);
         }
         for &(p, id) in &all {
             let _ = send(p, id, libc::SIGKILL);
@@ -728,5 +729,89 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(r, Err(KillError::Deadline(vec![pid])));
+    }
+
+    fn proc_state(pid: i32) -> char {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| s.rfind(')').and_then(|i| s[i + 1..].split_whitespace().next().and_then(|f| f.chars().next())))
+            .unwrap_or('?')
+    }
+
+    /// PLAN.md §3.3 steps 2 and 4, the real race (Linux, needs --privileged for ns_last_pid; run
+    /// with SD_REUSE_TEST=1, as the Linux matrix does): the member's pid is reused by a stranger
+    /// between the identity check and the kill (the WRONG_FREEZE seam makes the check pass, as
+    /// that race does), so the STOP lands on the stranger. The identity is read AFTER the STOP,
+    /// so the stranger is recorded, and it is resumed whatever its state was: SD_MEMBER_STOPPED
+    /// (the user had stopped the member, the stranger runs), SD_OTHER_STOPPED (another actor had
+    /// stopped the stranger: resumed too, the stated cost of an unknowable prior state), neither
+    /// (both running).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stop_that_lands_on_a_reused_pid_is_rolled_back() {
+        if std::env::var("SD_REUSE_TEST").is_err() {
+            return;
+        }
+        std::env::set_var("SHEEPDOG_TEST_PIDFD_ENOSYS", "1");
+        for leg in ["member-stopped", "other-stopped", "both-running"] {
+            let mut m = std::process::Command::new("/bin/sleep").arg("300").spawn().unwrap();
+            let mp = m.id() as i32;
+            std::thread::sleep(Duration::from_millis(50));
+            let mid = sheepdog::ident::identity(mp).unwrap();
+            if leg == "member-stopped" {
+                unsafe { libc::kill(mp, libc::SIGSTOP) };
+                while proc_state(mp) != 'T' {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            let stranger: std::cell::RefCell<Option<std::process::Child>> = std::cell::RefCell::new(None);
+            let sent_stop: std::cell::Cell<Option<Sent>> = std::cell::Cell::new(None);
+            let mut calls = 0;
+            let opts = KillOpts { deadline: Duration::from_secs(2), grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None };
+            let r = kill_tree(
+                &opts,
+                || {
+                    calls += 1;
+                    if calls == 1 { vec![(mp, mid)] } else { vec![] }
+                },
+                || {},
+                || None,
+                |p, id, sig| {
+                    if sig == libc::SIGSTOP && p == mp && stranger.borrow().is_none() {
+                        // the identity check passed (the member was there); before the kill the
+                        // member dies and its pid goes to a stranger
+                        unsafe { libc::kill(mp, libc::SIGKILL) };
+                        let _ = m.wait();
+                        std::fs::write("/proc/sys/kernel/ns_last_pid", format!("{}", mp - 1)).unwrap();
+                        let s = std::process::Command::new("/bin/sleep").arg("301").spawn().unwrap();
+                        assert_eq!(s.id() as i32, mp, "control: the stranger did not get the member's pid");
+                        std::thread::sleep(Duration::from_millis(20));
+                        assert!(!sheepdog::ident::same(mp, mid), "control: the stranger shares the member's start tick");
+                        if leg == "other-stopped" {
+                            unsafe { libc::kill(mp, libc::SIGSTOP) };
+                            while proc_state(mp) != 'T' {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                        }
+                        *stranger.borrow_mut() = Some(s);
+                        std::env::set_var("SHEEPDOG_TEST_WRONG_FREEZE", mp.to_string());
+                        let sent = signal(p, id, sig);
+                        std::env::remove_var("SHEEPDOG_TEST_WRONG_FREEZE");
+                        sent_stop.set(Some(sent));
+                        return sent;
+                    }
+                    signal(p, id, sig)
+                },
+                HashMap::new(),
+            );
+            std::thread::sleep(Duration::from_millis(100));
+            let state = proc_state(mp);
+            let mut s = stranger.borrow_mut().take().expect("control: the reuse was never staged");
+            let _ = s.kill();
+            let _ = s.wait();
+            assert_eq!(sent_stop.get(), Some(Sent::Unpinned), "{leg}: control: the STOP went by kill");
+            assert_eq!(r, Ok(()), "{leg}");
+            assert_ne!(state, 'T', "{leg}: the stranger our STOP landed on was left stopped");
+        }
     }
 }
