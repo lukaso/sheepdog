@@ -20,8 +20,24 @@ fn state(pid: i32) -> Option<char> {
     let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().ok()?;
     String::from_utf8_lossy(&out.stdout).trim().chars().next()
 }
-fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
+/// The debug signal log (SHEEPDOG_TEST_SIGNAL_LOG): one line per signal decision,
+/// `pidfd <pid> <sig>`, `kill <pid> <sig>` (the fallback or macOS), `rollback <pid>`.
+fn signal_log(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
+}
+fn log_path(tag: &str) -> std::path::PathBuf {
+    let n = SEQ.fetch_add(1, Ordering::SeqCst);
+    let p = std::env::temp_dir().join(format!("sd-s3-siglog-{}-{tag}-{n}", std::process::id()));
+    let _ = std::fs::remove_file(&p);
+    p
+}
+/// The forced-ENOSYS leg exists only where pidfd does.
+fn enosys_legs() -> &'static [bool] {
+    if cfg!(target_os = "linux") {
+        &[false, true]
+    } else {
+        &[false]
+    }
 }
 
 /// A decoy process, started by the test (never part of a job).
@@ -52,6 +68,14 @@ impl Decoy {
     }
     fn signals(&self) -> Vec<String> {
         std::fs::read_to_string(self.log_path()).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
+    }
+    /// Not killed: the decoy is the test's child, so a killed decoy is a zombie until reaped
+    /// (kill(pid, 0) would still succeed on it).
+    fn not_killed(&mut self) -> Result<(), String> {
+        match self.child.try_wait() {
+            Ok(None) => Ok(()),
+            other => Err(format!("{other:?}")),
+        }
     }
 }
 impl Drop for Decoy {
@@ -105,8 +129,9 @@ impl Drop for Job {
 /// fallback path (debug seam SHEEPDOG_TEST_PIDFD_ENOSYS: pidfd_open reports ENOSYS).
 #[test]
 fn s3_a_reused_pid_gets_no_signal() {
-    for enosys in [false, true] {
-        let decoy = Decoy::start("reuse");
+    for &enosys in enosys_legs() {
+        let mut decoy = Decoy::start("reuse");
+        let siglog = log_path("reuse");
         // Linux's identity is the start time in clock ticks (10 ms): a decoy and a member started
         // in the same tick share it, and the check then rightly passes. A real reuse of the same
         // pid within one tick cannot happen, so the decoy starts a few ticks earlier (control below).
@@ -117,6 +142,7 @@ fn s3_a_reused_pid_gets_no_signal() {
             .arg(&j.rec)
             .env("SHEEPDOG_TEST_REUSE_PID", decoy.pid.to_string())
             .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if enosys {
@@ -131,11 +157,18 @@ fn s3_a_reused_pid_gets_no_signal() {
             Some(rec[0].1),
             "enosys={enosys}: control: the decoy has the member's identity, so the check cannot tell them apart"
         );
-        assert!(alive(decoy.pid), "enosys={enosys}: the decoy was killed");
+        let log = signal_log(&siglog);
+        let _ = std::fs::remove_file(&siglog);
+        if let Err(e) = decoy.not_killed() {
+            panic!("enosys={enosys}: the decoy was killed: {e}");
+        }
         assert_ne!(state(decoy.pid), Some('T'), "enosys={enosys}: the decoy was stopped");
         assert!(decoy.signals().is_empty(), "enosys={enosys}: the decoy got signals {:?}", decoy.signals());
         // control: the member was never signalled either, so the kill cannot end clean
         assert_eq!(st.code(), Some(125), "enosys={enosys}: the seam did not redirect the signals");
+        // control: the path the cell claims to cover was the one taken
+        let path = if cfg!(target_os = "linux") && !enosys { "pidfd " } else { "kill " };
+        assert!(log.iter().any(|l| l.starts_with(path)), "enosys={enosys}: the {path}path was never taken: {log:?}");
     }
 }
 
@@ -145,7 +178,8 @@ fn s3_a_reused_pid_gets_no_signal() {
 #[test]
 fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
     for pre_stopped in [false, true] {
-        let decoy = Decoy::start("freeze");
+        let mut decoy = Decoy::start("freeze");
+        let siglog = log_path("freeze");
         if pre_stopped {
             unsafe { libc::kill(decoy.pid, libc::SIGSTOP) };
             let t = Instant::now();
@@ -159,17 +193,26 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
             .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
             .arg(&j.rec)
             .env("SHEEPDOG_TEST_WRONG_FREEZE", decoy.pid.to_string())
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .unwrap();
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(st.code(), Some(0), "pre_stopped={pre_stopped}: the job did not end clean");
-        assert!(alive(decoy.pid), "pre_stopped={pre_stopped}: the decoy was killed");
+        let log = signal_log(&siglog);
+        let _ = std::fs::remove_file(&siglog);
+        if let Err(e) = decoy.not_killed() {
+            panic!("pre_stopped={pre_stopped}: the decoy was killed: {e}");
+        }
         let stopped = state(decoy.pid) == Some('T');
+        let conts = decoy.signals().iter().filter(|s| *s == &libc::SIGCONT.to_string()).count();
         if pre_stopped {
             assert!(stopped, "a decoy stopped before sheepdog's STOP was resumed by the rollback");
+            assert_eq!(conts, 0, "a decoy stopped before sheepdog's STOP got a CONT");
         } else {
+            let rolled = format!("rollback {}", decoy.pid);
+            assert!(log.iter().any(|l| l == &rolled), "control: the rollback never considered the decoy: {log:?}");
             assert!(!stopped, "a running decoy caught in the freeze was left stopped (no rollback)");
             assert!(
                 decoy.signals().iter().any(|s| s == &libc::SIGCONT.to_string()),
@@ -177,4 +220,54 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
             );
         }
     }
+}
+
+/// PLAN.md §3.3 step 4: the rollback resumes only a process that fails the identity check; a
+/// job member sheepdog froze stays frozen until its KILL (a resumed member could fork). With
+/// `--grace 0` sheepdog sends a member no CONT at all.
+#[test]
+fn s3_frozen_members_are_not_rolled_back() {
+    let j = Job::new();
+    let siglog = log_path("members");
+    let st = Command::new(sheepdog())
+        .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
+        .arg(&j.rec)
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    let log = signal_log(&siglog);
+    let _ = std::fs::remove_file(&siglog);
+    assert_eq!(st.code(), Some(0));
+    assert_eq!(j.recorded().len(), 1, "the escapee was not created");
+    assert!(log.iter().any(|l| l.ends_with(&format!(" {}", libc::SIGSTOP))), "control: nothing was frozen: {log:?}");
+    let rolled: Vec<&String> = log.iter().filter(|l| l.starts_with("rollback ")).collect();
+    assert!(rolled.is_empty(), "the rollback resumed frozen members: {rolled:?}");
+}
+
+/// Linux: pidfd_open works but pidfd_send_signal fails (a seccomp filter; debug seam
+/// SHEEPDOG_TEST_PIDFD_SEND_ENOSYS): the signal falls back to the check and kill, so the job
+/// still ends clean and the escapee is dead.
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_a_failed_pidfd_send_falls_back() {
+    let j = Job::new();
+    let siglog = log_path("send");
+    let st = Command::new(sheepdog())
+        .args(["run", "--", fixture(), "escape", &j.marker])
+        .arg(&j.rec)
+        .env("SHEEPDOG_TEST_PIDFD_SEND_ENOSYS", "1")
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    let log = signal_log(&siglog);
+    let _ = std::fs::remove_file(&siglog);
+    let rec = j.recorded();
+    assert_eq!(rec.len(), 1, "the escapee was not created");
+    assert!(log.iter().any(|l| l.starts_with("pidfd ")), "control: the pidfd path was not taken: {log:?}");
+    assert_eq!(st.code(), Some(0), "the kill did not end clean after a failed pidfd send: {log:?}");
+    assert!(!sheepdog::ident::same(rec[0].0, rec[0].1), "the escapee survived");
 }

@@ -190,9 +190,9 @@ A process is a member only with a **lineage fact**. Session, pgid and env tag ar
 0. **Snapshot** the member closure **before** any signal.
 1. **TERM phase** (`--grace`, default 2 s): TERM every member, then CONT (a member stopped by job control would not see the TERM). Keep tracking (sticky). `sheepdog kill` against a supervisor that is stopped sends TERM and then CONT to the supervisor.
 2. **Freeze:** SIGSTOP every member, after an identity check:
-   - **Linux:** `pidfd_open`, then re-read the start time, then signal through the pidfd. If pidfd returns `ENOSYS`/`EPERM`: re-read the start time, then `kill`, for STOP and KILL alike.
+   - **Linux:** `pidfd_open`, then re-read the start time, then signal through the pidfd (a pid reused after the check cannot get it). If `pidfd_open` or `pidfd_send_signal` fails for any reason but a gone process (`ESRCH`): `ENOSYS` on an old kernel, `EPERM` under a seccomp filter, `EMFILE`: re-read the start time, then `kill`, for STOP and KILL alike. **Stated limits (UNPROVEN):** the identity is (pid, start tick at 10 ms), so two processes that share a pid and a start tick are one to sheepdog; that needs a pid reused within one tick (a namespaced `pid_max` near its minimum and a fork storm, kernel ≥ 6.14). A process in a ptrace stop reads `t`, not `T`, so the rollback below never resumes one.
    - **macOS:** re-read the uniqueid.
-   - Record which members were already stopped (state T).
+   - Record which members were already stopped (state T), for each STOP delivered by `kill` (a pid reused between the check and the kill would have got it). A STOP delivered through a pidfd reached the member, so it has nothing to roll back.
 3. **Close:** recompute until stable; stop new members the same way.
 4. **Verify:** re-check identity. A process that fails the check gets SIGCONT only if it was not in state T before. **macOS limit (stated):** in a pid-reuse case, that T record describes the old process. The window is milliseconds and pids are sequential; this is accepted and named. A test seam injects the failure so that the cell can run.
 5. **Kill:** SIGKILL all.

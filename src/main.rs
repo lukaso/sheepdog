@@ -129,57 +129,116 @@ pub fn code_of(status: c_int) -> i32 {
 
 /// Send `sig` only if `pid` is still the process with identity `id` (PLAN.md §3.3; the
 /// remaining window is the time between this check and the kill call).
-pub fn signal(pid: i32, id: u64, sig: c_int) {
+pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
     // Test seam (debug builds only): SHEEPDOG_TEST_NOKILL=1 makes every signal fail, as EPERM
     // would after a member's setuid exec (cells 20 and 24-lite).
     if seam("SHEEPDOG_TEST_NOKILL") {
-        return;
+        return Sent::No;
     }
     // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,
     // with the member's identity, as if the member's pid had been reused (S3).
     let pid = seam_ms("SHEEPDOG_TEST_REUSE_PID").map_or(pid, |p| p as i32);
-    send_checked(pid, id, sig);
+    // Test seam (debug builds only): SHEEPDOG_TEST_WRONG_FREEZE=<pid> lets the STOP to that pid
+    // skip the identity check, as a STOP does that lands on a pid reused between the check and
+    // the kill (S3): it is delivered unpinned, so the rollback must consider it.
+    if sig == libc::SIGSTOP && seam_ms("SHEEPDOG_TEST_WRONG_FREEZE") == Some(pid as u64) {
+        trace(format!("kill {pid} {sig}"));
+        unsafe { libc::kill(pid, sig) };
+        return Sent::Unpinned;
+    }
+    send_checked(pid, id, sig)
+}
+
+/// How a signal was delivered (PLAN.md §3.3 step 2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sent {
+    /// not sent: the process is gone or is no longer the member
+    No,
+    /// sent through a pidfd opened before the identity check: it reached the member
+    Pinned,
+    /// sent with `kill` after the identity check: a pid reused in between would have got it
+    Unpinned,
+}
+
+/// Debug seam SHEEPDOG_TEST_SIGNAL_LOG: one line per signal decision, so a test can tell which
+/// path a signal took.
+fn trace(line: String) {
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("SHEEPDOG_TEST_SIGNAL_LOG") {
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+}
+
+/// The rollback's CONT to a process that failed the identity check after our STOP (PLAN.md
+/// §3.3 step 4). It cannot be identity-checked: the check is what failed.
+fn rollback(pid: i32) {
+    if seam("SHEEPDOG_TEST_NOKILL") {
+        return;
+    }
+    trace(format!("rollback {pid}"));
+    unsafe { libc::kill(pid, libc::SIGCONT) };
 }
 
 /// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
 /// Linux: through a pidfd opened before the check, so a pid reused after the check can never
-/// get the signal. If pidfd_open fails for another reason than a gone process (ENOSYS on an old
-/// kernel, EPERM under a seccomp filter; debug seam SHEEPDOG_TEST_PIDFD_ENOSYS), the check and
-/// `kill` remain (the window between them is the stated residual).
+/// get the signal. If the pidfd cannot be opened or used for any reason but a gone process
+/// (ENOSYS on an old kernel, EPERM under a seccomp filter, EMFILE; debug seams
+/// SHEEPDOG_TEST_PIDFD_ENOSYS for the open, SHEEPDOG_TEST_PIDFD_SEND_ENOSYS for the send),
+/// the check and `kill` remain; the window between them is the stated residual, and the
+/// freeze's rollback covers a STOP that lands in it.
 #[cfg(target_os = "linux")]
-fn send_checked(pid: i32, id: u64, sig: c_int) {
+fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
     let fd = if seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
         None
     } else {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
         if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-            return; // gone
+            return Sent::No; // gone
         }
         (fd >= 0).then_some(fd)
     };
-    match fd {
-        Some(fd) => {
-            if same(pid, id) {
-                unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, std::ptr::null::<libc::siginfo_t>(), 0) };
-            }
+    if let Some(fd) = fd {
+        trace(format!("pidfd {pid} {sig}"));
+        if !same(pid, id) {
             unsafe { libc::close(fd) };
+            return Sent::No;
         }
-        None => {
-            if same(pid, id) {
-                unsafe { libc::kill(pid, sig) };
-            }
+        let (r, err) = if seam("SHEEPDOG_TEST_PIDFD_SEND_ENOSYS") {
+            (-1, Some(libc::ENOSYS))
+        } else {
+            let r = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, std::ptr::null::<libc::siginfo_t>(), 0) };
+            (r, std::io::Error::last_os_error().raw_os_error())
+        };
+        unsafe { libc::close(fd) };
+        if r == 0 {
+            return Sent::Pinned;
+        }
+        if err == Some(libc::ESRCH) {
+            return Sent::No; // exited after the check
         }
     }
+    trace(format!("kill {pid} {sig}"));
+    if same(pid, id) {
+        unsafe { libc::kill(pid, sig) };
+        return Sent::Unpinned;
+    }
+    Sent::No
 }
 
 /// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
 /// macOS: the uniqueid is re-read just before `kill` (the window between them is the stated
 /// residual; the freeze's rollback covers a STOP that lands on a reused pid).
 #[cfg(target_os = "macos")]
-fn send_checked(pid: i32, id: u64, sig: c_int) {
+fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
+    trace(format!("kill {pid} {sig}"));
     if same(pid, id) {
         unsafe { libc::kill(pid, sig) };
+        return Sent::Unpinned;
     }
+    Sent::No
 }
 
 /// Test seam (debug builds only): sleep for the number of ms in env var `name`. If
@@ -313,7 +372,7 @@ pub fn kill_tree(
     members: impl FnMut() -> Vec<(i32, u64)>,
     reap: impl FnMut(),
     tree_empty: impl FnMut() -> Option<bool>,
-    send: impl FnMut(i32, u64, c_int),
+    send: impl FnMut(i32, u64, c_int) -> Sent,
     initial: HashMap<i32, u64>,
 ) -> Result<(), KillError> {
     let known: std::cell::RefCell<HashMap<i32, u64>> = std::cell::RefCell::new(initial);
@@ -340,7 +399,7 @@ fn kill_loop(
     mut members: impl FnMut() -> Vec<(i32, u64)>,
     mut reap: impl FnMut(),
     mut tree_empty: impl FnMut() -> Option<bool>,
-    mut send: impl FnMut(i32, u64, c_int),
+    mut send: impl FnMut(i32, u64, c_int) -> Sent,
     known: &std::cell::RefCell<HashMap<i32, u64>>,
 ) -> Result<(), Vec<i32>> {
     let deadline = Instant::now() + opts.deadline;
@@ -379,8 +438,8 @@ fn kill_loop(
             let now: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
             for &(p, id) in &now {
                 if termed.insert((p, id)) {
-                    send(p, id, libc::SIGTERM);
-                    send(p, id, libc::SIGCONT);
+                    let _ = send(p, id, libc::SIGTERM);
+                    let _ = send(p, id, libc::SIGCONT);
                 }
             }
             if now.is_empty() && empty_check() != Some(false) {
@@ -434,17 +493,19 @@ fn kill_loop(
         }
         empty = 0;
         // freeze what we know, then close over members created meanwhile, then kill all. Each
-        // STOP records whether its process was already stopped (§3.3 step 2), for the rollback.
-        let before: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+        // STOP delivered unpinned (a pid reused after its check would have got it) records
+        // whether its process was already stopped (§3.3 step 2), for the rollback; a pinned STOP
+        // reached the member and has nothing to roll back.
+        let mut before: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
+        if let Some(d) = wrong_freeze.take() {
+            before.push((d, 0)); // debug seam: its STOP lands as on a reused pid (see signal())
+        }
         let mut frozen: Vec<(i32, u64, bool)> = Vec::new();
         for &(p, id) in &before {
-            frozen.push((p, id, sheepdog::ident::stopped(p)));
-            send(p, id, libc::SIGSTOP);
-        }
-        if let Some(d) = wrong_freeze.take() {
-            // debug seam: a STOP that landed on a reused pid (identity 0 never matches)
-            frozen.push((d, 0, sheepdog::ident::stopped(d)));
-            unsafe { libc::kill(d, libc::SIGSTOP) };
+            let was_stopped = sheepdog::ident::stopped(p);
+            if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
+                frozen.push((p, id, was_stopped));
+            }
         }
         if opts.panic_after_stop {
             panic!("test seam: panic after the freeze");
@@ -453,8 +514,10 @@ fn kill_loop(
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
             if !before.iter().any(|&(b, _)| b == p) {
-                frozen.push((p, id, sheepdog::ident::stopped(p)));
-                send(p, id, libc::SIGSTOP);
+                let was_stopped = sheepdog::ident::stopped(p);
+                if send(p, id, libc::SIGSTOP) == Sent::Unpinned {
+                    frozen.push((p, id, was_stopped));
+                }
             }
         }
         // §3.3 step 4, verify: a frozen process that is no longer the member (its STOP may have
@@ -462,11 +525,11 @@ fn kill_loop(
         // and is stopped now (a stranger stopped by someone else stays stopped).
         for &(p, id, was_stopped) in &frozen {
             if !was_stopped && !same(p, id) && sheepdog::ident::stopped(p) {
-                unsafe { libc::kill(p, libc::SIGCONT) };
+                rollback(p);
             }
         }
         for &(p, id) in &all {
-            send(p, id, libc::SIGKILL);
+            let _ = send(p, id, libc::SIGKILL);
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -643,7 +706,7 @@ mod tests {
             },
             || {},
             || None,
-            |_, _, _| {}, // never signal: the member stays alive
+            |_, _, _| Sent::No, // never signal: the member stays alive
             HashMap::new(),
         );
         let _ = child.kill();
