@@ -36,6 +36,20 @@
 //! - `puniq-only M R` (macOS): the root forks D; D re-execs itself with the disclaim
 //!   (responsible for itself) and then runs `/bin/sleep M`; the root lives 700 ms, then exits.
 //!   D's only fact is its original parent's uniqueid (the root, a member).
+//! - `counter M R`: phase-1 S4 (cell 22). The root and one escapee (its own session) count
+//!   every INT and HUP they get as lines `INT <pid>` / `HUP <pid>` in `<R>.sig` and keep
+//!   running. The root records the escapee, then itself: two lines in R mean "ready".
+//! - `shell REPORT [bg] [null-stdin] PROG ARGS...`: the pty harness's job-control shell (PHASE1.md
+//!   §2). Run as a session leader with the pty as its controlling terminal. It starts PROG in a
+//!   new process group, makes that group the foreground (unless `bg`), and waits with
+//!   WUNTRACED. It appends `started <pgid>`, `stopped <sig>`, `exited <code>` or
+//!   `signaled <sig>` to REPORT. After a stop it waits for `REPORT.fg` to exist, then gives
+//!   the terminal back to the job, continues it (`fg`) and appends `continued`. A HUP (the terminal closed) is
+//!   sent on to the job's group, as bash does, and logged as `hup`.
+//! - `nosession PIDFILE PROG ARGS...`: start PROG with no controlling terminal and not as a
+//!   session leader (as liveapp and CI run it): setsid, then PROG in a new process group of
+//!   that session. PROG's pid (= its pgid) goes to PIDFILE; exits as PROG did.
+//! - `int-exit CODE M`: exit CODE on INT (a root that handles ctrl-C itself); else sleep.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -164,6 +178,133 @@ extern "C" fn count_term(_: libc::c_int) {
         let pid = libc::getpid();
         let line = format!("TERM {pid}\n");
         libc::write(TERM_FD, line.as_ptr() as *const libc::c_void, line.len());
+    }
+}
+
+static mut SIG_FD: libc::c_int = -1;
+static mut INT_EXIT: libc::c_int = 0;
+static HUP_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// counter: record an INT or HUP and keep running.
+extern "C" fn count_sig(sig: libc::c_int) {
+    unsafe {
+        let name = if sig == libc::SIGINT { "INT" } else { "HUP" };
+        let line = format!("{name} {}\n", libc::getpid());
+        libc::write(SIG_FD, line.as_ptr() as *const libc::c_void, line.len());
+    }
+}
+
+extern "C" fn int_exit(_: libc::c_int) {
+    unsafe { libc::_exit(INT_EXIT) }
+}
+
+extern "C" fn shell_hup(_: libc::c_int) {
+    HUP_SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Install `h` for `sig` with no SA_RESTART, so a blocking waitpid returns EINTR.
+unsafe fn on(sig: libc::c_int, h: usize, restart: bool) {
+    let mut sa: libc::sigaction = std::mem::zeroed();
+    sa.sa_sigaction = h;
+    sa.sa_flags = if restart { libc::SA_RESTART } else { 0 };
+    libc::sigemptyset(&mut sa.sa_mask);
+    libc::sigaction(sig, &sa, std::ptr::null_mut());
+}
+
+fn unblock_all() {
+    unsafe {
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+    }
+}
+
+fn append(path: &str, line: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        let _ = f.write_all(format!("{line}\n").as_bytes());
+    }
+}
+
+/// The job-control shell of the pty harness (see the module doc).
+fn shell(report: &str, bg: bool, null_stdin: bool, prog: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        for s in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+            libc::signal(s, libc::SIG_IGN);
+        }
+        on(libc::SIGHUP, shell_hup as *const () as usize, false);
+        let mut cmd = std::process::Command::new(&prog[0]);
+        cmd.args(&prog[1..]);
+        cmd.pre_exec(move || {
+            libc::setpgid(0, 0);
+            if !bg {
+                libc::tcsetpgrp(0, libc::getpid());
+            }
+            for s in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGHUP] {
+                libc::signal(s, libc::SIG_DFL);
+            }
+            unblock_all();
+            if null_stdin {
+                let n = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDONLY);
+                libc::dup2(n, 0);
+            }
+            Ok(())
+        });
+        let child = match cmd.spawn() {
+            Ok(c) => c.id() as i32,
+            Err(e) => {
+                append(report, &format!("spawn-failed {e}"));
+                libc::_exit(1)
+            }
+        };
+        // the job's group is signalled below; a pid that cannot be ours must never become a
+        // group signal (kill(-1) is every process this user owns)
+        if child <= 1 {
+            append(report, "bad-pid");
+            libc::_exit(1);
+        }
+        libc::setpgid(child, child);
+        if !bg {
+            libc::tcsetpgrp(0, child);
+        }
+        append(report, &format!("started {child}"));
+        let fg = format!("{report}.fg");
+        loop {
+            let mut st = 0;
+            let r = libc::waitpid(child, &mut st, libc::WUNTRACED);
+            if r < 0 {
+                if HUP_SEEN.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    libc::kill(-child, libc::SIGHUP);
+                    append(report, "hup");
+                    continue;
+                }
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                append(report, "wait-failed");
+                libc::_exit(1);
+            }
+            if libc::WIFSTOPPED(st) {
+                append(report, &format!("stopped {}", libc::WSTOPSIG(st)));
+                libc::tcsetpgrp(0, libc::getpgrp());
+                let mut n = 0;
+                while !std::path::Path::new(&fg).exists() && n < 30_000 {
+                    libc::usleep(1000);
+                    n += 1;
+                }
+                let _ = std::fs::remove_file(&fg);
+                libc::tcsetpgrp(0, child);
+                libc::kill(-child, libc::SIGCONT);
+                append(report, "continued");
+                continue;
+            }
+            if libc::WIFSIGNALED(st) {
+                append(report, &format!("signaled {}", libc::WTERMSIG(st)));
+            } else {
+                append(report, &format!("exited {}", libc::WEXITSTATUS(st)));
+            }
+            libc::_exit(0);
+        }
     }
 }
 
@@ -418,6 +559,75 @@ fn main() {
             }
         }
         std::process::exit(0);
+    }
+    if mode == "counter" && a.len() == 4 {
+        let sig_file = CString::new(format!("{}.sig", a[3])).unwrap();
+        unsafe {
+            SIG_FD = libc::open(sig_file.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+            // installed before the fork, so the escapee counts from its first instruction
+            on(libc::SIGINT, count_sig as *const () as usize, true);
+            on(libc::SIGHUP, count_sig as *const () as usize, true);
+            let g = spawn_escapee(&a[3], true, || {
+                unblock_all();
+                loop {
+                    libc::pause();
+                }
+            });
+            match g {
+                Some(g) => record(&a[3], g),
+                None => libc::_exit(3),
+            }
+            record(&a[3], libc::getpid());
+            unblock_all();
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if mode == "shell" && a.len() >= 4 {
+        let mut i = 3;
+        let (mut bg, mut null_stdin) = (false, false);
+        while i < a.len() && (a[i] == "bg" || a[i] == "null-stdin") {
+            bg |= a[i] == "bg";
+            null_stdin |= a[i] == "null-stdin";
+            i += 1;
+        }
+        if i >= a.len() {
+            usage();
+        }
+        shell(&a[2], bg, null_stdin, &a[i..]);
+    }
+    if mode == "nosession" && a.len() >= 4 {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            libc::setsid();
+            let mut cmd = std::process::Command::new(&a[3]);
+            cmd.args(&a[4..]).process_group(0);
+            let mut c = cmd.spawn().unwrap_or_else(|e| {
+                eprintln!("sd-fixture: spawn failed: {e}");
+                std::process::exit(127)
+            });
+            let _ = std::fs::write(&a[2], format!("{}\n", c.id()));
+            let st = c.wait().map(|s| std::os::unix::process::ExitStatusExt::into_raw(s)).unwrap_or(0);
+            if libc::WIFSIGNALED(st) {
+                let sig = libc::WTERMSIG(st);
+                libc::signal(sig, libc::SIG_DFL);
+                unblock_all();
+                libc::raise(sig);
+            }
+            libc::_exit(libc::WEXITSTATUS(st));
+        }
+    }
+    if mode == "int-exit" && a.len() == 4 {
+        unsafe {
+            INT_EXIT = a[2].parse().unwrap_or(1);
+            on(libc::SIGINT, int_exit as *const () as usize, true);
+            unblock_all();
+            // no exec (it would reset the handler); the marker stays in this argv
+            loop {
+                libc::pause();
+            }
+        }
     }
     if mode == "bg-then-exec" && a.len() >= 4 {
         use std::os::unix::process::CommandExt;

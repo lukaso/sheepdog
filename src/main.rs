@@ -49,6 +49,10 @@ pub struct Args {
     pub grace: Duration,
     /// skip the kill when the root exits normally (a TERM still ends the job)
     pub leave_strays: bool,
+    /// no D9 hint (PLAN.md §3.1)
+    pub quiet: bool,
+    /// forward an INT to the root as well (callers that signal only the sheepdog pid)
+    pub forward_int_to_root: bool,
 }
 
 /// A duration: "0", "2" (seconds), "2s", "500ms".
@@ -78,7 +82,7 @@ pub fn cstrings(v: &[OsString]) -> Result<Vec<CString>, String> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--mode M] -- command [args...]");
     125
 }
 
@@ -91,6 +95,8 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut mode = None;
     let mut grace = Duration::from_secs(2);
     let mut leave_strays = false;
+    let mut quiet = false;
+    let mut forward_int_to_root = false;
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
@@ -106,6 +112,14 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
                 leave_strays = true;
                 i += 1;
             }
+            b"--quiet" => {
+                quiet = true;
+                i += 1;
+            }
+            b"--forward-int-to-root" => {
+                forward_int_to_root = true;
+                i += 1;
+            }
             _ => return Err(usage()),
         }
     }
@@ -113,7 +127,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd, grace, leave_strays })
+    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -130,6 +144,11 @@ pub fn code_of(status: c_int) -> i32 {
 /// Send `sig` only if `pid` is still the process with identity `id` (PLAN.md §3.3; the
 /// remaining window is the time between this check and the kill call).
 pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
+    // never a process group or the broadcast: 0 is our own group, -1 every process we may
+    // signal (members are real pids; this makes anything else impossible, not just unlikely)
+    if pid <= 1 {
+        return Sent::No;
+    }
     // Test seam (debug builds only): SHEEPDOG_TEST_NOKILL=1 makes every signal fail, as EPERM
     // would after a member's setuid exec (cells 20 and 24-lite).
     if seam("SHEEPDOG_TEST_NOKILL") {
@@ -569,24 +588,47 @@ pub struct Signals {
     pub caller_mask: libc::sigset_t,
     /// false when the caller ignored TERM: then TERM stays ignored, for sheepdog and the root
     pub watch_term: bool,
+    /// INT and HUP, each watched only if the caller left it at its default (S4)
+    pub watch_int: bool,
+    pub watch_hup: bool,
+}
+
+impl Signals {
+    /// The signal set the event loop waits on: CHLD plus every watched signal.
+    pub fn wait_set(&self) -> libc::sigset_t {
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGCHLD);
+            for (on, s) in [(self.watch_term, libc::SIGTERM), (self.watch_int, libc::SIGINT), (self.watch_hup, libc::SIGHUP)] {
+                if on {
+                    libc::sigaddset(&mut set, s);
+                }
+            }
+            set
+        }
+    }
 }
 
 fn setup_signals() -> Signals {
     unsafe {
         // sheepdog must see its children's exits (review round 2, P1-B); the root inherits it
         libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-        let mut term: libc::sigaction = std::mem::zeroed();
-        libc::sigaction(libc::SIGTERM, std::ptr::null(), &mut term);
-        let watch_term = term.sa_sigaction == libc::SIG_DFL;
-        let mut block: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut block);
-        libc::sigaddset(&mut block, libc::SIGCHLD);
-        if watch_term {
-            libc::sigaddset(&mut block, libc::SIGTERM);
-        }
+        let at_default = |s: c_int| {
+            let mut a: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(s, std::ptr::null(), &mut a);
+            a.sa_sigaction == libc::SIG_DFL
+        };
+        let sig = Signals {
+            caller_mask: std::mem::zeroed(),
+            watch_term: at_default(libc::SIGTERM),
+            watch_int: at_default(libc::SIGINT),
+            watch_hup: at_default(libc::SIGHUP),
+        };
+        let block = sig.wait_set();
         let mut caller_mask: libc::sigset_t = std::mem::zeroed();
         libc::sigprocmask(libc::SIG_BLOCK, &block, &mut caller_mask);
-        Signals { caller_mask, watch_term }
+        Signals { caller_mask, ..sig }
     }
 }
 
@@ -636,6 +678,144 @@ pub fn die_like(status: libc::c_int) -> i32 {
         }
     }
     code_of(status)
+}
+
+/// The scan tick of the event loop: 250 ms. Debug seam SHEEPDOG_TEST_TICK_MS (under 1 s) widens
+/// it, so a cell can tell "acted at the event" from "acted at the next tick" by a wide margin.
+pub fn tick_ms() -> u64 {
+    seam_ms("SHEEPDOG_TEST_TICK_MS").filter(|&ms| ms < 1000).unwrap_or(250)
+}
+
+/// A wait status for a plain exit with `code` (the encoding both OSes use).
+pub fn exit_status(code: i32) -> c_int {
+    (code & 0xff) << 8
+}
+
+/// INT and HUP while the job runs (PLAN.md §3.1, PHASE1.md §1.3 and S4). They never end the
+/// job. Each one is forwarded only to members outside sheepdog's own process group: a signal
+/// from the terminal, or one sent to the group, already reached every member inside it, so
+/// this gives exactly one delivery in every case. Two exceptions: HUP goes to every member when
+/// sheepdog (or its relay) is the session leader, since the kernel then sends the terminal's
+/// HUP to the leader only; and `--forward-int-to-root` also sends INT to the root.
+pub struct Interrupts {
+    got_int: bool,
+    got_hup: bool,
+    leader: bool,
+    int_to_root: bool,
+    quiet: bool,
+    /// the D9 hint: when it is due, and for which signal
+    hint: Option<(Instant, c_int)>,
+    hinted: bool,
+}
+
+impl Interrupts {
+    /// `relay` is the relay's pid when this supervisor has one (it keeps the pid from the fork;
+    /// the parent pid changes once the relay dies). They share a session, so the test is exact.
+    pub fn new(a: &Args, relay: Option<i32>) -> Self {
+        let sid = unsafe { libc::getsid(0) };
+        let leader = sid == unsafe { libc::getpid() } || relay.is_some_and(|r| sid == r);
+        Interrupts { got_int: false, got_hup: false, leader, int_to_root: a.forward_int_to_root, quiet: a.quiet, hint: None, hinted: false }
+    }
+
+    /// No forwarding and no hint (the root-disclaim mode).
+    pub fn none() -> Self {
+        Interrupts { got_int: false, got_hup: false, leader: false, int_to_root: false, quiet: true, hint: None, hinted: true }
+    }
+
+    /// Record a consumed INT or HUP (it decides death by signal at the end).
+    pub fn note(&mut self, sig: c_int) {
+        self.got_int |= sig == libc::SIGINT;
+        self.got_hup |= sig == libc::SIGHUP;
+    }
+
+    /// One INT or HUP consumed while the job runs: rescan, forward, and repeat the scan until
+    /// it finds no new target (fresh membership at the event, PHASE1.md §1.3; never the last
+    /// timed scan alone). `members` rescans and returns the live members.
+    pub fn forward(&mut self, sig: c_int, root: i32, members: &mut dyn FnMut() -> Vec<(i32, u64)>) {
+        self.note(sig);
+        let own = unsafe { libc::getpgrp() };
+        let all = sig == libc::SIGHUP && self.leader;
+        let with_root = sig == libc::SIGINT && self.int_to_root;
+        let mut sent: std::collections::HashSet<(i32, u64)> = std::collections::HashSet::new();
+        let mut root_got = false;
+        for _ in 0..32 {
+            let fresh: Vec<(i32, u64)> = members()
+                .into_iter()
+                .filter(|m| !sent.contains(m))
+                .filter(|&(p, _)| {
+                    let g = unsafe { libc::getpgid(p) };
+                    all || (with_root && p == root) || (g >= 0 && g != own)
+                })
+                .collect();
+            if fresh.is_empty() {
+                break;
+            }
+            for (p, id) in fresh {
+                if signal(p, id, sig) != Sent::No && p == root {
+                    root_got = true;
+                }
+                sent.insert((p, id));
+            }
+        }
+        if !root_got && !self.hinted && self.hint.is_none() {
+            let ms = seam_ms("SHEEPDOG_TEST_HINT_MS").unwrap_or(3000);
+            self.hint = Some((Instant::now() + Duration::from_millis(ms), sig));
+        }
+    }
+
+    /// The D9 hint: once per job, if the root still runs when it is due.
+    pub fn tick(&mut self, root_running: bool) {
+        if let Some((due, sig)) = self.hint {
+            if Instant::now() >= due {
+                self.hint = None;
+                self.hinted = true;
+                if root_running && !self.quiet {
+                    let (name, flag) = if sig == libc::SIGINT { ("SIGINT", "INT") } else { ("SIGHUP", "HUP") };
+                    let pg = unsafe { libc::getpgrp() };
+                    say!(
+                        "sheepdog: got {name}; the command is still running. A signal sent only to sheepdog's pid does not reach it: send TERM to end the job, or signal the process group (kill -{flag} -{pg})."
+                    );
+                }
+            }
+        }
+    }
+
+    /// When the hint is due (so the loop can wake for it), if one is pending.
+    pub fn hint_due(&self) -> Option<Instant> {
+        self.hint.map(|(d, _)| d)
+    }
+
+    /// Consume an INT or HUP that is still pending at the end (one that came during the kill):
+    /// it counts too ("consumed at any point before it exits").
+    pub fn drain_pending(&mut self, sig: &Signals) {
+        if sig.watch_int && consume(libc::SIGINT) {
+            self.got_int = true;
+        }
+        if sig.watch_hup && consume(libc::SIGHUP) {
+            self.got_hup = true;
+        }
+    }
+}
+
+/// How the supervisor ends once the job is over (PHASE1.md §1.3): a TERM means death by TERM;
+/// a kill that did not end clean means 125; a root that died of INT or HUP, when sheepdog also
+/// got that signal, means death by that signal (so a shell loop stops on ctrl-C); otherwise the
+/// root's exit code. `status` is the root's wait status, None when TERM ended the job.
+pub fn finish(status: Option<c_int>, result: Result<(), KillError>, ints: &mut Interrupts, sig: &Signals) -> i32 {
+    ints.drain_pending(sig);
+    match (status, result) {
+        (_, Err(e)) => kill_failed(e),
+        (None, Ok(())) => die_by_term(143),
+        (Some(st), Ok(())) => {
+            let same_signal = libc::WIFSIGNALED(st)
+                && ((libc::WTERMSIG(st) == libc::SIGINT && ints.got_int) || (libc::WTERMSIG(st) == libc::SIGHUP && ints.got_hup));
+            if same_signal {
+                die_like(st)
+            } else {
+                code_of(st)
+            }
+        }
+    }
 }
 
 /// Before the root is spawned: a TERM that is already pending (the caller blocked TERM and it
@@ -714,6 +894,17 @@ mod tests {
     /// clean after ONE empty scan. The scan misses a live member in the pass that reaches the
     /// deadline and in the first deadline scan, then sees it in the second: the result must be
     /// Err. (Calling it clean after one empty scan returns Ok here.)
+    /// No signal ever goes to pid 1 or lower: 0 is sheepdog's own process group and -1 is
+    /// every process the user owns (the 2026-09-26 host incident was a kill(-1) elsewhere).
+    /// Signal 0 and the real identities, so only the guard can say No.
+    #[test]
+    fn no_signal_reaches_pid_one_or_below() {
+        for p in [-1, 0, 1] {
+            let id = sheepdog::ident::identity(p).unwrap_or(0);
+            assert_eq!(signal(p, id, 0), Sent::No, "pid {p} (identity {id}) was signalled");
+        }
+    }
+
     #[test]
     fn the_deadline_needs_two_empty_scans_without_an_authoritative_check() {
         let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();

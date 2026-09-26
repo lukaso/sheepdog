@@ -4,7 +4,7 @@
 //! (measured in round 1, also as non-root in a default container), so the tree is exactly
 //! this process's live descendants. The supervisor must reap what it adopts (round 1, F5).
 
-use crate::{code_of, cstrings, kill_tree, say, Args};
+use crate::{cstrings, kill_tree, say, Args};
 use std::ffi::OsString;
 use std::io::Write;
 use sheepdog::ident::identity;
@@ -157,9 +157,11 @@ fn poll_fd(fd: i32, ms: i32) {
 /// - dies the way the supervisor died (P2-1).
 /// The supervisor gets PR_SET_PDEATHSIG(SIGTERM): if the relay is killed, the supervisor is
 /// told to end the job instead of running on unseen (review round 4, P3-2).
-fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
+/// Returns Err(code) in the relay (or on a failed fork), Ok(Some(relay pid)) in a supervisor
+/// that has a relay, Ok(None) without one.
+fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
     if !crate::has_children() {
-        return None;
+        return Ok(None);
     }
     // A TERM that is pending now would stay in the relay (pending signals are not inherited
     // across fork) and reach the supervisor only later, possibly after it started the root.
@@ -169,7 +171,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
     // start and is then killed at once, never left running (the same as a TERM arriving just
     // after the pre-spawn check without a relay).
     if sig.watch_term && crate::term_pending() {
-        return Some(crate::die_by_term(143));
+        return Err(crate::die_by_term(143));
     }
     unsafe {
         let relay = libc::getpid();
@@ -188,12 +190,12 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 }
                 // the supervisor: restore the caller's mask, so the root inherits it
                 libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
-                None
+                Ok(Some(relay))
             }
             -1 => {
                 libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
-                Some(125)
+                Err(125)
             }
             sup => {
                 // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
@@ -205,7 +207,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                         if fd >= 0 {
                             libc::close(fd);
                         }
-                        return Some(crate::die_like(st));
+                        return Err(crate::die_like(st));
                     }
                     let got = if fd >= 0 {
                         poll_fd(fd, 1000);
@@ -233,9 +235,10 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
 }
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
-    if let Some(code) = relay_if_needed(sig) {
-        return code;
-    }
+    let relay = match relay_if_needed(sig) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
     let subreaper = match a.mode.as_deref() {
         None | Some("subreaper") => true,
         Some("none") => false,
@@ -253,51 +256,63 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         return code;
     }
     let root = spawn(&a.cmd, &sig.caller_mask);
-    // The event loop's wait (PHASE1.md §1): a signalfd on {CHLD, TERM} (both blocked by
-    // setup_signals), drained on every wake so each signal is consumed exactly once; the
-    // waitpid(-1, WNOHANG) loop reaps the root and adopted orphans. One fixed order when events
-    // coincide (round-7 P3-F4): TERM, then the root's exit. No signalfd: poll every 50 ms (a
-    // blocked TERM stays pending, so nothing is lost).
-    let mut waitset: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::sigemptyset(&mut waitset);
-        libc::sigaddset(&mut waitset, libc::SIGCHLD);
-        if sig.watch_term {
-            libc::sigaddset(&mut waitset, libc::SIGTERM);
-        }
-    }
-    let fd = signal_fd(&waitset);
+    // The event loop's wait (PHASE1.md §1): a signalfd on CHLD and the watched signals (all
+    // blocked by setup_signals), drained on every wake so each signal is consumed exactly once;
+    // the waitpid(-1, WNOHANG) loop reaps the root and adopted orphans. One fixed order when
+    // events coincide (round-7 P3-F4): TERM, then the root's exit, then INT/HUP. No signalfd:
+    // poll every 50 ms (a blocked signal stays pending, so nothing is lost).
+    let fd = signal_fd(&sig.wait_set());
     crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
-    let mut exited: Option<i32> = None;
+    let mut exited: Option<libc::c_int> = None;
     // membership while running (PLAN.md §3.2): a member seen on any tick is killed at the end
     // even if it is no longer a descendant by then (sticky, by identity)
     let mut tracker = crate::Tracker::default();
-    let code = loop {
+    let mut ints = crate::Interrupts::new(a, relay);
+    let tick = crate::tick_ms() as i32;
+    let status = loop {
         tracker.refresh(descendants(me));
-        let term = if fd >= 0 {
-            drain(fd).contains(&libc::SIGTERM)
+        let got: Vec<i32> = if fd >= 0 {
+            drain(fd)
         } else {
-            sig.watch_term && crate::consume(libc::SIGTERM)
+            [(sig.watch_term, libc::SIGTERM), (sig.watch_int, libc::SIGINT), (sig.watch_hup, libc::SIGHUP)]
+                .into_iter()
+                .filter(|&(on, s)| on && crate::consume(s))
+                .map(|(_, s)| s)
+                .collect()
         };
         loop {
             let mut st = 0;
             let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
             if r == root && exited.is_none() {
-                exited = Some(code_of(st));
+                exited = Some(st);
             }
             if r <= 0 {
                 break;
             }
         }
-        if term {
+        if got.contains(&libc::SIGTERM) {
             break None;
         }
-        if let Some(c) = exited {
-            break Some(c);
+        if let Some(st) = exited {
+            for s in [libc::SIGINT, libc::SIGHUP] {
+                if got.contains(&s) {
+                    ints.note(s);
+                }
+            }
+            break Some(st);
         }
+        for s in [libc::SIGINT, libc::SIGHUP] {
+            if got.contains(&s) {
+                ints.forward(s, root, &mut || {
+                    tracker.refresh(descendants(me));
+                    tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
+                });
+            }
+        }
+        ints.tick(true);
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
         if fd >= 0 {
-            poll_fd(fd, 250);
+            poll_fd(fd, tick);
         } else {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -305,8 +320,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
-    if a.leave_strays && code.is_some() {
-        return code.unwrap_or(125);
+    if a.leave_strays && status.is_some() {
+        return crate::finish(status, Ok(()), &mut ints, sig);
     }
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
     let opts = crate::KillOpts::from_env().with_grace(a.grace);
@@ -317,11 +332,5 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         kill_tree(&opts, || descendants(me), reap, || None, crate::signal, initial)
     };
     reap();
-    if code.is_none() && result.is_ok() {
-        return crate::die_by_term(143);
-    }
-    match result {
-        Ok(()) => code.unwrap_or(143),
-        Err(e) => crate::kill_failed(e),
-    }
+    crate::finish(status, result, &mut ints, sig)
 }

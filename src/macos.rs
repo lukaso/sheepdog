@@ -1,6 +1,6 @@
 //! macOS: responsibility-based membership (PLAN.md §2, §3.1, §3.2).
 
-use crate::{code_of, cstrings, kill_tree, say, Args};
+use crate::{cstrings, kill_tree, say, Args};
 use std::io::Write;
 use std::ffi::OsString;
 use sheepdog::ident::identity;
@@ -384,8 +384,8 @@ fn relay_died() {
     unsafe { libc::raise(libc::SIGTERM) };
 }
 
-/// The event loop's wait (PHASE1.md §1): returns the root's exit code, or None if the job
-/// must be ended because of TERM.
+/// The event loop's wait (PHASE1.md §1): returns the root's wait status, or None if the job
+/// must be ended because of TERM. INT and HUP are forwarded (`Interrupts`), never an end.
 ///
 /// - kqueue watches the root's exit (EVFILT_PROC NOTE_EXIT) and TERM (EVFILT_SIGNAL). A
 ///   report is only a wake-up; TERM is consumed with `consume` (the SIG_IGN/SIG_DFL toggle),
@@ -394,10 +394,18 @@ fn relay_died() {
 ///   the root is reapable, and the one-shot event is then gone (round-7 P3-F1).
 /// - If registering NOTE_EXIT fails (ESRCH: the root is already exiting), the root is reaped
 ///   with a blocking waitpid (brief).
-/// - One fixed order when events coincide (round-7 P3-F4): TERM, then the root's exit.
+/// - One fixed order when events coincide (round-7 P3-F4): TERM, then the root's exit, then
+///   INT/HUP (each consumed with the toggle, so it is forwarded once, not at every wake).
 /// - Any other kqueue failure: poll every 50 ms. A blocked TERM stays pending, so polling
 ///   loses nothing; it never falls into a blocking wait that ignores TERM.
-fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMut()) -> Option<i32> {
+fn wait(
+    pid: pid_t,
+    sig: &crate::Signals,
+    relay: Option<pid_t>,
+    members: &mut dyn FnMut() -> Vec<(pid_t, u64)>,
+    ints: &mut crate::Interrupts,
+) -> Option<c_int> {
+    let watch_term = sig.watch_term;
     unsafe {
         let kq = libc::kqueue();
         let mut polling = kq < 0;
@@ -409,7 +417,7 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
         let mut relay_by_ppid = polling && relay.is_some();
         // the scan tick, 250 ms; debug seam SHEEPDOG_TEST_TICK_MS (under 1 s) widens it, so a
         // cell can tell "woke at once" from "woke at the next tick" by a wide margin
-        let tick_ns = crate::seam_ms("SHEEPDOG_TEST_TICK_MS").filter(|&ms| ms < 1000).unwrap_or(250) as i64 * 1_000_000;
+        let tick_ns = crate::tick_ms() as i64 * 1_000_000;
         let force_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_EINVAL");
         // debug seam: fail only the TERM registration (S1 fix review, P3-2)
         let force_sig_einval = crate::seam_flag("SHEEPDOG_TEST_KQ_SIG_EINVAL");
@@ -444,6 +452,18 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
                 if let Err(e) = reg(&ch[1]) {
                     say!("sheepdog: cannot watch TERM (errno {e}); polling instead");
                     polling = true;
+                }
+            }
+            for (on, s) in [(sig.watch_int, libc::SIGINT), (sig.watch_hup, libc::SIGHUP)] {
+                if on && !polling {
+                    let mut ev: libc::kevent = zeroed();
+                    ev.ident = s as usize;
+                    ev.filter = libc::EVFILT_SIGNAL;
+                    ev.flags = libc::EV_ADD;
+                    if let Err(e) = reg(&ev) {
+                        say!("sheepdog: cannot watch signal {s} (errno {e}); polling instead");
+                        polling = true;
+                    }
                 }
             }
             // the relay's exit: ESRCH means it is already gone; any other failure falls back to
@@ -482,38 +502,51 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
                 relay_by_ppid = false;
             }
             let term = watch_term && crate::consume(libc::SIGTERM);
+            let int = sig.watch_int && crate::consume(libc::SIGINT);
+            let hup = sig.watch_hup && crate::consume(libc::SIGHUP);
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
-                exited = Some(code_of(st));
+                exited = Some(st);
             }
-            // the fixed order: TERM, then the root's exit
+            // the fixed order: TERM, then the root's exit, then INT/HUP
             if term {
                 break None;
             }
-            if let Some(code) = exited {
-                break Some(code);
+            if let Some(status) = exited {
+                for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP)] {
+                    if got {
+                        ints.note(s);
+                    }
+                }
+                break Some(status);
             }
+            for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP)] {
+                if got {
+                    ints.forward(s, pid, members);
+                }
+            }
+            ints.tick(true);
             if !polling && proc_exiting {
                 // NOTE_EXIT was refused with ESRCH: the root is exiting; reap it, then decide again
-                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
+                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { st } else { crate::exit_status(125) });
                 continue;
             }
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
             if polling {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                track();
+                let _ = members();
                 continue;
             }
             let mut ev: libc::kevent = zeroed();
             let tick = libc::timespec { tv_sec: 0, tv_nsec: tick_ns };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
-            track(); // membership while running (a tick or an event)
+            let _ = members(); // membership while running (a tick or an event)
             if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {
                 relay_died(); // taken as TERM on the next pass
             } else if r > 0 && ev.filter == libc::EVFILT_PROC && ev.ident == pid as usize {
                 // P3-F1: the root has exited; reap it now (a blocking wait, bounded by its exit).
                 // Only the root's event: the relay's exit is also an EVFILT_PROC event, and a
                 // blocking wait for a root that still runs would hang the loop.
-                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { code_of(st) } else { 125 });
+                exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { st } else { crate::exit_status(125) });
             } else if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
                 say!("sheepdog: kqueue failed ({}); polling instead", std::io::Error::last_os_error());
                 polling = true;
@@ -613,14 +646,16 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if !ended {
                 unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
             }
-            let mut track = || {
+            let mut current = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);
                 t.refresh(found);
+                t.known.iter().map(|(&p, &id)| (p, id)).collect()
             };
-            let code = if ended { None } else { wait(root, sig.watch_term, relay, &mut track) };
-            if a.leave_strays && code.is_some() {
-                return code.unwrap_or(125);
+            let mut ints = crate::Interrupts::new(a, relay);
+            let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ints) };
+            if a.leave_strays && status.is_some() {
+                return crate::finish(status, Ok(()), &mut ints, sig);
             }
             let initial = tracker.borrow().known.clone();
             let result = kill_tree(
@@ -634,16 +669,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 crate::signal,
                 initial,
             );
-            if code.is_none() {
+            if status.is_none() {
                 let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
-                if result.is_ok() {
-                    return crate::die_by_term(143);
-                }
             }
-            match result {
-                Ok(()) => code.unwrap_or(143),
-                Err(e) => crate::kill_failed(e),
-            }
+            crate::finish(status, result, &mut ints, sig)
         }
         Some("root-disclaim") => {
             if let Some(code) = crate::term_before_spawn(sig) {
@@ -651,15 +680,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             let root = spawn(&a.cmd, true, false, &sig.caller_mask);
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
-            let code = wait(root, sig.watch_term, None, &mut || {});
+            let mut ints = crate::Interrupts::none();
+            let status = wait(root, sig, None, &mut Vec::new, &mut ints);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal, Default::default());
-            if code.is_none() && result.is_ok() {
-                return crate::die_by_term(143);
-            }
-            match result {
-                Ok(()) => code.unwrap_or(143),
-                Err(e) => crate::kill_failed(e),
-            }
+            crate::finish(status, result, &mut ints, sig)
         }
         Some(m) => {
             say!("sheepdog: unknown mode {m}");

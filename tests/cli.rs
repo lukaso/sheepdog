@@ -747,12 +747,13 @@ mod relay {
     }
 
     /// S2 review rounds 3-5 (macOS): a signal that ends the supervisor between the root's
-    /// suspended spawn and its CONT must not leave the root stopped (HUP, INT and QUIT all end
-    /// sheepdog by default; the caller's dispositions are reset to make sure they do).
+    /// suspended spawn and its CONT must not leave the root stopped. QUIT, USR1 and ALRM end
+    /// sheepdog by default (the caller's dispositions are reset to make sure they do). Since S4,
+    /// INT and HUP no longer end sheepdog: `an_int_or_hup_in_the_spawn_window_is_forwarded_later`.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_signal_in_the_spawn_window_leaves_no_stopped_root() {
-        for (i, sig) in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT].into_iter().enumerate() {
+        for (i, sig) in [libc::SIGUSR1, libc::SIGALRM, libc::SIGQUIT].into_iter().enumerate() {
             let w = Window::new(44 + 2 * i as u32);
             let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
             caller(&mut c, false, false);
@@ -768,6 +769,35 @@ mod relay {
             assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
             assert_eq!(st.signal(), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
             assert!(!stopped, "signal {sig}: the root was left stopped after the supervisor died in the spawn window");
+        }
+    }
+
+    /// S4 (macOS): an INT or HUP to the sheepdog pid in the spawn window is held with the other
+    /// signals, then handled after the CONT like any INT or HUP: it does not end sheepdog, and
+    /// the root runs, not stopped. TERM then ends the job.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_int_or_hup_in_the_spawn_window_is_forwarded_later() {
+        for (i, sig) in [libc::SIGINT, libc::SIGHUP].into_iter().enumerate() {
+            let w = Window::new(90 + 2 * i as u32);
+            let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            caller(&mut c, false, false);
+            let mut c = c.spawn().unwrap();
+            w.wait_ready();
+            let root = w.suspended_root();
+            unsafe { libc::kill(c.id() as i32, sig) };
+            let late = w.resumed();
+            wait_until("the root's action", || w.ran.exists());
+            std::thread::sleep(Duration::from_millis(300));
+            let sheepdog_alive = c.try_wait().unwrap().is_none();
+            let root_state = state(root);
+            unsafe { libc::kill(c.id() as i32, libc::SIGTERM) };
+            let st = wait_bounded(&mut c, Duration::from_secs(15));
+            w.cleanup(&[root]);
+            assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
+            assert!(sheepdog_alive, "signal {sig}: it ended sheepdog");
+            assert!(root_state.is_some_and(|s| s != 'T'), "signal {sig}: the root was left stopped ({root_state:?})");
+            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "signal {sig}: TERM did not end the job: {st:?}");
         }
     }
 
@@ -1055,34 +1085,50 @@ mod relay {
         assert_eq!(relayed, direct, "the relay path changed the root's signal mask");
     }
 
-    /// Review round 5, P3-5: the relay forwards HUP only when it is the session leader.
-    /// This cell asserts forwarding only. That the forwarded HUP must not leak the tree is
-    /// the separate (ignored, phase-1) cell `a_forwarded_hup_does_not_leak_the_tree`.
+    /// Review round 5, P3-5, rewritten in S4: the relay forwards HUP only when it is the session
+    /// leader. Not a leader: the HUP is dropped and the job runs on. A leader: the supervisor
+    /// forwards the HUP to every member (the relay-leader clause of the session-leader rule),
+    /// the tree is gone, and the relay dies of HUP, as the supervisor did.
     #[test]
     fn the_relay_forwards_hup_only_as_session_leader() {
-        let (j1, j2, r1, r2) = (m(9), m(10), m(11), m(12));
-        // not a leader: HUP to the relay is dropped; the relay keeps running
+        let (j1, j2, r1, r2, e2) = (m(9), m(10), m(11), m(12), m(13));
         let mut plain = start(Some(&j1), &["/bin/sleep", &r1]).spawn().unwrap();
-        // session leader: HUP is forwarded; the supervisor dies of it, and so does the relay
+        let inner = format!("/bin/sleep {e2} & exec /bin/sleep {r2}");
         let mut leader = unsafe {
-            start(Some(&j2), &["/bin/sleep", &r2]).pre_exec(|| {
+            start(Some(&j2), &["sh", "-c", &inner]).pre_exec(|| {
                 libc::setsid();
                 Ok(())
             }).spawn().unwrap()
         };
-        wait_until("both roots", || sleeps(&r1) == 1 && sleeps(&r2) == 1);
+        wait_until("both jobs", || sleeps(&r1) == 1 && sleeps(&r2) == 1 && sleeps(&e2) == 1);
         unsafe {
             libc::kill(plain.id() as i32, libc::SIGHUP);
             libc::kill(leader.id() as i32, libc::SIGHUP);
         }
-        std::thread::sleep(Duration::from_millis(300));
-        let plain_alive = plain.try_wait().unwrap().is_none();
-        let leader_st = leader.wait().unwrap();
-        unsafe { libc::kill(plain.id() as i32, libc::SIGKILL) };
+        let leader_st = relay::wait_bounded_any(&mut leader, Duration::from_secs(15));
+        let plain_alive = plain.try_wait().unwrap().is_none() && sleeps(&r1) == 1;
+        let left = (sleeps(&r2), sleeps(&e2));
+        unsafe { libc::kill(plain.id() as i32, libc::SIGTERM) };
         let _ = plain.wait();
-        kill_marked(&[&j1, &j2, &r1, &r2]);
+        if leader_st.is_none() {
+            unsafe { libc::kill(leader.id() as i32, libc::SIGKILL) };
+            let _ = leader.wait();
+        }
+        kill_marked(&[&j1, &j2, &r1, &r2, &e2]);
         assert!(plain_alive, "a relay that is not the session leader must drop HUP");
-        assert_eq!(leader_st.signal(), Some(libc::SIGHUP), "the session leader must forward HUP: {leader_st:?}");
+        assert_eq!(left, (0, 0), "the session leader's HUP left the tree (root, background child)");
+        assert_eq!(leader_st.and_then(|s| s.signal()), Some(libc::SIGHUP), "the relay must die of HUP: {leader_st:?}");
+    }
+
+    pub(super) fn wait_bounded_any(c: &mut std::process::Child, d: Duration) -> Option<std::process::ExitStatus> {
+        let t = Instant::now();
+        while t.elapsed() < d {
+            if let Some(st) = c.try_wait().unwrap() {
+                return Some(st);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
     }
 }
 
@@ -1177,14 +1223,12 @@ fn a_term_just_before_the_wait_is_not_lost() {
     assert_eq!(left, 0, "the root survived the TERM");
 }
 
-/// Review round 6, P2-3 (a phase-1 requirement, PLAN.md §7.1): a HUP that the relay
-/// forwards as session leader must not leak the tree. Today the supervisor has no HUP
-/// handling and dies of it by default action, leaving the root and escapees running.
-#[cfg(target_os = "linux")]
+/// Review round 6, P2-3, a phase-1 requirement (PLAN.md §7.1), met in S4: a HUP that the
+/// relay forwards as session leader must not leak the tree. The supervisor forwards it to every
+/// member; the root and its background child are gone, and the relay dies of HUP.
 #[test]
-#[ignore = "phase 1: the supervisor's HUP handling (PLAN.md §3.1, §7.1)"]
 fn a_forwarded_hup_does_not_leak_the_tree() {
-    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     let (job, root, esc) = (format!("27.{}556001", std::process::id()), format!("27.{}556002", std::process::id()), format!("27.{}556003", std::process::id()));
     let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
     let mut c = unsafe {
@@ -1199,9 +1243,14 @@ fn a_forwarded_hup_does_not_leak_the_tree() {
     };
     wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
     unsafe { libc::kill(c.id() as i32, libc::SIGHUP) };
-    let _ = c.wait();
-    std::thread::sleep(Duration::from_millis(500));
+    let st = relay::wait_bounded_any(&mut c, Duration::from_secs(15));
+    if st.is_none() {
+        unsafe { libc::kill(c.id() as i32, libc::SIGKILL) };
+        let _ = c.wait();
+    }
+    std::thread::sleep(Duration::from_millis(200));
     let after = (sleeps(&root), sleeps(&esc));
     kill_marked(&[&job, &root, &esc]);
     assert_eq!(after, (0, 0), "a forwarded HUP leaked the tree (root, escapee)");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGHUP), "the relay must die of HUP: {st:?}");
 }
