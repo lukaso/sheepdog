@@ -911,18 +911,23 @@ impl JobControl {
         // first), bounded to 1 s; then those still running get SIGSTOP, a TSTP-ignoring member
         // included (sheepdog never leaves a member running while its own enforcement stops).
         let until = Instant::now() + Duration::from_millis(seam_ms("SHEEPDOG_TEST_STOP_WAIT_MS").unwrap_or(1000));
-        while Instant::now() < until && !over() && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
+        // A CONT, a TERM or the root's exit ends the wait early: the job was continued, or is
+        // over, so no group member is stopped after all (peeked, not consumed: taken below and
+        // by the loop).
+        let cont = || sigs.watch_cont && pending(libc::SIGCONT);
+        while Instant::now() < until && !over() && !cont() && group.iter().any(|&(p, id)| same(p, id) && !stopped(p)) {
             std::thread::sleep(Duration::from_millis(5));
         }
+        let abort = over() || cont();
         for &(p, id) in &group {
-            if same(p, id) && !stopped(p) {
+            if !abort && same(p, id) && !stopped(p) {
                 let _ = signal(p, id, libc::SIGSTOP);
             }
             self.stopped_by_us.push((p, id));
         }
         // Members born during the wait (a group member still running its handler can fork):
         // rescan until stable again, and stop every new one, in the group or not.
-        for _ in 0..32 {
+        for _ in 0..(if abort { 0 } else { 32 }) {
             let fresh: Vec<(i32, u64)> = members().into_iter().filter(|m| !seen.contains(m)).collect();
             if fresh.is_empty() {
                 break;
@@ -962,6 +967,15 @@ impl JobControl {
     }
 }
 
+/// Is `sig` pending (blocked, not yet consumed)? Only looks.
+fn pending(sig: c_int) -> bool {
+    unsafe {
+        let mut p: libc::sigset_t = std::mem::zeroed();
+        libc::sigpending(&mut p);
+        libc::sigismember(&p, sig) == 1
+    }
+}
+
 /// Has the root exited (a zombie not yet reaped)? Reads without reaping (WNOWAIT), so the event
 /// loop still reaps it and takes its status.
 fn root_ended(root: i32) -> bool {
@@ -980,26 +994,10 @@ fn root_ended(root: i32) -> bool {
     r == 0 && pid == root && ended
 }
 
-/// Give the relay the caller's state for the job-control signals: it is a member of the job's
-/// process group like any other and must stop on a ctrl-Z (the shell waits on it), so it must
-/// not keep the blocks sheepdog set for its own event loop (S5 review).
-pub fn release_job_control_signals(sig: &Signals) {
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCONT] {
-            if libc::sigismember(&sig.caller_mask, s) != 1 {
-                libc::sigaddset(&mut set, s);
-            }
-        }
-        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-    }
-}
-
 /// Stop sheepdog itself with `sig` at its default action: unblock only that signal and raise
 /// it; the kernel stops the process, or discards the stop when the process group is orphaned.
 /// Re-blocked once it returns.
-fn self_stop(sig: c_int) {
+pub fn self_stop(sig: c_int) {
     unsafe {
         libc::signal(sig, libc::SIG_DFL);
         let mut one: libc::sigset_t = std::mem::zeroed();

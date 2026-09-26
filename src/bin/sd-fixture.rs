@@ -350,7 +350,9 @@ static mut FORK_TICK: [u8; 512] = [0; 512];
 static mut FORK_REC: [u8; 512] = [0; 512];
 
 /// ticker fork-on-tstp: 200 ms after a TSTP, fork a ticking child (recorded), and keep running
-/// (the root does not stop by itself, so sheepdog SIGSTOPs it after its wait).
+/// (the root does not stop by itself, so sheepdog SIGSTOPs it after its wait). It allocates
+/// inside the handler (`format!`, `record`): safe only because the root's main loop sits in
+/// `pause()` and allocates nothing (a fixture, not a pattern).
 extern "C" fn fork_on_tstp(_: libc::c_int) {
     unsafe {
         libc::usleep(200_000);
@@ -400,6 +402,20 @@ unsafe fn tick_forever(tick: &CString) -> ! {
         libc::write(fd, line.as_ptr() as *const libc::c_void, line.len());
         libc::usleep(20_000);
     }
+}
+
+/// Is this process's parent a sheepdog (its executable's file name)?
+fn parent_is_sheepdog() -> bool {
+    let ppid = unsafe { libc::getppid() };
+    #[cfg(target_os = "linux")]
+    let path = std::fs::read_link(format!("/proc/{ppid}/exe")).map(|p| p.display().to_string()).unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    let path = {
+        let mut buf = vec![0u8; 4096];
+        let n = unsafe { libc::proc_pidpath(ppid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
+        String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
+    };
+    path.rsplit('/').next() == Some("sheepdog")
 }
 
 /// Re-exec this fixture as `mode M R` with the responsibility disclaim (macOS), so the new
@@ -681,7 +697,7 @@ fn main() {
     if mode == "ticker" && (a.len() == 4 || a.len() == 5 || a.len() == 6) {
         // regroup-tstp sends TSTP to its whole group: only when its parent (sheepdog) leads that
         // group, never in a group it did not make (a test runner's: that would stop the runner)
-        if a.get(4).map(String::as_str) == Some("regroup-tstp") && unsafe { libc::getpgrp() != libc::getppid() } {
+        if a.get(4).map(String::as_str) == Some("regroup-tstp") && !(unsafe { libc::getpgrp() == libc::getppid() } && parent_is_sheepdog()) {
             eprintln!("sd-fixture: regroup-tstp refused: the parent does not lead this process group");
             std::process::exit(5);
         }

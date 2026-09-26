@@ -314,10 +314,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => {
-                crate::release_job_control_signals(sig);
-                Some(relay_loop(sup, relay))
-            }
+            sup => Some(relay_loop(sup, relay)),
         }
     }
 }
@@ -372,7 +369,16 @@ fn relay_loop(sup: pid_t, relay: pid_t) -> i32 {
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
         loop {
             let mut st = 0;
-            if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
+            // mirror the supervisor's stop (it stopped the job and itself): the shell waits on
+            // the relay; the relay never stops on its own (its stop signals stay blocked). Seen
+            // at the next pass, within a tick.
+            // (one waitpid: WUNTRACED also reaps an exited supervisor, so a second call would
+            // find nothing and the relay would never see the exit)
+            if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
+                if libc::WIFSTOPPED(st) {
+                    crate::self_stop(libc::WSTOPSIG(st));
+                    continue;
+                }
                 if kq >= 0 {
                     libc::close(kq);
                 }

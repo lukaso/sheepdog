@@ -220,13 +220,21 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                 Err(125)
             }
             sup => {
-                crate::release_job_control_signals(sig);
+                // The relay keeps the stop signals blocked (it never stops on its own: a TSTP to
+                // it alone stops nothing) and mirrors the supervisor instead: when the supervisor
+                // has stopped the job and itself, the relay stops with the same signal, so the
+                // shell, which waits on the relay, sees the job stopped exactly then (S5 review).
+                // The supervisor's stop wakes it at once: SIGCHLD is on its signalfd.
                 // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
                 let fd = signal_fd(&set);
                 crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
                 loop {
                     let mut st = 0;
-                    if libc::waitpid(sup, &mut st, libc::WNOHANG) == sup {
+                    if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
+                        if libc::WIFSTOPPED(st) {
+                            crate::self_stop(libc::WSTOPSIG(st));
+                            continue;
+                        }
                         if fd >= 0 {
                             libc::close(fd);
                         }
