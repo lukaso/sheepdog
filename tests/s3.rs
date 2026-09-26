@@ -210,6 +210,8 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
         if pre_stopped {
             assert!(stopped, "a decoy stopped before sheepdog's STOP was resumed by the rollback");
             assert_eq!(conts, 0, "a decoy stopped before sheepdog's STOP got a CONT");
+            let frozen = format!("kill {} {}", decoy.pid, libc::SIGSTOP);
+            assert!(log.iter().any(|l| l == &frozen), "control: the pre-stopped decoy never reached the freeze: {log:?}");
         } else {
             let rolled = format!("rollback {}", decoy.pid);
             assert!(log.iter().any(|l| l == &rolled), "control: the rollback never considered the decoy: {log:?}");
@@ -222,28 +224,70 @@ fn s3_a_wrong_freeze_is_rolled_back_only_for_a_running_process() {
     }
 }
 
-/// PLAN.md §3.3 step 4: the rollback resumes only a process that fails the identity check; a
-/// job member sheepdog froze stays frozen until its KILL (a resumed member could fork). With
-/// `--grace 0` sheepdog sends a member no CONT at all.
+/// PLAN.md §3.3 step 4: the rollback resumes only a process that existed when our STOP was
+/// sent. A process that started later cannot have got it: the member got the STOP, died, and
+/// its pid went to a stranger that someone else stopped. Debug seam
+/// SHEEPDOG_TEST_FREEZE_STAMP_ZERO records the wrong freeze's STOP as sent before the decoy
+/// started (the seam's own STOP stands in for the other actor's): the decoy must stay stopped.
 #[test]
-fn s3_frozen_members_are_not_rolled_back() {
+fn s3_a_process_started_after_our_stop_is_not_rolled_back() {
+    let mut decoy = Decoy::start("late");
+    let siglog = log_path("late");
     let j = Job::new();
-    let siglog = log_path("members");
     let st = Command::new(sheepdog())
         .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
         .arg(&j.rec)
+        .env("SHEEPDOG_TEST_WRONG_FREEZE", decoy.pid.to_string())
+        .env("SHEEPDOG_TEST_FREEZE_STAMP_ZERO", "1")
         .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
     let log = signal_log(&siglog);
     let _ = std::fs::remove_file(&siglog);
     assert_eq!(st.code(), Some(0));
-    assert_eq!(j.recorded().len(), 1, "the escapee was not created");
-    assert!(log.iter().any(|l| l.ends_with(&format!(" {}", libc::SIGSTOP))), "control: nothing was frozen: {log:?}");
-    let rolled: Vec<&String> = log.iter().filter(|l| l.starts_with("rollback ")).collect();
-    assert!(rolled.is_empty(), "the rollback resumed frozen members: {rolled:?}");
+    if let Err(e) = decoy.not_killed() {
+        panic!("the decoy was killed: {e}");
+    }
+    let frozen = format!("kill {} {}", decoy.pid, libc::SIGSTOP);
+    assert!(log.iter().any(|l| l == &frozen), "control: the decoy never reached the freeze: {log:?}");
+    assert_eq!(state(decoy.pid), Some('T'), "a process that started after our STOP was resumed by the rollback: {log:?}");
+}
+
+/// PLAN.md §3.3 step 4: the rollback resumes only a process that fails the identity check; a
+/// job member sheepdog froze stays frozen until its KILL (a resumed member could fork). With
+/// `--grace 0` sheepdog sends a member no CONT at all. The rollback considers only STOPs sent by
+/// `kill` (macOS; Linux's fallback, forced here by SHEEPDOG_TEST_PIDFD_ENOSYS); on Linux's pidfd
+/// path the leg checks only that a pinned STOP is never recorded.
+#[test]
+fn s3_frozen_members_are_not_rolled_back() {
+    for &enosys in enosys_legs() {
+        let j = Job::new();
+        let siglog = log_path("members");
+        let mut c = Command::new(sheepdog());
+        c.args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
+            .arg(&j.rec)
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if enosys {
+            c.env("SHEEPDOG_TEST_PIDFD_ENOSYS", "1");
+        }
+        let st = c.status().unwrap();
+        let log = signal_log(&siglog);
+        let _ = std::fs::remove_file(&siglog);
+        let rec = j.recorded();
+        assert_eq!(st.code(), Some(0), "enosys={enosys}");
+        assert_eq!(rec.len(), 1, "enosys={enosys}: the escapee was not created");
+        let unpinned = cfg!(target_os = "macos") || enosys;
+        let path = if unpinned { "kill" } else { "pidfd" };
+        let stop = format!("{path} {} {}", rec[0].0, libc::SIGSTOP);
+        assert!(log.iter().any(|l| l == &stop), "enosys={enosys}: control: the escapee's STOP did not go by {path}: {log:?}");
+        let rolled: Vec<&String> = log.iter().filter(|l| l.starts_with("rollback ")).collect();
+        assert!(rolled.is_empty(), "enosys={enosys}: the rollback resumed frozen members: {rolled:?}");
+    }
 }
 
 /// Linux: pidfd_open works but pidfd_send_signal fails (a seccomp filter; debug seam
@@ -254,8 +298,9 @@ fn s3_frozen_members_are_not_rolled_back() {
 fn s3_a_failed_pidfd_send_falls_back() {
     let j = Job::new();
     let siglog = log_path("send");
+    // --grace 0: a TERM in the grace would end the escapee before any STOP or KILL is needed
     let st = Command::new(sheepdog())
-        .args(["run", "--", fixture(), "escape", &j.marker])
+        .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
         .arg(&j.rec)
         .env("SHEEPDOG_TEST_PIDFD_SEND_ENOSYS", "1")
         .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
@@ -268,6 +313,8 @@ fn s3_a_failed_pidfd_send_falls_back() {
     let rec = j.recorded();
     assert_eq!(rec.len(), 1, "the escapee was not created");
     assert!(log.iter().any(|l| l.starts_with("pidfd ")), "control: the pidfd path was not taken: {log:?}");
+    let fallback_kill = format!("kill {} {}", rec[0].0, libc::SIGKILL);
+    assert!(log.iter().any(|l| l == &fallback_kill), "the escapee's KILL did not go through the fallback: {log:?}");
     assert_eq!(st.code(), Some(0), "the kill did not end clean after a failed pidfd send: {log:?}");
     assert!(!sheepdog::ident::same(rec[0].0, rec[0].1), "the escapee survived");
 }

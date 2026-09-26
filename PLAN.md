@@ -194,7 +194,7 @@ A process is a member only with a **lineage fact**. Session, pgid and env tag ar
    - **macOS:** re-read the uniqueid.
    - Record which members were already stopped (state T), for each STOP delivered by `kill` (a pid reused between the check and the kill would have got it). A STOP delivered through a pidfd reached the member, so it has nothing to roll back.
 3. **Close:** recompute until stable; stop new members the same way.
-4. **Verify:** re-check identity. A process that fails the check gets SIGCONT only if it was not in state T before. **macOS limit (stated):** in a pid-reuse case, that T record describes the old process. The window is milliseconds and pids are sequential; this is accepted and named. A test seam injects the failure so that the cell can run.
+4. **Verify:** re-check identity. A process that fails the check gets SIGCONT only if it was not in state T before, it already existed when our STOP was sent (its start time is not later than that moment: a later process got its pid after the member died, and someone else stopped it), and it is stopped now. **macOS limit (stated):** in a pid-reuse case, that T record describes the old process. The window is milliseconds and pids are sequential; this is accepted and named. A test seam injects the failure so that the cell can run.
 5. **Kill:** SIGKILL all.
 6. **Repeat** 2–5 until two consecutive scans find zero members (Linux: and zero unreaped zombies whose ppid is the supervisor), **or until the kill deadline** (`--kill-deadline`, default 10 s). At the deadline: exit 125, and print each remaining pid with its state (D state, still exiting, uid changed by a setuid exec).
 
