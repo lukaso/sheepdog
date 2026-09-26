@@ -449,6 +449,7 @@ fn wait(pid: pid_t, watch_term: bool, relay: Option<pid_t>, track: &mut dyn FnMu
             // the relay's exit: ESRCH means it is already gone; any other failure falls back to
             // the parent-pid check on each tick
             if let Some(r) = relay {
+                crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_RELAY_REG_MS");
                 let mut ev: libc::kevent = zeroed();
                 ev.ident = r as usize;
                 ev.filter = libc::EVFILT_PROC;
@@ -548,36 +549,54 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             // pending in the root, a signal its caller never sent. That case keeps the race of
             // a root that exits before its identity is read (PLAN.md §3.2).
             let cont_blocked = unsafe { libc::sigismember(&sig.caller_mask, libc::SIGCONT) } == 1;
-            // Every signal that ends sheepdog is held from the spawn to the CONT: one that ended
-            // it in between would leave the root stopped for good. Held signals act after the
-            // CONT. The stop signals are not held: a ctrl-Z there stops sheepdog before the CONT,
-            // so the root stays stopped with its job, and the job's CONT resumes both.
+            // Every signal is held from the spawn until the root's identity is read, so nothing
+            // can end or stop sheepdog in between (a stop and the job's CONT would resume the
+            // root before sheepdog knows it). Then the stop signals are let through: a ctrl-Z stops
+            // sheepdog before the CONT, and the job's CONT resumes both. Signals that end sheepdog
+            // stay held until the CONT, so the root is never left stopped; they act after it.
             let mut held: libc::sigset_t = unsafe { zeroed() };
+            let mut stops: libc::sigset_t = unsafe { zeroed() };
             unsafe {
                 let mut all: libc::sigset_t = zeroed();
                 libc::sigfillset(&mut all);
-                for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
-                    libc::sigdelset(&mut all, s);
-                }
                 libc::sigprocmask(libc::SIG_BLOCK, &all, &mut held);
+                libc::sigemptyset(&mut stops);
+                for s in [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU] {
+                    if libc::sigismember(&held, s) != 1 {
+                        libc::sigaddset(&mut stops, s);
+                    }
+                }
             }
             let root = spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask);
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS");
             if let Some((u, _)) = uniq(root) {
                 tracker.borrow_mut().ever.insert(u);
             }
+            unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &stops, std::ptr::null_mut()) };
+            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS");
+            let mut ended = false;
             if !cont_blocked {
-                // the job may have ended while the root was suspended (its relay died, or TERM
-                // came): then it never runs (S2 review round 4)
+                // The job may have ended while the root was suspended (its relay died, or TERM
+                // came): the root is killed and never resumed by sheepdog. A stop and the job's
+                // CONT may still have run it meanwhile, so the kill below is the whole tree's
+                // (S2 review rounds 4-5).
                 if relay.is_some_and(relay_exited) || (sig.watch_term && crate::term_pending()) {
                     unsafe {
                         libc::kill(root, libc::SIGKILL);
                         let mut st = 0;
                         libc::waitpid(root, &mut st, 0);
                     }
-                    return crate::die_by_term(143);
+                    ended = true;
+                } else {
+                    if cfg!(debug_assertions) {
+                        // debug seam: mark the moment the root is resumed, so a test can prove
+                        // its action came before it
+                        if let Ok(f) = std::env::var("SHEEPDOG_TEST_CONT_FILE") {
+                            let _ = std::fs::File::create(f);
+                        }
+                    }
+                    unsafe { libc::kill(root, libc::SIGCONT) };
                 }
-                unsafe { libc::kill(root, libc::SIGCONT) };
             }
             unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
             let mut track = || {
@@ -585,7 +604,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 let found = members(&mut t);
                 t.refresh(found);
             };
-            let code = wait(root, sig.watch_term, relay, &mut track);
+            let code = if ended { None } else { wait(root, sig.watch_term, relay, &mut track) };
             if a.leave_strays && code.is_some() {
                 return code.unwrap_or(125);
             }
