@@ -820,18 +820,19 @@ fn the_hint_does_not_name_the_callers_group() {
 fn the_hint_reaches_a_harness_in_the_foreground() {
     let job = Job::new();
     let script = "trap : INT; \"$0\" run -- \"$@\"; exit 0";
-    let mut args = vec!["SHEEPDOG_TEST_HINT_MS=300".to_string(), "/bin/sh".into(), "-c".into(), script.into(), sheepdog().into()];
+    let mut args = vec!["SHEEPDOG_TEST_HINT_MS=1500".to_string(), "/bin/sh".into(), "-c".into(), script.into(), sheepdog().into()];
     args.extend(job.args());
     let mut pty = Pty::leader("/usr/bin/env", &args);
     let sh = pty.child.id();
     job.ready();
     let (sd, sd_id) = wait_for("sheepdog under the harness", Duration::from_secs(15), || supervisor_of(sh));
     assert!(send(sd, sd_id, libc::SIGINT));
-    // the hint is due at 300 ms: nothing before it (so the output is the hint, not some error)
+    // the hint is due at 1.5 s (far from the early read, so load cannot move it in): nothing
+    // before it, so the output is the hint and not some error
     std::thread::sleep(Duration::from_millis(100));
     pty.drain();
     let early = String::from_utf8_lossy(&pty.out).to_string();
-    std::thread::sleep(Duration::from_millis(800));
+    std::thread::sleep(Duration::from_millis(1900));
     pty.drain();
     let shown = String::from_utf8_lossy(&pty.out).to_string();
     send(sd, sd_id, libc::SIGTERM);
