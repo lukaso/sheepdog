@@ -795,11 +795,6 @@ impl Interrupts {
         }
     }
 
-    /// When the hint is due (so the loop can wake for it), if one is pending.
-    pub fn hint_due(&self) -> Option<Instant> {
-        self.hint.map(|(d, _)| d)
-    }
-
     /// Consume an INT or HUP that is still pending at the end (one that came during the kill):
     /// it counts too ("consumed at any point before it exits").
     pub fn drain_pending(&mut self, sig: &Signals) {

@@ -827,17 +827,24 @@ fn the_hint_reaches_a_harness_in_the_foreground() {
     job.ready();
     let (sd, sd_id) = wait_for("sheepdog under the harness", Duration::from_secs(15), || supervisor_of(sh));
     assert!(send(sd, sd_id, libc::SIGINT));
-    // the hint is due at 1.5 s (far from the early read, so load cannot move it in): nothing
-    // before it, so the output is the hint and not some error
+    // the hint is due at 1.5 s: wait for the first output (bounded) and note when it came, so
+    // the output is the hint (it came when the hint was due) and not some earlier error
+    let sent = Instant::now();
+    let mut first: Option<Duration> = None;
+    while sent.elapsed() < Duration::from_secs(10) {
+        pty.drain();
+        if !String::from_utf8_lossy(&pty.out).trim().is_empty() {
+            first = Some(sent.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     std::thread::sleep(Duration::from_millis(100));
-    pty.drain();
-    let early = String::from_utf8_lossy(&pty.out).to_string();
-    std::thread::sleep(Duration::from_millis(1900));
     pty.drain();
     let shown = String::from_utf8_lossy(&pty.out).to_string();
     send(sd, sd_id, libc::SIGTERM);
-    assert!(early.trim().is_empty(), "output before the hint was due: {early:?}");
-    assert!(!shown.trim().is_empty(), "no hint for a pid-only INT from a harness in the foreground");
+    assert!(first.is_some(), "no hint for a pid-only INT from a harness in the foreground");
+    assert!(first.is_some_and(|t| t >= Duration::from_millis(1000)), "output came {first:?} after the INT, before the hint was due: {shown:?}");
     assert!(targets(&shown).is_empty(), "the hint named a group (the harness's is {sh}): {shown:?}");
 }
 
