@@ -14,12 +14,13 @@
 use sheepdog::ident::{identity, same};
 use std::process::{Child, Command};
 
-/// A pid the test found, with its identity read now. None if it is already gone, or pid <= 1.
+/// A pid the test found, with its identity read now. None if it is already gone, pid <= 1, or
+/// its identity is 0 (on Linux the start tick of a boot-time kernel thread).
 pub fn found(pid: i32) -> Option<(i32, u64)> {
     if pid <= 1 {
         return None;
     }
-    identity(pid).map(|id| (pid, id))
+    identity(pid).filter(|&id| id != 0).map(|id| (pid, id))
 }
 
 /// The recorded process is still alive (and is still the one that was recorded).
@@ -30,7 +31,8 @@ pub fn alive(p: (i32, u64)) -> bool {
 /// Signal one recorded process, re-checked by identity. Never a group, never pid <= 1.
 pub fn send(pid: i32, id: u64, sig: i32) -> bool {
     assert!(pid > 1, "refusing to signal pid {pid}");
-    same(pid, id) && unsafe { libc::kill(pid, sig) } == 0
+    // identity 0 is "unknown" in the fixtures' records, never a process to signal
+    id != 0 && same(pid, id) && unsafe { libc::kill(pid, sig) } == 0
 }
 
 /// Signal a process group this test created: its leader must still be the recorded process.

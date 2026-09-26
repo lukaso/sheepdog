@@ -159,7 +159,7 @@ fn poll_fd(fd: i32, ms: i32) {
 /// told to end the job instead of running on unseen (review round 4, P3-2).
 /// Returns Err(code) in the relay (or on a failed fork), Ok(Some(relay pid)) in a supervisor
 /// that has a relay, Ok(None) without one.
-fn relay_if_needed(sig: &crate::Signals, int_to_root: bool) -> Result<Option<i32>, i32> {
+fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
     if !crate::has_children() {
         return Ok(None);
     }
@@ -225,12 +225,9 @@ fn relay_if_needed(sig: &crate::Signals, int_to_root: bool) -> Result<Option<i32
                             libc::SIGHUP if libc::getsid(0) == relay => {
                                 libc::kill(sup, libc::SIGHUP);
                             }
-                            // --forward-int-to-root opts in to double delivery, so a pid-only INT
-                            // to the relay reaches the root on this path too
-                            libc::SIGINT if int_to_root => {
-                                libc::kill(sup, libc::SIGINT);
-                            }
-                            _ => {} // SIGCHLD, INT, a HUP we are not the leader for
+                            // SIGCHLD, INT (never forwarded, also with --forward-int-to-root: a late
+                            // copy would reach the escapees twice), a HUP we are not the leader for
+                            _ => {}
                         }
                     }
                 }
@@ -240,7 +237,7 @@ fn relay_if_needed(sig: &crate::Signals, int_to_root: bool) -> Result<Option<i32
 }
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
-    let relay = match relay_if_needed(sig, a.forward_int_to_root) {
+    let relay = match relay_if_needed(sig) {
         Ok(r) => r,
         Err(code) => return code,
     };

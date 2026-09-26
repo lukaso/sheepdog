@@ -707,6 +707,9 @@ pub struct Interrupts {
     got_int: bool,
     got_hup: bool,
     leader: bool,
+    /// sheepdog's process group is its own: sheepdog or its relay leads it (a shell job, a
+    /// terminal). Otherwise it is the caller's group (a harness that did not make a new one).
+    own_group: bool,
     int_to_root: bool,
     quiet: bool,
     /// the D9 hint: when it is due, and for which signal
@@ -720,12 +723,14 @@ impl Interrupts {
     pub fn new(a: &Args, relay: Option<i32>) -> Self {
         let sid = unsafe { libc::getsid(0) };
         let leader = sid == unsafe { libc::getpid() } || relay.is_some_and(|r| sid == r);
-        Interrupts { got_int: false, got_hup: false, leader, int_to_root: a.forward_int_to_root, quiet: a.quiet, hint: None, hinted: false }
+        let pg = unsafe { libc::getpgrp() };
+        let own_group = pg == unsafe { libc::getpid() } || relay == Some(pg);
+        Interrupts { got_int: false, got_hup: false, leader, own_group, int_to_root: a.forward_int_to_root, quiet: a.quiet, hint: None, hinted: false }
     }
 
     /// No forwarding and no hint (the root-disclaim mode).
     pub fn none() -> Self {
-        Interrupts { got_int: false, got_hup: false, leader: false, int_to_root: false, quiet: true, hint: None, hinted: true }
+        Interrupts { got_int: false, got_hup: false, leader: false, own_group: false, int_to_root: false, quiet: true, hint: None, hinted: true }
     }
 
     /// Record a consumed INT or HUP (it decides death by signal at the end).
@@ -763,21 +768,24 @@ impl Interrupts {
                 sent.insert((p, id));
             }
         }
-        if !root_got && !self.hinted && self.hint.is_none() && !in_foreground() {
+        // In its own group and in the terminal's foreground, the INT most likely came from the
+        // terminal and reached the root too: no hint. In the caller's group (a harness in a
+        // terminal) the foreground says nothing about who sent it (S4 review round 2).
+        if !root_got && !self.hinted && self.hint.is_none() && !(self.own_group && in_foreground()) {
             let ms = seam_ms("SHEEPDOG_TEST_HINT_MS").unwrap_or(3000);
             self.hint = Some((Instant::now() + Duration::from_millis(ms), sig));
         }
     }
 
-    /// The D9 hint: once per job, when it is due. Only called while the job runs (the root is
-    /// still running: its exit ends the loop first).
+    /// The D9 hint: once per job, when it is due. Only called while the job runs: the root was
+    /// running at this pass's check (it can exit in the instant after; stated, harmless).
     pub fn tick(&mut self) {
         if let Some((due, sig)) = self.hint {
             if Instant::now() >= due {
                 self.hint = None;
                 self.hinted = true;
                 if !self.quiet {
-                    say!("{}", hint_text(sig, unsafe { libc::getpgrp() }));
+                    say!("{}", hint_text(sig, self.own_group.then(|| unsafe { libc::getpgrp() })));
                 }
             }
         }
@@ -801,12 +809,14 @@ impl Interrupts {
 }
 
 /// The D9 hint for `sig`, naming the process group `pg`.
-/// A group of 1 or 0 is never named: `kill -INT -1` is the broadcast (every process the reader
-/// may signal) and `-0` the reader's own group. That happens as PID 1 in a container.
-fn hint_text(sig: c_int, pg: i32) -> String {
+/// `own` is sheepdog's own process group, or None when the group is the caller's (signalling it
+/// would reach the caller too). A group of 1 or 0 is never named either: `kill -INT -1` is the
+/// broadcast (every process the reader may signal) and `-0` the reader's own group; that
+/// happens as PID 1 in a container.
+fn hint_text(sig: c_int, own: Option<i32>) -> String {
     let (name, flag) = if sig == libc::SIGINT { ("SIGINT", "INT") } else { ("SIGHUP", "HUP") };
     let head = format!("sheepdog: got {name}; the command is still running. A signal sent only to sheepdog's pid does not reach it: send TERM to end the job");
-    if pg > 1 {
+    if let Some(pg) = own.filter(|&pg| pg > 1) {
         format!("{head}, or signal the process group (kill -{flag} -{pg}).")
     } else {
         format!("{head}.")
@@ -921,24 +931,21 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
 mod tests {
     use super::*;
 
-    /// Review round 3, F2: with no authoritative check, the deadline must not call the tree
-    /// clean after ONE empty scan. The scan misses a live member in the pass that reaches the
-    /// deadline and in the first deadline scan, then sees it in the second: the result must be
-    /// Err. (Calling it clean after one empty scan returns Ok here.)
-    /// S4 review (A-P1-1): the hint never names a broadcast. As PID 1 in a container the
-    /// process group is 1, and `kill -INT -1` signals every process the reader may signal; a
-    /// group of 0 means the reader's own group. A real group (control) is named.
+    /// S4 review (A-P1-1, round 2 A-P2-2): the hint names only sheepdog's own group, and
+    /// never a group of 1 or 0. As PID 1 in a container the group is 1, and `kill -INT -1`
+    /// signals every process the reader may signal; 0 is the reader's own group; a caller's
+    /// group (None) would reach the caller. A real own group (control) is named.
     #[test]
-    fn the_hint_never_names_a_broadcast_group() {
-        let targets = |pg: i32| -> Vec<i64> {
-            hint_text(libc::SIGINT, pg)
+    fn the_hint_names_only_a_safe_own_group() {
+        let targets = |own: Option<i32>| -> Vec<i64> {
+            hint_text(libc::SIGINT, own)
                 .split(|c: char| c.is_whitespace() || "(),.".contains(c))
                 .filter_map(|w| w.strip_prefix('-')?.parse::<i64>().ok())
                 .collect()
         };
-        assert!(targets(4242).contains(&4242), "control: the hint names a real group");
-        for pg in [0, 1] {
-            assert!(targets(pg).iter().all(|&n| n > 1), "pgid {pg}: the hint named a broadcast target: {:?}", targets(pg));
+        assert_eq!(targets(Some(4242)), vec![4242], "control: the hint names a real own group");
+        for own in [Some(0), Some(1), None] {
+            assert!(targets(own).is_empty(), "{own:?}: the hint named a target: {:?}", targets(own));
         }
     }
 
@@ -953,6 +960,10 @@ mod tests {
         }
     }
 
+    /// Review round 3, F2: with no authoritative check, the deadline must not call the tree
+    /// clean after ONE empty scan. The scan misses a live member in the pass that reaches the
+    /// deadline and in the first deadline scan, then sees it in the second: the result must be
+    /// Err. (Calling it clean after one empty scan returns Ok here.)
     #[test]
     fn the_deadline_needs_two_empty_scans_without_an_authoritative_check() {
         let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();

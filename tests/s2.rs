@@ -346,10 +346,15 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
 fn s2_a_callers_earlier_processes_survive() {
     for disclaimed in [false, true] {
         for (shape, bg) in [("child", "/bin/sleep 30 & echo $! >"), ("orphan", "(/bin/sleep 30 & echo $! >")] {
+            // the identity is read while the process certainly lives: the script waits for the go
+            // file before it execs sheepdog (read after sheepdog ran, a killed process's pid could
+            // be reused)
             let pidf = std::env::temp_dir().join(format!("sd-s2-bg-{}-{disclaimed}-{shape}", std::process::id()));
+            let go = std::env::temp_dir().join(format!("sd-s2-go-{}-{disclaimed}-{shape}", std::process::id()));
             let _ = std::fs::remove_file(&pidf);
+            let _ = std::fs::remove_file(&go);
             let close = if shape == "orphan" { ")" } else { "" };
-            let script = format!("{bg} '{}'{close}; exec \"{}\" run -- true", pidf.display(), sheepdog());
+            let script = format!("{bg} '{}'{close}; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; exec \"{}\" run -- true", pidf.display(), go.display(), sheepdog());
             let mut c = if disclaimed {
                 let mut c = Command::new(fixture());
                 c.args(["dspawn", "wait", "/bin/sh", "-c", &script]);
@@ -359,11 +364,19 @@ fn s2_a_callers_earlier_processes_survive() {
                 c.args(["-c", &script]);
                 c
             };
-            let st = c.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+            let mut child = c.stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            let t = Instant::now();
+            while !std::fs::read_to_string(&pidf).is_ok_and(|s| s.ends_with('\n')) {
+                assert!(t.elapsed() < Duration::from_secs(10), "disclaimed caller={disclaimed}, {shape}: no pid file");
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
             let _ = std::fs::remove_file(&pidf);
-            // its identity, read when the pid is found: None if it is already gone
             let earlier = common::found(pid);
+            assert!(earlier.is_some(), "disclaimed caller={disclaimed}, {shape}: control: the identity could not be read while it lived");
+            std::fs::write(&go, "").unwrap();
+            let st = child.wait().unwrap();
+            let _ = std::fs::remove_file(&go);
             let t = Instant::now();
             let mut alive = true;
             while t.elapsed() < Duration::from_millis(500) {

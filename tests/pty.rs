@@ -25,16 +25,12 @@ fn fixture() -> &'static str {
     env!("CARGO_BIN_EXE_sd-fixture")
 }
 
-/// Signal one recorded process, re-checked by identity. Never a group, never pid <= 1.
-fn send(pid: i32, id: u64, sig: i32) -> bool {
-    assert!(pid > 1, "refusing to signal pid {pid}");
-    same(pid, id) && unsafe { libc::kill(pid, sig) } == 0
-}
+mod common;
+use common::{send, send_group};
 
-/// Signal a process group this test created: its leader must still be the recorded process.
-fn send_group(pgid: i32, leader_id: u64, sig: i32) -> bool {
-    assert!(pgid > 1, "refusing to signal group {pgid}");
-    same(pgid, leader_id) && unsafe { libc::getpgid(pgid) } == pgid && unsafe { libc::kill(-pgid, sig) } == 0
+/// The negative numbers in a hint (the `kill -INT -<pgid>` targets), as values.
+fn targets(text: &str) -> Vec<i64> {
+    text.split(|c: char| c.is_whitespace() || "(),.".contains(c)).filter_map(|w| w.strip_prefix('-')?.parse::<i64>().ok()).collect()
 }
 
 fn wait_for<T>(what: &str, limit: Duration, mut f: impl FnMut() -> Option<T>) -> T {
@@ -71,12 +67,13 @@ fn sleeps(marker: &str) -> Vec<i32> {
         .collect()
 }
 
-/// Is there a sheepdog child of `relay` (the relay path was taken)?
-fn has_supervisor(relay: u32) -> bool {
-    let out = Command::new("ps").args(["-Ao", "ppid=,args="]).output().expect("ps");
-    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+/// The sheepdog child of `relay` (the relay path was taken), with its identity.
+fn supervisor_of(relay: u32) -> Option<(i32, u64)> {
+    let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().expect("ps");
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
         let w: Vec<&str> = l.split_whitespace().collect();
-        w.len() >= 2 && w[0] == relay.to_string() && w[1].ends_with("sheepdog")
+        let p: i32 = w.first()?.parse().ok()?;
+        (w.len() >= 3 && w[1] == relay.to_string() && w[2].ends_with("sheepdog")).then(|| Some((p, identity(p)?))).flatten()
     })
 }
 
@@ -288,9 +285,11 @@ impl Pty {
     /// The job's leader (and group id), as the shell reported it; recorded with its identity.
     fn started(&mut self) -> (i32, u64) {
         let l = self.wait_line("started", Duration::from_secs(15), |l| l.starts_with("started ")).expect("the shell never started the job");
-        let pid: i32 = l["started ".len()..].parse().expect("started <pid>");
-        assert!(pid > 1, "the shell reported pid {pid}");
-        let id = identity(pid).expect("the job leader's identity");
+        // the shell reads the identity before it can reap the job, so it is the job's
+        let mut w = l["started ".len()..].split_whitespace();
+        let pid: i32 = w.next().and_then(|p| p.parse().ok()).expect("started <pid> <identity>");
+        let id: u64 = w.next().and_then(|p| p.parse().ok()).expect("started <pid> <identity>");
+        assert!(pid > 1 && id != 0, "the shell reported pid {pid}, identity {id}");
         self.job = Some((pid, id));
         (pid, id)
     }
@@ -457,9 +456,13 @@ fn cell22c_group_signals_without_a_terminal_reach_each_member_once() {
         });
     }
     let mut outer = c.spawn().unwrap();
-    let pg: i32 = wait_for("the pid file", Duration::from_secs(15), || std::fs::read_to_string(&pidfile).ok()?.trim().parse().ok());
+    // "<pid> <identity>": nosession reads the identity before it can reap sheepdog
+    let (pg, pg_id): (i32, u64) = wait_for("the pid file", Duration::from_secs(15), || {
+        let s = std::fs::read_to_string(&pidfile).ok()?;
+        let mut w = s.split_whitespace();
+        Some((w.next()?.parse().ok()?, w.next()?.parse().ok()?))
+    });
     let _ = std::fs::remove_file(&pidfile);
-    let pg_id = identity(pg).expect("sheepdog's identity");
     let ((esc, _), (root, _)) = job.ready();
     assert!(send_group(pg, pg_id, libc::SIGINT));
     let (ri, ei) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
@@ -529,7 +532,7 @@ fn a_relayed_ctrl_c_reaches_the_escapee_once() {
     let mut pty = Pty::shell(&[], &cmd);
     let (relay, _) = pty.started();
     let ((esc, _), (root, _)) = job.ready();
-    let relayed = has_supervisor(relay as u32);
+    let relayed = supervisor_of(relay as u32).is_some();
     pty.write(b"\x03");
     let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
     assert!(relayed, "control: this is not the relay path (no sheepdog child of the relay)");
@@ -578,45 +581,49 @@ fn an_escapee_newer_than_the_last_scan_gets_the_int() {
 }
 
 /// PLAN.md §3.1: the relay never forwards INT, so an INT sent only to the relay's pid reaches
-/// no member (the stated pid-only limit, stricter on this path). A relay that forwarded it
-/// would double every terminal INT, which a ctrl-C cell cannot always see: the two INTs can
-/// merge into one pending signal at the supervisor.
+/// no member (the stated pid-only limit, stricter on this path), also with
+/// `--forward-int-to-root` (a stated limit: a relay that forwarded it could deliver a ctrl-C
+/// twice to an escapee, S4 review round 2). A relay that forwarded INT would double every
+/// terminal INT, which a ctrl-C cell cannot always see: the two INTs can merge into one pending
+/// signal at the supervisor.
 #[test]
 fn an_int_to_the_relay_pid_reaches_no_member() {
-    let job = Job::new();
-    let bg = new_marker();
-    let mut c = Command::new(fixture());
-    c.args(["bg-then-exec", &bg]).args(run_args(&[], &job.args())).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        c.pre_exec(|| {
-            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
-                libc::signal(sig, libc::SIG_DFL);
-            }
-            Ok(())
-        });
-    }
-    c.process_group(0);
-    let mut relay = c.spawn().unwrap();
-    let rid = identity(relay.id() as i32).expect("the relay's identity");
-    let ((esc, _), (root, _)) = job.ready();
-    let has_supervisor = has_supervisor(relay.id());
-    assert!(send(relay.id() as i32, rid, libc::SIGINT));
-    std::thread::sleep(Duration::from_millis(700));
-    let (r, e) = (job.counts(root), job.counts(esc));
-    let relay_alive = relay.try_wait().unwrap().is_none();
-    send(relay.id() as i32, rid, libc::SIGTERM);
-    if wait_bounded(&mut relay, Duration::from_secs(15)).is_none() {
-        send(relay.id() as i32, rid, libc::SIGKILL);
-        let _ = relay.wait();
-    }
-    for p in sleeps(&bg) {
-        if let Some(id) = identity(p) {
-            send(p, id, libc::SIGKILL);
+    for flags in [&[][..], &["--forward-int-to-root"][..]] {
+        let job = Job::new();
+        let bg = new_marker();
+        let mut c = Command::new(fixture());
+        c.args(["bg-then-exec", &bg]).args(run_args(flags, &job.args())).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            c.pre_exec(|| {
+                for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
+                    libc::signal(sig, libc::SIG_DFL);
+                }
+                Ok(())
+            });
         }
+        c.process_group(0);
+        let mut relay = c.spawn().unwrap();
+        let rid = identity(relay.id() as i32).expect("the relay's identity");
+        let ((esc, _), (root, _)) = job.ready();
+        let has_supervisor = supervisor_of(relay.id()).is_some();
+        assert!(send(relay.id() as i32, rid, libc::SIGINT));
+        std::thread::sleep(Duration::from_millis(700));
+        let (r, e) = (job.counts(root), job.counts(esc));
+        let relay_alive = relay.try_wait().unwrap().is_none();
+        send(relay.id() as i32, rid, libc::SIGTERM);
+        if wait_bounded(&mut relay, Duration::from_secs(15)).is_none() {
+            send(relay.id() as i32, rid, libc::SIGKILL);
+            let _ = relay.wait();
+        }
+        for p in sleeps(&bg) {
+            if let Some(id) = identity(p) {
+                send(p, id, libc::SIGKILL);
+            }
+        }
+        assert!(has_supervisor, "{flags:?}: control: this is not the relay path (no sheepdog child of the relay)");
+        assert!(relay_alive, "{flags:?}: an INT ended the relay");
+        assert_eq!((r.0, e.0), (0, 0), "{flags:?}: an INT to the relay's pid reached (root, escapee)");
     }
-    assert!(has_supervisor, "control: this is not the relay path (no sheepdog child of the relay)");
-    assert!(relay_alive, "an INT ended the relay");
-    assert_eq!((r.0, e.0), (0, 0), "an INT to the relay's pid reached (root, escapee)");
 }
 
 /// PHASE1.md §1.3: an INT counts "at any point before sheepdog exits", also one that comes
@@ -669,7 +676,7 @@ fn the_pid_only_hint_is_printed_once_with_the_group() {
     let err = end(c, id, &job);
     let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 1, "expected exactly one hint line, got: {err:?}");
-    assert!(lines[0].contains(&format!("-{pg}")), "the hint must name the process group {pg}: {err:?}");
+    assert_eq!(targets(lines[0]), vec![pg as i64], "the hint must name the process group {pg}: {err:?}");
 }
 
 /// S4: `--quiet` suppresses the hint.
@@ -754,10 +761,12 @@ fn forward_int_to_root_does_not_forward_hup_to_the_root() {
     assert_eq!(err.lines().filter(|l| !l.trim().is_empty()).count(), 1, "the hint must be printed once: {err:?}");
 }
 
-/// S4 review (B-P2-4): the hint names sheepdog's process GROUP, which differs from its pid when
-/// sheepdog is not the group leader (here a shell leads the group and runs sheepdog as a child).
+/// S4 review round 2 (A-P2-2): the hint names a process group only when it is sheepdog's own
+/// (sheepdog or its relay leads it). Here a shell leads the group and runs sheepdog as a child:
+/// that group is the caller's, and signalling it would reach the caller too. The hint is
+/// printed once and names no group.
 #[test]
-fn the_hint_names_the_group_not_the_pid() {
+fn the_hint_does_not_name_the_callers_group() {
     let job = Job::new();
     let mut c = Command::new("/bin/sh");
     let script = "\"$0\" run -- \"$@\"; exit 0";
@@ -773,7 +782,7 @@ fn the_hint_names_the_group_not_the_pid() {
     c.process_group(0);
     let mut sh = c.spawn().unwrap();
     let pg = sh.id() as i32;
-    job.ready();
+    let (_, (root, root_id)) = job.ready();
     let sd = wait_for("sheepdog under the shell", Duration::from_secs(15), || {
         let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().ok()?;
         String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
@@ -784,7 +793,9 @@ fn the_hint_names_the_group_not_the_pid() {
     let sd_id = identity(sd).expect("sheepdog's identity");
     assert!(send(sd, sd_id, libc::SIGINT));
     std::thread::sleep(Duration::from_millis(900));
-    send(sd, sd_id, libc::SIGTERM);
+    // end the job by the root's exit, not by a signal to sheepdog: the shell would report a
+    // child that died of a signal on the same stderr
+    send(root, root_id, libc::SIGKILL);
     let st = wait_bounded(&mut sh, Duration::from_secs(15));
     job.kill();
     if st.is_none() {
@@ -797,17 +808,60 @@ fn the_hint_names_the_group_not_the_pid() {
         let _ = e.read_to_string(&mut err);
     }
     assert_ne!(sd, pg, "control: sheepdog must not lead its group here");
-    assert!(err.contains(&format!("-{pg}")), "the hint must name the group {pg}, not the pid {sd}: {err:?}");
+    assert_eq!(err.lines().filter(|l| !l.trim().is_empty()).count(), 1, "the hint must be printed once: {err:?}");
+    assert!(targets(&err).is_empty(), "the hint named a group (the caller's is {pg}): {err:?}");
 }
 
-/// S4 review (A-P3-1): with `--forward-int-to-root` the relay forwards a pid-only INT (the flag
-/// opts in to double delivery), so the root gets it on the relay path too.
+/// S4 review round 2 (A-P2-1): D9's own case, a harness in a terminal (a shell that handles INT
+/// and leads the terminal's foreground group) runs sheepdog as a child and sends INT to its pid
+/// only. sheepdog shares the foreground group, but it is not its own group, so the hint is
+/// printed (on the terminal), and it names no group (the harness's).
 #[test]
-fn forward_int_to_root_works_through_the_relay() {
+fn the_hint_reaches_a_harness_in_the_foreground() {
+    let job = Job::new();
+    let script = "trap : INT; \"$0\" run -- \"$@\"; exit 0";
+    let mut args = vec!["SHEEPDOG_TEST_HINT_MS=300".to_string(), "/bin/sh".into(), "-c".into(), script.into(), sheepdog().into()];
+    args.extend(job.args());
+    let mut pty = Pty::leader("/usr/bin/env", &args);
+    let sh = pty.child.id();
+    job.ready();
+    let (sd, sd_id) = wait_for("sheepdog under the harness", Duration::from_secs(15), || supervisor_of(sh));
+    assert!(send(sd, sd_id, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(900));
+    pty.drain();
+    let shown = String::from_utf8_lossy(&pty.out).to_string();
+    send(sd, sd_id, libc::SIGTERM);
+    assert!(!shown.trim().is_empty(), "no hint for a pid-only INT from a harness in the foreground");
+    assert!(targets(&shown).is_empty(), "the hint named a group (the harness's is {sh}): {shown:?}");
+}
+
+/// S4 review round 2 (B-P2-1): the other side of the foreground rule. A background job in a
+/// terminal (its own group, not the foreground one) that gets a pid-only INT prints the hint on
+/// the terminal, naming its group.
+#[test]
+fn the_hint_is_printed_for_a_background_job() {
+    let job = Job::new();
+    let mut cmd = vec!["/usr/bin/env".to_string(), "SHEEPDOG_TEST_HINT_MS=300".into()];
+    cmd.extend(run_args(&[], &job.args()));
+    let mut pty = Pty::shell(&["bg"], &cmd);
+    let (sd, sd_id) = pty.started();
+    job.ready();
+    assert!(send(sd, sd_id, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(900));
+    pty.drain();
+    let shown = String::from_utf8_lossy(&pty.out).to_string();
+    assert_eq!(targets(&shown), vec![sd as i64], "a background job must print the hint naming its group {sd}: {shown:?}");
+}
+
+/// S4 review round 2: on the relay path the relay leads the group, so the group is sheepdog's
+/// own: a pid-only INT to the supervisor prints a hint that names the relay's group (which is
+/// not the supervisor's pid).
+#[test]
+fn the_hint_names_the_relays_group() {
     let job = Job::new();
     let bg = new_marker();
     let mut c = Command::new(fixture());
-    c.args(["bg-then-exec", &bg]).args(run_args(&["--forward-int-to-root", "--quiet"], &job.args())).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c.args(["bg-then-exec", &bg]).args(run_args(&[], &job.args())).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
@@ -819,22 +873,29 @@ fn forward_int_to_root_works_through_the_relay() {
     c.process_group(0);
     let mut relay = c.spawn().unwrap();
     let rid = identity(relay.id() as i32).expect("the relay's identity");
-    let ((esc, _), (root, _)) = job.ready();
-    let relayed = has_supervisor(relay.id());
-    assert!(send(relay.id() as i32, rid, libc::SIGINT));
-    let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
+    job.ready();
+    let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+    assert!(send(sup, sup_id, libc::SIGINT));
+    std::thread::sleep(Duration::from_millis(900));
     send(relay.id() as i32, rid, libc::SIGTERM);
     if wait_bounded(&mut relay, Duration::from_secs(15)).is_none() {
         send(relay.id() as i32, rid, libc::SIGKILL);
         let _ = relay.wait();
     }
+    job.kill();
     for p in sleeps(&bg) {
         if let Some(id) = identity(p) {
             send(p, id, libc::SIGKILL);
         }
     }
-    assert!(relayed, "control: this is not the relay path");
-    assert_eq!((r.0, e.0), (1, 1), "a pid-only INT to the relay with --forward-int-to-root: (root, escapee)");
+    let mut err = String::new();
+    if let Some(mut e) = relay.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut err);
+    }
+    let pg = relay.id();
+    assert_ne!(sup as u32, pg, "control: the supervisor does not lead its group here");
+    assert_eq!(targets(&err), vec![pg as i64], "the hint must name the relay's group {pg} (not the supervisor {sup}): {err:?}");
 }
 
 // ---- death by INT (PHASE1.md §1.3) ---------------------------------------------------------

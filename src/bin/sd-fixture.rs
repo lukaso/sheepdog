@@ -42,13 +42,14 @@
 //! - `shell REPORT [bg] [null-stdin] PROG ARGS...`: the pty harness's job-control shell (PHASE1.md
 //!   §2). Run as a session leader with the pty as its controlling terminal. It starts PROG in a
 //!   new process group, makes that group the foreground (unless `bg`), and waits with
-//!   WUNTRACED. It appends `started <pgid>`, `stopped <sig>`, `exited <code>` or
+//!   WUNTRACED. It appends `started <pgid> <identity>`, `stopped <sig>`, `exited <code>` or
 //!   `signaled <sig>` to REPORT. After a stop it waits for `REPORT.fg` to exist, then gives
 //!   the terminal back to the job, continues it (`fg`) and appends `continued`. A HUP (the terminal closed) is
 //!   sent on to the job's group, as bash does, and logged as `hup`.
 //! - `nosession PIDFILE PROG ARGS...`: start PROG with no controlling terminal and not as a
 //!   session leader (as liveapp and CI run it): setsid, then PROG in a new process group of
-//!   that session. PROG's pid (= its pgid) goes to PIDFILE; exits as PROG did.
+//!   that session. `<pid> <identity>` of PROG (its pid is its pgid) goes to PIDFILE; exits as
+//!   PROG did.
 //! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
 //!   READY once the handler is installed; else waits.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
@@ -270,7 +271,8 @@ fn shell(report: &str, bg: bool, null_stdin: bool, prog: &[String]) -> ! {
         if !bg {
             libc::tcsetpgrp(0, child);
         }
-        append(report, &format!("started {child}"));
+        // the identity is read before this shell can reap the child, so it is the child's
+        append(report, &format!("started {child} {}", identity(child).unwrap_or(0)));
         let fg = format!("{report}.fg");
         loop {
             // poll, so a HUP that lands between two waits is seen within 5 ms (a blocking wait
@@ -612,7 +614,8 @@ fn main() {
                 eprintln!("sd-fixture: spawn failed: {e}");
                 std::process::exit(127)
             });
-            let _ = std::fs::write(&a[2], format!("{}\n", c.id()));
+            // "<pid> <identity>", read before this process can reap it
+            let _ = std::fs::write(&a[2], format!("{} {}\n", c.id(), identity(c.id() as i32).unwrap_or(0)));
             let st = c.wait().map(|s| std::os::unix::process::ExitStatusExt::into_raw(s)).unwrap_or(0);
             if libc::WIFSIGNALED(st) {
                 let sig = libc::WTERMSIG(st);

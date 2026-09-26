@@ -255,14 +255,22 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
 #[test]
 fn a_background_job_started_before_sheepdog_is_not_killed() {
     // the job's pid comes from `$!`, so the check does not depend on the job having exec'd yet
+    // the job's identity is read while it is certainly alive: the script waits for the go file
+    // before it execs sheepdog (read after sheepdog ran, a killed job's pid could be reused)
     let pidf = std::env::temp_dir().join(format!("sd-bg-{}", std::process::id()));
+    let go = std::env::temp_dir().join(format!("sd-bg-go-{}", std::process::id()));
     let _ = std::fs::remove_file(&pidf);
-    let script = format!("/bin/sleep 30 & echo $! > '{}'; exec \"$0\" run -- true", pidf.display());
-    let st = Command::new("sh").args(["-c", &script, sheepdog()]).status().unwrap();
+    let _ = std::fs::remove_file(&go);
+    let script = format!("/bin/sleep 30 & echo $! > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.01; done; exec \"$0\" run -- true", pidf.display(), go.display());
+    let mut c = Command::new("sh").args(["-c", &script, sheepdog()]).spawn().unwrap();
+    wait_until("the background job's pid", || std::fs::read_to_string(&pidf).is_ok_and(|s| s.ends_with('\n')));
     let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
     let _ = std::fs::remove_file(&pidf);
-    // its identity, read when the pid is found: None if it is already gone
     let job = found(pid);
+    assert!(job.is_some(), "control: the background job's identity could not be read while it lived");
+    std::fs::write(&go, "").unwrap();
+    let st = c.wait().unwrap();
+    let _ = std::fs::remove_file(&go);
     // sheepdog has exited, so a job it killed is reaped by init promptly: wait for that, bounded
     let t = Instant::now();
     let mut alive = true;

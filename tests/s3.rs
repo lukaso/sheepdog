@@ -335,3 +335,22 @@ fn s3_the_test_door_refuses_a_stale_identity() {
     assert!(!send(me, id.wrapping_add(1), 0), "a live pid with another identity was signalled");
     assert!(std::panic::catch_unwind(|| send(1, id, 0)).is_err(), "pid 1 was not refused");
 }
+
+/// The other two doors (signal 0 only): a group signal needs the recorded leader. The child door
+/// is checked only while the child lives: after the reap its pid no longer exists, so even an
+/// unchecked kill fails (ESRCH), and only a reused pid could show the difference.
+#[test]
+fn s3_the_group_and_child_doors_refuse_stale_targets() {
+    use std::os::unix::process::CommandExt;
+    let mut c = Command::new("/bin/sleep").arg("29.4242").process_group(0).spawn().unwrap();
+    let pg = c.id() as i32;
+    let id = sheepdog::ident::identity(pg).expect("the leader's identity");
+    let right = common::send_group(pg, id, 0);
+    let wrong = common::send_group(pg, id.wrapping_add(1), 0);
+    let live = common::send_child(&mut c, 0);
+    let _ = c.kill();
+    let _ = c.wait();
+    assert!(right, "control: the recorded leader's group is accepted");
+    assert!(!wrong, "a group whose leader has another identity was signalled");
+    assert!(live, "control: a live child is accepted");
+}
