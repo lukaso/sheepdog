@@ -68,6 +68,8 @@
 //! - `fork-on-term M R`: S6 (macOS `puniq`). This process forks C and waits; C waits, and on TERM
 //!   forks G (a new session, TERM ignored, recorded; it keeps this image and waits, 60 s at most)
 //!   and exits at once.
+//! - `linger-on M R GO`: S6. Waits for the file GO, then forks C (a new session); C forks G
+//!   (`/bin/sleep M`, recorded), lives 300 ms and exits. This process then waits (60 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -963,6 +965,36 @@ fn main() {
                         let mut st = 0;
                         libc::waitpid(c, &mut st, 0);
                     }
+                }
+            }
+            ("linger-on", 5) => {
+                // wait (30 s at most) for the file GO, then fork C: a new session, C forks G
+                // (recorded, `/bin/sleep M`), lives 300 ms and exits; this process then waits
+                record(&a[3], libc::getpid());
+                libc::alarm(60);
+                let mut n = 0;
+                while !std::path::Path::new(&a[4]).exists() && n < 3000 {
+                    libc::usleep(10_000);
+                    n += 1;
+                }
+                match libc::fork() {
+                    0 => {
+                        libc::setsid();
+                        if libc::fork() == 0 {
+                            record(&a[3], libc::getpid());
+                            exec_sleep(&CString::new(a[2].as_str()).unwrap());
+                        }
+                        libc::usleep(300_000);
+                        libc::_exit(0);
+                    }
+                    -1 => std::process::exit(1),
+                    c => {
+                        let mut st = 0;
+                        libc::waitpid(c, &mut st, 0);
+                    }
+                }
+                loop {
+                    libc::pause();
                 }
             }
             ("escape-nomarker", 3) => {

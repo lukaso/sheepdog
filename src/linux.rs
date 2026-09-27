@@ -39,15 +39,31 @@ fn group_pids(pg: i32) -> Vec<i32> {
     v
 }
 
-/// Every live (not zombie) process, for `sheepdog kill` (S6).
+/// `sheepdog kill`: an inner supervisor adopts its escapees (subreaper), so they are its descendants and `kill` proves them.
+pub const ADOPTS_ESCAPEES: bool = true;
+
+/// Every live (not zombie) process, for `sheepdog kill` (S6). The parent, state and start time
+/// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
+/// were reused in between); the uid is the real uid from `/proc/<pid>/status` (the directory's
+/// owner is root for a non-dumpable process of ours).
 pub fn procs() -> Vec<crate::kill::Proc> {
     let mut v = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
         for e in dir.flatten() {
             let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
-            let Ok(uid) = e.metadata().map(|m| m.uid()) else { continue };
-            let (Some((ppid, st)), Some(id)) = (stat(pid), identity(pid)) else { continue };
-            if st != 'Z' {
+            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            let Some(rest) = s.rfind(')').and_then(|i| s.get(i + 2..)) else { continue };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            // after "comm)": state (field 3), ppid (4), ..., start time (22)
+            let (Some(st), Some(ppid), Some(id)) = (f.first(), f.get(1).and_then(|x| x.parse().ok()), f.get(22 - 3).and_then(|x| x.parse().ok())) else { continue };
+            if *st == "Z" {
+                continue;
+            }
+            let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .ok()
+                .and_then(|t| t.lines().find_map(|l| l.strip_prefix("Uid:").and_then(|u| u.split_whitespace().next()?.parse::<u32>().ok())));
+            // a process that ended between the two reads, or whose pid was reused, is left out
+            if let (Some(uid), true) = (uid, identity(pid) == Some(id)) {
                 v.push(crate::kill::Proc { pid, ppid, uid, id, puniq: None });
             }
         }

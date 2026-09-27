@@ -72,35 +72,54 @@ fn is_sheepdog(pid: i32) -> bool {
     os::exe_name(pid).as_deref() == Some("sheepdog")
 }
 
-/// This process and its ancestors, with their identities: never part of a kill.
-fn protected() -> Vec<(i32, u64)> {
+/// The parent of `pid`. Debug seam SHEEPDOG_TEST_PARENT_UNREADABLE=<pid>: that pid's parent
+/// cannot be read (as under a `/proc` mounted with `hidepid`).
+fn parent(pid: i32) -> Option<i32> {
+    if crate::seam_ms("SHEEPDOG_TEST_PARENT_UNREADABLE") == Some(pid as u64) {
+        return None;
+    }
+    os::parent(pid)
+}
+
+/// This process and all its ancestors up to pid 1, with their identities: never part of a
+/// kill. None if the chain cannot be read to its end: then any process may be an ancestor, and
+/// every target is refused (fail closed).
+fn protected() -> Option<Vec<(i32, u64)>> {
     let mut v = Vec::new();
     let mut p = unsafe { libc::getpid() };
-    while p > 1 && v.len() < 4096 {
-        if let Some(id) = identity(p) {
-            v.push((p, id));
+    while p > 1 {
+        if v.len() >= 4096 {
+            return None;
         }
-        match os::parent(p) {
-            Some(q) => p = q,
-            None => break,
-        }
+        v.push((p, identity(p)?));
+        p = parent(p)?;
     }
-    v
+    Some(v)
 }
 
 /// The supervisor of the running job that `t` belongs to, if any: the nearest `sheepdog`
 /// ancestor, or (macOS) a `sheepdog` responsible for it.
 fn job_of(t: i32) -> Option<i32> {
-    let mut p = os::parent(t);
+    let mut p = parent(t);
     let mut n = 0;
     while let Some(q) = p.filter(|&q| q > 1 && n < 4096) {
         if is_sheepdog(q) {
             return Some(q);
         }
-        p = os::parent(q);
+        p = parent(q);
         n += 1;
     }
     os::responsible_pid(t).filter(|&r| r > 1 && r != t && is_sheepdog(r))
+}
+
+/// Is `t` (identity `tid`) the root of supervisor `s`'s job? It is a child of `s`, and every
+/// other child of `s` started later: on Linux the supervisor also adopts escapees (subreaper),
+/// but those descend from the root, so they are younger. The identity grows with age (Linux:
+/// start time; macOS: uniqueid). Linux start times are 10 ms ticks, and a root that forks at
+/// once shares its tick with its child, so a tie goes to the lower pid (forked first; only a pid
+/// wrap within one tick reverses that).
+fn is_root(t: i32, tid: u64, s: i32) -> bool {
+    parent(t) == Some(s) && os::procs().iter().filter(|p| p.ppid == s && p.pid != t).all(|p| (p.id, p.pid) > (tid, t))
 }
 
 /// The proved set, sticky across scans: a member stays known until it is gone, and (macOS) the
@@ -144,8 +163,10 @@ impl Proved {
 }
 
 /// TERM, then CONT, to every supervisor in the set, then wait until they are gone, at most
-/// their grace (read from their argv; 2 s if unreadable) plus the kill deadline.
-fn end_supervisors(sups: &[(i32, u64)], deadline: Duration) {
+/// their grace (read from their argv; 2 s if unreadable) plus the kill deadline. The rest of the
+/// tree runs meanwhile, so it is scanned all the while (a child seen while its parent lives stays
+/// proved after the parent exits). Returns the supervisors still alive at the end.
+fn end_supervisors(sups: &[(i32, u64)], deadline: Duration, proved: &mut Proved) -> Vec<i32> {
     let mut bound = Duration::ZERO;
     for &(p, id) in sups {
         trace(format!("supervisor {p}"));
@@ -155,8 +176,10 @@ fn end_supervisors(sups: &[(i32, u64)], deadline: Duration) {
     }
     let end = Instant::now() + bound;
     while sups.iter().any(|&(p, id)| same(p, id)) && Instant::now() < end {
+        proved.scan();
         std::thread::sleep(Duration::from_millis(10));
     }
+    sups.iter().filter(|&&(p, id)| same(p, id)).map(|&(p, _)| p).collect()
 }
 
 /// The `--grace` of a `sheepdog run` from its argv (default 2 s).
@@ -183,7 +206,10 @@ pub fn main(args: &[OsString]) -> i32 {
         say!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
         return 1;
     }
-    let protected = protected();
+    let Some(protected) = protected() else {
+        say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read its own chain of parent processes, so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+        return 1;
+    };
     if protected.iter().any(|&(p, id)| p == t && id == tid) {
         let what = if t == unsafe { libc::getpid() } { "it is this sheepdog" } else { "it is an ancestor of this sheepdog (the shell or program that started it)" };
         say!("sheepdog: refusing to kill pid {t}: {what}. Nothing was signalled.");
@@ -193,7 +219,9 @@ pub fn main(args: &[OsString]) -> i32 {
     let set = proved.scan();
     let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
     if !is_sheepdog(t) {
-        if let Some(s) = job_of(t) {
+        if job_of(t).is_some_and(|s| is_root(t, tid, s)) {
+            say!("sheepdog: pid {t} is the root of a running job; its supervisor ends the whole job when it exits.");
+        } else if let Some(s) = job_of(t) {
             say!("sheepdog: pid {t} belongs to a running job (supervisor pid {s}); this kills only {t} and the processes it started. To end the whole job: sheepdog kill {s}");
         }
     }
@@ -207,33 +235,24 @@ pub fn main(args: &[OsString]) -> i32 {
         }
         return 0;
     }
-    let opts = KillOpts::from_env().with_grace(a.grace);
-    if !sups.is_empty() {
-        end_supervisors(&sups, opts.deadline);
-    }
-    let initial: HashMap<i32, u64> = set.into_iter().collect();
+    let mut opts = KillOpts::from_env().with_grace(a.grace);
+    let unended = if sups.is_empty() { Vec::new() } else { end_supervisors(&sups, opts.deadline, &mut proved) };
+    let initial: HashMap<i32, u64> = proved.known.clone();
     // a signal that ends sheepdog between a freeze and its SIGKILL would leave the tree stopped
-    // for good: hold them during the kill, then act on any that arrived (the caller sees sheepdog
-    // die of it, as without the hold)
-    let held = hold(&[libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]);
+    // for good: the kill loop holds them from its first freeze on, and sheepdog then acts on any
+    // that arrived (the caller sees it die of the signal, as without the hold)
+    opts.hold = vec![libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+    let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask) };
     let code = match kill_tree(&opts, || proved.scan(), || {}, || None, signal, initial) {
+        Ok(()) if !unended.is_empty() && !os::ADOPTS_ESCAPEES => {
+            // its escapees are members of its job only, which `kill` cannot prove on macOS
+            say!("sheepdog: supervisor pid(s) {unended:?} did not end on TERM (its caller may ignore TERM), so the escapees of its job may still be alive. The tree is NOT clean.");
+            125
+        }
         Ok(()) => 0,
         Err(e) => kill_failed(e),
     };
-    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) };
     code
-}
-
-/// Block `sigs`; returns the previous mask.
-fn hold(sigs: &[libc::c_int]) -> libc::sigset_t {
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for &s in sigs {
-            libc::sigaddset(&mut set, s);
-        }
-        let mut old: libc::sigset_t = std::mem::zeroed();
-        libc::sigprocmask(libc::SIG_BLOCK, &set, &mut old);
-        old
-    }
 }

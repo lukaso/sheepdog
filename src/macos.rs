@@ -151,6 +151,9 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
     infos.iter().filter(|i| t.ever.contains(&i.uniq)).map(|i| (i.pid, i.uniq)).collect()
 }
 
+/// `sheepdog kill`: an inner supervisor's escapees are tied to it only by responsibility, which `kill` does not use as proof.
+pub const ADOPTS_ESCAPEES: bool = false;
+
 /// Every live (not zombie) process, for `sheepdog kill` (S6).
 pub fn procs() -> Vec<crate::kill::Proc> {
     all_pids()
@@ -164,9 +167,22 @@ pub fn procs() -> Vec<crate::kill::Proc> {
         .collect()
 }
 
-/// The parent pid of `pid`, if it is alive.
+/// The parent pid of `pid`, if it is alive, for a process of any uid: `kinfo_proc` from
+/// sysctl KERN_PROC_PID, as `ps` reads it (PROC_PIDTBSDINFO is refused for another user's
+/// process, and sheepdog's chain of ancestors passes through a root-owned `login` in a terminal).
+/// The struct is not in the libc crate: 648 bytes, `kp_eproc.e_ppid` at offset 560 (measured
+/// with the SDK's headers, 2026-09-27; a unit cell checks it against getppid and `ps`).
 pub fn parent(pid: pid_t) -> Option<pid_t> {
-    bsd(pid).map(|b| b.pbi_ppid as pid_t)
+    const SIZE: usize = 648;
+    const E_PPID: usize = 560;
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+    let mut buf = [0u8; SIZE];
+    let mut len = SIZE;
+    let r = unsafe { libc::sysctl(mib.as_mut_ptr(), 4, buf.as_mut_ptr() as *mut c_void, &mut len, std::ptr::null_mut(), 0) };
+    if r != 0 || len != SIZE {
+        return None; // gone (the call succeeds with length 0)
+    }
+    Some(i32::from_ne_bytes(buf[E_PPID..E_PPID + 4].try_into().ok()?))
 }
 
 /// The file name of `pid`'s executable.
@@ -834,6 +850,25 @@ mod tests {
     #[test]
     fn the_responsibility_spi_answers_for_this_process() {
         assert!(resp_uniq(unsafe { libc::getpid() }).is_some());
+    }
+
+    /// `parent` reads `kinfo_proc` at a measured offset: it must agree with getppid for this
+    /// process, and with `ps` for another user's process (a root-owned one).
+    #[test]
+    fn parent_matches_getppid_and_ps() {
+        assert_eq!(super::parent(unsafe { libc::getpid() }), Some(unsafe { libc::getppid() }));
+        let out = std::process::Command::new("ps").args(["-Ao", "pid=,ppid=,uid="]).output().unwrap();
+        let rows: Vec<(i32, i32, u32)> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                Some((w.first()?.parse().ok()?, w.get(1)?.parse().ok()?, w.get(2)?.parse().ok()?))
+            })
+            .collect();
+        let me = unsafe { libc::getuid() };
+        let (p, pp, _) = *rows.iter().find(|&&(p, _, u)| p > 1 && u != me && super::parent(p).is_some()).expect("no other user's process");
+        assert_eq!(super::parent(p), Some(pp));
+        assert_eq!(super::parent(999_999), None);
     }
 
     #[test]

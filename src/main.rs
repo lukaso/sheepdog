@@ -155,13 +155,6 @@ pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
     if seam("SHEEPDOG_TEST_NOKILL") {
         return Sent::No;
     }
-    // Test seam (debug builds only): SHEEPDOG_TEST_INERT=1 sends nothing at all and logs each
-    // signal it withholds, so a cell can aim `sheepdog kill` at a process it must never signal
-    // (pid 1, its own caller) and still see a broken target check as a logged signal (S6).
-    if seam("SHEEPDOG_TEST_INERT") {
-        trace(format!("inert {pid} {sig}"));
-        return Sent::No;
-    }
     // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,
     // with the member's identity, as if the member's pid had been reused (S3).
     let pid = seam_ms("SHEEPDOG_TEST_REUSE_PID").map_or(pid, |p| p as i32);
@@ -240,6 +233,9 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
     if pid <= 1 {
         return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
     }
+    if inert(pid, sig) {
+        return Sent::No;
+    }
     let race = wrong_freeze_race(pid, sig);
     let fd = if race || seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
         None
@@ -277,6 +273,19 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
     Sent::No
 }
 
+/// Test seam (debug builds only): SHEEPDOG_TEST_INERT=1 sends nothing at all and logs each
+/// signal it withholds, so a cell can aim `sheepdog kill` at a process it must never signal
+/// (pid 1, its own caller) and still see a broken target check as a logged signal (S6). Every
+/// door that sends to a member checks it: `send_checked` (under `signal` and the rollback) and
+/// the panic path.
+fn inert(pid: i32, sig: c_int) -> bool {
+    let on = seam("SHEEPDOG_TEST_INERT");
+    if on {
+        trace(format!("inert {pid} {sig}"));
+    }
+    on
+}
+
 /// Test seam (debug builds only): SHEEPDOG_TEST_WRONG_FREEZE=<pid> makes the identity check of
 /// the STOP to that pid pass on the kill path, as a pid reused between the check and the kill
 /// would (S3): the STOP lands on a process that is not the member.
@@ -291,6 +300,9 @@ fn wrong_freeze_race(pid: i32, sig: c_int) -> bool {
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
     if pid <= 1 {
         return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
+    }
+    if inert(pid, sig) {
+        return Sent::No;
     }
     trace(format!("kill {pid} {sig}"));
     if (wrong_freeze_race(pid, sig) || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
@@ -309,6 +321,21 @@ pub fn seam_sleep(name: &str) {
             let _ = std::fs::File::create(f);
         }
         std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+/// Test seam (debug builds only): if env var `name` names a file, create
+/// SHEEPDOG_TEST_READY_FILE (if set), then wait until that file exists (30 s at most), so a test
+/// closes the window itself instead of a timer closing it.
+pub fn seam_hold(name: &str) {
+    if let Some(release) = std::env::var(name).ok().filter(|_| cfg!(debug_assertions)) {
+        if let Ok(f) = std::env::var("SHEEPDOG_TEST_READY_FILE") {
+            let _ = std::fs::File::create(f);
+        }
+        let end = Instant::now() + Duration::from_secs(30);
+        while !std::path::Path::new(&release).exists() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -340,6 +367,10 @@ pub struct KillOpts {
     pub panic_after_stop: bool,
     /// debug seam: a pid put into the freeze as if its STOP had landed on a reused pid
     pub wrong_freeze: Option<i32>,
+    /// signals blocked from the first freeze on (`sheepdog kill`: one that ended sheepdog
+    /// between a freeze and its SIGKILL would leave the tree stopped); the caller restores the
+    /// mask. The TERM grace freezes nothing, so they act at once there.
+    pub hold: Vec<c_int>,
 }
 
 impl KillOpts {
@@ -361,6 +392,7 @@ impl KillOpts {
             never_empty: seam("SHEEPDOG_TEST_NEVER_EMPTY"),
             panic_after_stop: seam("SHEEPDOG_TEST_PANIC_AFTER_STOP"),
             wrong_freeze: seam_ms("SHEEPDOG_TEST_WRONG_FREEZE").map(|p| p as i32),
+            hold: Vec::new(),
         }
     }
 }
@@ -442,7 +474,7 @@ pub fn kill_tree(
         Err(_) => {
             let known = known.borrow();
             for (&p, &id) in known.iter() {
-                if p > 1 && same(p, id) && !seam("SHEEPDOG_TEST_INERT") {
+                if p > 1 && same(p, id) && !inert(p, libc::SIGKILL) {
                     unsafe { libc::kill(p, libc::SIGKILL) };
                 }
             }
@@ -510,6 +542,16 @@ fn kill_loop(
         }
     }
     let deadline = deadline + opts.grace;
+    if !opts.hold.is_empty() {
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for &sg in &opts.hold {
+                libc::sigaddset(&mut set, sg);
+            }
+            libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        }
+    }
     let mut empty = 0;
     let mut wrong_freeze = opts.wrong_freeze;
     loop {
@@ -567,7 +609,7 @@ fn kill_loop(
         if opts.panic_after_stop {
             panic!("test seam: panic after the freeze");
         }
-        seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_FREEZE_MS");
+        seam_hold("SHEEPDOG_TEST_HOLD_AFTER_FREEZE");
         refresh(&mut known.borrow_mut(), scan());
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
@@ -1209,7 +1251,7 @@ mod tests {
         let pid = child.id() as i32;
         let id = sheepdog::ident::identity(pid).unwrap();
         let mut calls = 0;
-        let opts = KillOpts { deadline: Duration::ZERO, grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None };
+        let opts = KillOpts { deadline: Duration::ZERO, grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None, hold: Vec::new() };
         let r = kill_tree(
             &opts,
             || {
@@ -1292,7 +1334,7 @@ mod tests {
             let stranger: std::cell::RefCell<Option<std::process::Child>> = std::cell::RefCell::new(None);
             let sent_stop: std::cell::Cell<Option<Sent>> = std::cell::Cell::new(None);
             let mut calls = 0;
-            let opts = KillOpts { deadline: Duration::from_secs(2), grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None };
+            let opts = KillOpts { deadline: Duration::from_secs(2), grace: Duration::ZERO, forget: false, never_empty: false, panic_after_stop: false, wrong_freeze: None, hold: Vec::new() };
             let r = kill_tree(
                 &opts,
                 || {
