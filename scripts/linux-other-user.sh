@@ -17,11 +17,13 @@ mkdir -p /tmp/decoy && chmod 777 /tmp/decoy
 i=0; while [ ! -s /tmp/decoy/rec ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 decoy=$(cut -d' ' -f1 /tmp/decoy/rec)
 echo "decoy pid $decoy (uid $(ps -o uid= -p "$decoy" | tr -d ' '))"
-# control: the decoy counts a signal (one USR1 from root, by its recorded pid)
-kill -USR1 "$decoy"
+# control: the decoy counts a signal. A process of `sd` can reach a process of another user only
+# with CONT, and only in its own session (kill(2)); that is the one path the suite could use, so
+# the control is exactly that: a CONT sent by `sd`.
+/bin/setpriv --reuid=sd --regid=sd --clear-groups kill -CONT "$decoy"
 i=0; while [ "$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)" -lt 1 ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 before=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
-echo "decoy control: $before signal(s) counted"
+echo "decoy control: $before signal(s) counted (a CONT from sd)"
 [ "$before" -eq 1 ] || { echo "the decoy does not count signals"; exit 3; }
 rc=0
 for b in $bins; do

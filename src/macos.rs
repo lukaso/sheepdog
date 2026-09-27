@@ -696,6 +696,9 @@ fn wait(
             let mut ev: libc::kevent = zeroed();
             let tick = libc::timespec { tv_sec: 0, tv_nsec: tick_ns };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
+            // the error now: the membership scan below makes calls of its own that replace errno
+            // (an EINTR from a STOP and CONT was then read as a failure; phase-1 review)
+            let err = std::io::Error::last_os_error();
             let _ = members(); // membership while running (a tick or an event)
             if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {
                 relay_died(); // taken as TERM on the next pass
@@ -704,8 +707,9 @@ fn wait(
                 // Only the root's event: the relay's exit is also an EVFILT_PROC event, and a
                 // blocking wait for a root that still runs would hang the loop.
                 exited = Some(if libc::waitpid(pid, &mut st, 0) == pid { st } else { crate::exit_status(125) });
-            } else if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                say!("sheepdog: kqueue failed ({}); polling instead", std::io::Error::last_os_error());
+            } else if r < 0 && err.raw_os_error() != Some(libc::EINTR) {
+                say!("sheepdog: kqueue failed ({err}); polling instead");
+                crate::trace("polling".into());
                 polling = true;
             }
         };

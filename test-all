@@ -40,6 +40,19 @@ cleanup() {
   for f in "$LOGDIR"/*.cid; do [ -s "$f" ] && docker rm -f "$(cat "$f")" >/dev/null 2>&1; done
 }
 trap cleanup EXIT
+# a ctrl-C (INT) or a TERM ends the whole run at once, and the EXIT trap removes the containers.
+# Bash runs a trap only when its foreground child ends, and GNU timeout moves itself to a group
+# of its own (the terminal's INT never reaches it), so every long step runs in the background
+# and bash `wait`s for it: a trapped signal interrupts the wait at once.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Run "$@" in the background and wait for it (see the traps above); its exit code.
+bg_wait() {
+  "$@" &
+  local p=$!
+  wait "$p"
+}
 
 record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
 
@@ -48,7 +61,7 @@ record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
 leg_run() { # leg-name docker-args...
   local name=$1; shift
   rm -f "$LOGDIR/$name.cid"
-  timeout -k 30 3600 docker run --rm --init --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
+  bg_wait timeout -k 30 3600 docker run --rm --init --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/$name.cid" ] && docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
   return $rc
@@ -61,7 +74,7 @@ suite_in() { # image target-dir leg-name [docker args...]
 
 leg_macos() {
   [ "$(uname)" = Darwin ] || { record macos "skipped (not macOS)"; return 0; }
-  timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
+  bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
   local rc=$?
   local left
   left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|/bin/sleep 2[0-9]\.)")
@@ -90,9 +103,8 @@ leg_amd64() {
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
-  timeout 1800 docker run --rm -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xf -) && cd /w && CARGO_TARGET_DIR=/tgt cargo build -q --bins' \
-    > "$LOGDIR/build-alpine.log" 2>&1
+  leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh -c \
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xf -) && cd /w && CARGO_TARGET_DIR=/tgt cargo build -q --bins'
 }
 
 # Start `sheepdog run -- sd-fixture ticker` as the container's main process; prints the id.
@@ -104,20 +116,20 @@ start_job() { # extra docker args...
 job_ready() { # id
   local i=0
   while [ $i -lt 1500 ]; do
-    docker exec "$1" sh -c 'test -e /tmp/r.root && [ "$(wc -l < /tmp/r)" -ge 7 ]' 2>/dev/null && return 0
+    timeout 30 docker exec "$1" sh -c 'test -e /tmp/r.root && [ "$(wc -l < /tmp/r)" -ge 7 ]' 2>/dev/null && return 0
     sleep 0.02; i=$((i+1))
   done
   return 1
 }
 
-ticks() { docker exec "$1" sh -c 'wc -l < /tmp/r.tick' 2>/dev/null | tr -d ' '; }
+ticks() { timeout 30 docker exec "$1" sh -c 'wc -l < /tmp/r.tick' 2>/dev/null | tr -d ' '; }
 
 # Every recorded member of the job has a line "<door> <pid> <sig>" in sheepdog's signal log
 # (waits up to 10 s).
 logged_for_all() { # id sig
   local i=0
   while [ $i -lt 500 ]; do
-    docker exec "$1" sh -c 'for p in $(cut -d" " -f1 /tmp/r); do grep -qE "^(pidfd|kill) $p '"$2"'\$" /tmp/log || exit 1; done' 2>/dev/null && return 0
+    timeout 30 docker exec "$1" sh -c 'for p in $(cut -d" " -f1 /tmp/r); do grep -qE "^(pidfd|kill) $p '"$2"'\$" /tmp/log || exit 1; done' 2>/dev/null && return 0
     sleep 0.02; i=$((i+1))
   done
   return 1
@@ -134,12 +146,12 @@ leg_pid1() {
   CONTAINERS+=("$c")
   job_ready "$c" || why="job not ready"
   local pid1
-  pid1=$(docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
+  pid1=$(timeout 30 docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
   case "${pid1%% *}" in */sheepdog) ;; *) why="${why:+$why; }PID 1 is not sheepdog: $pid1" ;; esac
   # TSTP: sheepdog stops every member (a STOP in its signal log for each recorded one), then its
   # own stop is ignored (an init: discarded), so it continues each member it stopped (a CONT for
   # each) and the job runs on. Read on readiness: the log lines.
-  docker kill -s TSTP "$c" >/dev/null
+  timeout 30 docker kill -s TSTP "$c" >/dev/null
   if ! logged_for_all "$c" 19; then
     why="${why:+$why; }not every member got a STOP after TSTP"
   fi
@@ -150,11 +162,11 @@ leg_pid1() {
   t1=$(ticks "$c")
   while [ $i -lt 250 ]; do t2=$(ticks "$c"); [ -n "$t1" ] && [ -n "$t2" ] && [ "$t2" -gt "$t1" ] && break; sleep 0.02; i=$((i+1)); done
   [ -n "$t1" ] && [ -n "$t2" ] && [ "$t2" -gt "$t1" ] || why="${why:+$why; }the job does not run after TSTP ($t1 -> $t2)"
-  docker kill -s TERM "$c" >/dev/null
+  timeout 30 docker kill -s TERM "$c" >/dev/null
   local code
   code=$(wait_exit "$c")
   [ "$code" = 143 ] || why="${why:+$why; }TERM exit $code, want 143"
-  docker logs "$c" > "$LOGDIR/pid1.log" 2>&1
+  timeout 30 docker logs "$c" > "$LOGDIR/pid1.log" 2>&1
   [ -z "$why" ] && record pid1 PASS || record pid1 "FAIL ($why)"
 }
 
@@ -165,9 +177,9 @@ leg_init() {
   CONTAINERS+=("$c")
   job_ready "$c" || why="job not ready"
   local pid1
-  pid1=$(docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
+  pid1=$(timeout 30 docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
   case "${pid1%% *}" in */sheepdog) why="${why:+$why; }PID 1 is sheepdog (no --init?)" ;; esac
-  docker kill -s TERM "$c" >/dev/null
+  timeout 30 docker kill -s TERM "$c" >/dev/null
   local code
   code=$(wait_exit "$c")
   [ "$code" = 143 ] || why="${why:+$why; }TERM exit $code, want 143"

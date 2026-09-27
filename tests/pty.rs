@@ -2264,3 +2264,85 @@ fn the_relay_is_not_stranded_by_a_stop_after_the_job_ended() {
     assert!(sup_gone, "control: the supervisor did not end after the root exited");
     assert!(exited, "the job ended but the relay (the pid the caller waits on) is left in state {rs:?}");
 }
+
+/// Phase-1 review round 2 (P3, macOS): a STOP and a quick CONT of the supervisor interrupt its
+/// kevent (EINTR). That is not a failure: sheepdog must not fall back to polling (its signal log
+/// records a fallback as `polling`). The error was read after the membership scan, whose own
+/// calls had replaced it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_and_cont_of_the_supervisor_is_not_a_kqueue_failure() {
+    let m = short_marker(20);
+    let log = std::env::temp_dir().join(format!("sd-p1-kq-{m}"));
+    let _ = std::fs::remove_file(&log);
+    let l = log.display().to_string();
+    let (mut c, id) = direct(&["--quiet"], &["/bin/sleep".into(), m.clone()], &[("SHEEPDOG_TEST_SIGNAL_LOG", &l)]);
+    wait_for("the root", Duration::from_secs(15), || (sleeps(&m).len() == 1).then_some(()));
+    for _ in 0..5 {
+        assert!(send(c.id() as i32, id, libc::SIGSTOP));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(send(c.id() as i32, id, libc::SIGCONT));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(send(c.id() as i32, id, libc::SIGTERM));
+    let st = wait_bounded(&mut c, Duration::from_secs(10));
+    for p in sleeps(&m) {
+        if let Some(pid_id) = identity(p) {
+            send(p, pid_id, libc::SIGKILL);
+        }
+    }
+    let polled = log_has(&log, "polling");
+    let _ = std::fs::remove_file(&log);
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "control: TERM did not end the job: {st:?}");
+    assert!(!polled, "a STOP and CONT of the supervisor made it fall back to polling");
+}
+
+/// The signals whose default action ends a process and that are not faults, by rule (never a
+/// hand-copied list): the classic signals 1 to 31 and, on Linux, the real-time ones the C library
+/// hands out (SIGRTMIN to SIGRTMAX), minus KILL and STOP, the faults (SEGV, BUS, ILL, FPE, TRAP,
+/// SYS, ABRT), the job-control signals and CHLD, and the ones whose default action is to ignore.
+/// Linux's 32 to SIGRTMIN-1 belong to the C library (glibc and musl use them internally and
+/// refuse to let a program block them): stated in PHASE1, not covered.
+fn signals_that_end_by_default() -> Vec<libc::c_int> {
+    let not = [
+        libc::SIGKILL, libc::SIGSTOP, libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGTRAP, libc::SIGSYS, libc::SIGABRT,
+        libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCONT, libc::SIGCHLD, libc::SIGURG, libc::SIGWINCH,
+        #[cfg(target_os = "macos")]
+        libc::SIGINFO,
+    ];
+    #[cfg(target_os = "linux")]
+    let rt = unsafe { libc::SIGRTMIN()..=libc::SIGRTMAX() };
+    #[cfg(target_os = "macos")]
+    let rt = 1..=0;
+    (1..=31).chain(rt).filter(|s| !not.contains(s)).collect()
+}
+
+/// Phase-1 review round 2 (P2): no such signal, sent to sheepdog's pid, ends it: it keeps its
+/// job (TERM then ends it, the escapee included). Before the rule, a hand-copied list left
+/// SIGEMT (macOS) and PWR, IO, STKFLT and the real-time signals (Linux) able to end sheepdog
+/// without its kill.
+#[test]
+fn no_signal_that_ends_by_default_ends_sheepdog_without_its_kill() {
+    let mut ended = Vec::new();
+    for sig in signals_that_end_by_default() {
+        if [libc::SIGTERM].contains(&sig) {
+            continue; // TERM ends the job by design (with its kill)
+        }
+        let job = Job::new();
+        let (mut c, id) = direct(&["--quiet"], &job.args(), &[]);
+        let ((esc, esc_id), _) = job.ready();
+        assert!(send(c.id() as i32, id, sig));
+        std::thread::sleep(Duration::from_millis(150));
+        let alive = matches!(c.try_wait(), Ok(None));
+        if alive {
+            common::send_child(&mut c, libc::SIGTERM);
+        }
+        let _ = wait_bounded(&mut c, Duration::from_secs(10));
+        let esc_gone = wait_for_opt(Duration::from_secs(5), || !same(esc, esc_id));
+        if !alive || !esc_gone {
+            ended.push((sig, alive, esc_gone));
+        }
+    }
+    assert_eq!(ended, vec![], "(signal, sheepdog survived it, the escapee is gone)");
+}

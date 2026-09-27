@@ -742,6 +742,32 @@ mod relay {
         }
     }
 
+    /// S2 review rounds 3-5 (macOS): a signal that still ends the supervisor between the root's
+    /// suspended spawn and its CONT must not leave the root stopped. Since the phase-1 review
+    /// only the faults (SEGV, BUS, ILL, FPE, TRAP, SYS; sent here with kill) and KILL still end
+    /// sheepdog; the full hold in the spawn window is what keeps the root from staying stopped.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_signal_that_ends_sheepdog_in_the_spawn_window_leaves_no_stopped_root() {
+        for (i, sig) in [libc::SIGSYS, libc::SIGTRAP].into_iter().enumerate() {
+            let w = Window::new(60 + 2 * i as u32);
+            let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            caller(&mut c, false, false);
+            let mut c = c.spawn().unwrap();
+            w.wait_ready();
+            let root = w.suspended_root();
+            assert!(send_child(&mut c, sig), "sheepdog had already ended");
+            let late = w.resumed();
+            let st = wait_bounded(&mut c, Duration::from_secs(15));
+            std::thread::sleep(Duration::from_millis(200));
+            let stopped = alive(root) && state(root.0) == Some('T');
+            w.cleanup(&[root]);
+            assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
+            assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
+            assert!(!stopped, "signal {sig}: the root was left stopped after the supervisor died in the spawn window");
+        }
+    }
+
     /// S2 review rounds 3-5, S4 and the phase-1 review (macOS): a signal to the sheepdog pid in
     /// the spawn window (between the root's suspended spawn and its CONT) does not end sheepdog,
     /// and the root is not left stopped: it runs. TERM then ends the job. INT, HUP and QUIT are

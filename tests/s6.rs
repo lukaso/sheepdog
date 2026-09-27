@@ -185,7 +185,9 @@ fn assert_inert_seam_is_live() {
 /// test binary or in its group (phase-1 review, the S7 class): a regression that widens `sheepdog
 /// kill` (to the target's group, its siblings, its parent's children) then reaches only this
 /// cell's processes, and the cell goes red instead of killing a neighbour. `id()` is the target:
-/// the shell's background command, found by the pid the shell wrote.
+/// the shell's background command, found by the pid the shell wrote. Note: a non-interactive
+/// shell starts a background command with INT and QUIT ignored, so a held `sheepdog run` does not
+/// watch them; a cell about INT or QUIT must not use `Held`.
 struct Held {
     sh: Child,
     pid: i32,
@@ -798,5 +800,88 @@ fn s6_linux_a_proc_from_another_pid_namespace_is_refused() {
     };
     assert_eq!(run(true, &["run", "--", "/bin/true"]), Some(0), "control: with its own /proc the job runs");
     assert_eq!(run(false, &["run", "--", "/bin/true"]), Some(125), "run with a foreign /proc was not refused");
-    assert_eq!(run(false, &["kill", "--dry-run", "2"]), Some(1), "kill with a foreign /proc was not refused");
+    // kill: the target is a sleep started inside the new namespace (a live process there, not an
+    // ancestor: the shell execs sheepdog); with its own /proc the same dry run lists it (0)
+    let kill_in_ns = |mount_proc: bool| -> Option<i32> {
+        let mut c = Command::new("unshare");
+        c.args(["--pid", "--fork"]);
+        if mount_proc {
+            c.arg("--mount-proc");
+        }
+        c.args(["/bin/sh", "-c", "/bin/sleep 20 & exec \"$0\" kill --dry-run $!", sheepdog()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut c = c.spawn().expect("unshare");
+        wait_bounded(&mut c, Duration::from_secs(30)).and_then(|s| s.code())
+    };
+    assert_eq!(kill_in_ns(true), Some(0), "control: with its own /proc the dry run lists the target");
+    assert_eq!(kill_in_ns(false), Some(1), "kill with a foreign /proc was not refused");
+}
+
+/// Phase-1 review round 2 (P3): SIGPIPE is blocked for sheepdog, so a write to a closed stdout
+/// gets EPIPE. `--dry-run` into a reader that has gone must end quietly (exit 0: nothing was to
+/// be signalled), not panic (the C main then answers 125, which means "not clean").
+#[test]
+fn s6_dry_run_into_a_closed_pipe_ends_quietly() {
+    let j = Job::new();
+    let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
+    j.wait_recorded(3);
+    let mut k = Command::new(sheepdog())
+        .args(["kill", "--dry-run", &c.id().to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(j.file(".err")).unwrap())
+        .spawn()
+        .unwrap();
+    drop(k.stdout.take()); // the reader is gone before sheepdog writes
+    let st = wait_bounded(&mut k, Duration::from_secs(20));
+    c.signal(libc::SIGKILL);
+    let _ = wait_held(&mut c, Duration::from_secs(5));
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(0), None)), "stderr: {}", std::fs::read_to_string(j.file(".err")).unwrap_or_default());
+}
+
+/// Phase-1 review round 2 (P2): `sheepdog kill` blocks every signal but the faults for itself.
+/// A USR1 between its freeze and its SIGKILL is not acted on: the kill finishes (exit 0) and
+/// nothing is left stopped or alive. (INT and TERM there: the hold, see the cell above.)
+#[test]
+fn s6_a_usr1_during_the_freeze_is_not_acted_on() {
+    let j = Job::new();
+    let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
+    j.wait_recorded(3);
+    let (ready, release) = (j.file(".tick"), j.file(".root"));
+    let mut k = Command::new(sheepdog())
+        .args(["kill", "--grace", "0", &c.id().to_string()])
+        .env("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", &release)
+        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the freeze", Duration::from_secs(15), || ready.exists());
+    assert!(send_child(&mut k, libc::SIGUSR1));
+    std::fs::File::create(&release).unwrap();
+    let st = wait_bounded(&mut k, Duration::from_secs(20));
+    let _ = wait_held(&mut c, Duration::from_secs(5));
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(j.alive(), vec![], "members were left (stopped or alive)");
+    assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(0), None)), "a USR1 in the freeze ended `kill`: {st:?}");
+}
+
+/// Phase-1 review round 2 (P2): `sheepdog kill` whose stderr is a pipe nobody reads still does
+/// its work (its "runs under" line gets EPIPE, never SIGPIPE, and is printed before any signal).
+#[test]
+fn s6_kill_with_a_closed_stderr_still_kills() {
+    let j = Job::new();
+    let mut sup = ticker_job(&j);
+    let tick: i32 = std::fs::read_to_string(j.file(".tick")).unwrap().lines().next().unwrap().trim().parse().unwrap();
+    let (tp, tid) = found(tick).expect("a ticking member");
+    let mut k = Command::new(sheepdog()).args(["kill", "--grace", "0", &tp.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    drop(k.stderr.take());
+    let st = wait_bounded(&mut k, Duration::from_secs(20));
+    let gone = !same(tp, tid);
+    sup.signal(libc::SIGTERM);
+    let _ = wait_held(&mut sup, Duration::from_secs(10));
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(0), None)), "`kill` with a closed stderr: {st:?}");
+    assert!(gone, "the member was not killed");
 }

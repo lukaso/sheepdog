@@ -186,16 +186,18 @@ pub fn main(args: &[OsString]) -> i32 {
     // for the whole run (a closed stderr is EPIPE, never SIGPIPE; phase-1 review)
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for s in crate::QUIET_ENDERS {
-            libc::sigaddset(&mut set, s);
+        crate::block_all_but_faults(&mut set);
+        // INT, TERM, HUP and QUIT stay deliverable until the first freeze (a ctrl-C during the
+        // grace ends `kill` at once); the hold covers them from there
+        for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+            libc::sigdelset(&mut set, s);
         }
         libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
     let Some(a) = parse(args) else { return usage() };
     #[cfg(target_os = "linux")]
-    if !os::proc_is_ours() {
-        say!("sheepdog: /proc belongs to another pid namespace, so sheepdog cannot tell which process pid {} is. Mount a /proc for this namespace (for example unshare --mount-proc). Nothing was signalled.", a.pid);
+    if let Some(why) = os::proc_problem() {
+        say!("sheepdog: {why}, so sheepdog cannot tell which process pid {} is. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.", a.pid);
         return 1;
     }
     let t = a.pid;
@@ -242,7 +244,10 @@ pub fn main(args: &[OsString]) -> i32 {
         for (p, _) in v {
             let name = os::exe_name(p).unwrap_or_else(|| "?".into());
             let note = if sups.iter().any(|&(q, _)| q == p) { "\t(a sheepdog: ended first)" } else { "" };
-            println!("{p}\t{name}{note}");
+            // a reader that has gone gives EPIPE (SIGPIPE is blocked): stop quietly, never panic
+            if writeln!(std::io::stdout(), "{p}\t{name}{note}").is_err() {
+                break;
+            }
         }
         return 0;
     }

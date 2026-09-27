@@ -114,6 +114,18 @@ pub fn proc_is_ours() -> bool {
     std::fs::read_link("/proc/self").ok().and_then(|p| p.to_str()?.parse::<i32>().ok()) == Some(unsafe { libc::getpid() })
 }
 
+/// Why /proc cannot be used, for the refusal (None: it is ours). No /proc at all is told apart
+/// from another namespace's.
+pub fn proc_problem() -> Option<&'static str> {
+    if proc_is_ours() {
+        None
+    } else if std::fs::read_link("/proc/self").is_err() {
+        Some("no /proc is mounted")
+    } else {
+        Some("/proc belongs to another pid namespace")
+    }
+}
+
 /// Stopped by a signal (state T; t is a ptrace stop)?
 pub fn stopped(pid: i32) -> bool {
     stat(pid).is_some_and(|(_, st)| st == 'T')
@@ -375,8 +387,8 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
 }
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
-    if !proc_is_ours() {
-        say!("sheepdog: /proc belongs to another pid namespace, so sheepdog cannot tell which processes are this job's. Mount a /proc for this namespace (for example unshare --mount-proc). Nothing was started.");
+    if let Some(why) = proc_problem() {
+        say!("sheepdog: {why}, so sheepdog cannot tell which processes are this job's. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was started.");
         return 125;
     }
     let relay = match relay_if_needed(sig) {

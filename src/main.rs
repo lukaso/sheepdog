@@ -664,11 +664,25 @@ pub struct Signals {
 /// The stop signals job control handles, in the order `watch_stop` lists them.
 pub const STOPS: [c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
-/// Signals whose default action ends a process and that sheepdog never acts on: blocked for
-/// sheepdog itself (`run` and `kill`), so that none of them can end it before or during its kill
-/// (phase-1 review). Faults (SEGV, BUS, ILL, FPE, TRAP, SYS) are left alone.
-pub const QUIET_ENDERS: [c_int; 8] =
-    [libc::SIGPIPE, libc::SIGUSR1, libc::SIGUSR2, libc::SIGALRM, libc::SIGVTALRM, libc::SIGPROF, libc::SIGXCPU, libc::SIGXFSZ];
+/// The faults: left unblocked, so that a real fault in sheepdog still ends it (a fault while its
+/// signal is blocked is undefined on some systems), and sent with `kill` they are the signals
+/// that can still end sheepdog without its kill (with KILL; stated).
+pub const FAULTS: [c_int; 7] = [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGTRAP, libc::SIGSYS, libc::SIGABRT];
+
+/// Add to `set` every signal except the faults (and KILL and STOP, which cannot be blocked):
+/// sheepdog blocks all of them for itself (`run` and `kill`), so that no signal whose default
+/// action ends a process can end it before or during its kill. A rule, not a list: a hand-copied
+/// list missed EMT, PWR, IO, STKFLT and the real-time signals (phase-1 review, round 2). Those it
+/// waits on are consumed as before; the rest stay pending, never acted on. The root gets the
+/// caller's mask (SETSIGMASK).
+pub fn block_all_but_faults(set: &mut libc::sigset_t) {
+    unsafe {
+        libc::sigfillset(set);
+        for s in FAULTS {
+            libc::sigdelset(set, s);
+        }
+    }
+}
 
 impl Signals {
     /// The signal set the event loop waits on: CHLD plus every watched signal.
@@ -715,13 +729,11 @@ fn setup_signals() -> Signals {
             watch_stop: STOPS.map(|s| at_default(s)),
             watch_cont: at_default(libc::SIGCONT),
         };
-        let mut block = sig.wait_set();
-        // every other signal whose default action ends a process is blocked for sheepdog alone
-        // (never waited for): sheepdog must not die without its kill (a write to a closed stderr
-        // is EPIPE, not SIGPIPE). The root gets the caller's mask (SETSIGMASK).
-        for s in QUIET_ENDERS {
-            libc::sigaddset(&mut block, s);
-        }
+        // every signal but the faults is blocked for sheepdog (those it waits on are in the wait
+        // set): sheepdog must not die without its kill (a write to a closed stderr is EPIPE, not
+        // SIGPIPE). The root gets the caller's mask (SETSIGMASK).
+        let mut block: libc::sigset_t = std::mem::zeroed();
+        block_all_but_faults(&mut block);
         let mut caller_mask: libc::sigset_t = std::mem::zeroed();
         libc::sigprocmask(libc::SIG_BLOCK, &block, &mut caller_mask);
         Signals { caller_mask, ..sig }
