@@ -199,7 +199,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read pid {link} in its own chain of parent processes (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot follow its own chain of parent processes at pid {link} (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
             return 1;
         }
     };
@@ -213,8 +213,10 @@ pub fn main(args: &[OsString]) -> i32 {
     let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
     if !is_sheepdog(t) {
         if let Some(s) = job_of(t) {
-            // one line, true for the root too: which member is the root is not needed here
-            say!("sheepdog: pid {t} belongs to a running job (supervisor pid {s}); this kills {t} and the processes it started, and if {t} is the job's root, the supervisor then ends the whole job. To end the whole job: sheepdog kill {s}");
+            // one line, true for every target below a sheepdog: the root, a member, or (on the
+            // relay path) a job the caller started before sheepdog, whose nearest sheepdog is the
+            // relay
+            say!("sheepdog: pid {t} is a descendant of sheepdog pid {s}. `kill {t}` takes {t} and the processes it started; if {t} is the root of that sheepdog's job, the job then ends too. To end that sheepdog's job: sheepdog kill {s}");
         }
     }
     if a.dry_run {

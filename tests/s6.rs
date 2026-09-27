@@ -668,8 +668,9 @@ fn ps_stat(pid: i32) -> String {
 }
 
 /// The relay path (`job & exec sheepdog run -- cmd`): the relay's older child, the background
-/// job, is not part of the running job: stderr names the relay (a `sheepdog` whose kill ends
-/// the job), and only the background job dies. Killing the real root then ends the job.
+/// job, is not part of the running job: stderr names the relay (its nearest `sheepdog`), and only
+/// the background job dies. Killing the real root then ends the job, and stderr names the
+/// root's nearest `sheepdog`, the supervisor, not the relay.
 #[test]
 fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     let j = Job::new();
@@ -686,6 +687,8 @@ fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     assert_eq!(bg.len(), 1, "control: one background job: {bg:?}");
     let (bgp, bgid) = bg[0];
     let root = read_pairs(&j.file(".root"))[0];
+    // the supervisor: the root's parent, the relay's sheepdog child
+    let sup = ps_parent(root.0).expect("the root's parent");
     let k = kill(&j, &["--grace", "0", &bgp.to_string()], &[]);
     let (bg_alive, root_alive) = (same(bgp, bgid), same(root.0, root.1));
     let k2 = kill(&j, &["--grace", "0", &root.0.to_string()], &[]);
@@ -693,8 +696,12 @@ fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert!(!bg_alive, "the background job survived");
     assert!(root_alive, "the job's root was killed with the background job");
-    assert!(k.err_numbers().contains(&(relay.id() as i32)), "the background job did not get the member line naming the relay {}: {}", relay.id(), k.err);
+    assert!(k.err_numbers().contains(&(relay.id() as i32)), "stderr does not name the relay {} for the background job: {}", relay.id(), k.err);
     assert_eq!(k2.code, Some(0), "stderr: {}", k2.err);
     assert!(st.is_some(), "the job did not end with its root");
+    // the root's line names its nearest sheepdog, the supervisor, not the relay above it
+    assert_ne!(sup, relay.id() as i32, "control: the root's parent is the supervisor, not the relay");
+    assert!(k2.err_numbers().contains(&sup), "stderr does not name the supervisor {sup} for the root: {}", k2.err);
+    assert!(!k2.err_numbers().contains(&(relay.id() as i32)), "stderr names the relay for the root: {}", k2.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }
