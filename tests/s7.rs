@@ -388,8 +388,9 @@ fn runs(pid: i32, prog: &str) -> bool {
     String::from_utf8_lossy(&out.stdout).split_whitespace().next() == Some(prog)
 }
 
-fn bash_loop() -> &'static str {
-    "for i in $(seq 300); do /bin/sleep 0.1; done"
+/// The escaped loop: it writes `ready` once `/bin/bash` runs it, then loops 30 s at most.
+fn bash_loop(ready: &std::path::Path) -> String {
+    format!("echo run > '{}'; for i in $(seq 300); do /bin/sleep 0.1; done", ready.display())
 }
 
 /// Cell 8 (macOS): an escaped `/bin/bash` loop: 0 survivors.
@@ -397,8 +398,11 @@ fn bash_loop() -> &'static str {
 #[test]
 fn cell8_an_escaped_bash_loop_leaves_no_survivor() {
     let j = Job::new();
-    run_under_sheepdog(&[fixture(), "escape-exec", &j.rec(), "/bin/bash", "-c", bash_loop(), &j.marker]);
-    assert!(!j.recorded().is_empty(), "control: the escapee was not created");
+    let ready = j.file(".go");
+    let script = bash_loop(&ready);
+    let mut sd = quiet(Command::new(sheepdog()).args(["run", "--quiet", "--", fixture(), "escape-exec", &j.rec(), "/bin/bash", "-c", &script, &j.marker]).env("SD_EXEC_READY", &ready)).spawn().unwrap();
+    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepdog did not end");
+    assert!(ready.exists(), "control: the route did not reach /bin/bash");
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
@@ -407,7 +411,8 @@ fn cell8_an_escaped_bash_loop_leaves_no_survivor() {
 #[test]
 fn cell8_control_an_env_tag_sweep_misses_an_apple_binary() {
     let j = Job::new();
-    tag_sweep_control(&j, &["escape-exec", &j.rec(), "/bin/bash", "-c", bash_loop(), &j.marker], |g| runs(g, "/bin/bash"), true);
+    let script = bash_loop(&j.file(".go"));
+    tag_sweep_control(&j, &["escape-exec", &j.rec(), "/bin/bash", "-c", &script, &j.marker], |g| runs(g, "/bin/bash"), true);
 }
 
 /// The cell-9 escapee's program after `env [-i]`: the fixture (not an Apple binary, so on macOS
@@ -426,10 +431,11 @@ fn env_route(j: &Job, drop_env: bool) -> Vec<String> {
 fn cell9_an_env_i_escapee_leaves_no_survivor() {
     let j = Job::new();
     let r = env_route(&j, true);
-    let mut a = vec![fixture()];
-    a.extend(r.iter().map(String::as_str));
-    run_under_sheepdog(&a);
-    assert!(!j.recorded().is_empty(), "control: the escapee was not created");
+    // the root exits only once the program after `env -i` runs (on Linux sheepdog would
+    // otherwise kill the escapee before it gets there)
+    let mut sd = quiet(Command::new(sheepdog()).args(["run", "--quiet", "--", fixture()]).args(&r).env("SD_EXEC_READY", j.file(".c"))).spawn().unwrap();
+    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepdog did not end");
+    assert!(!read_pairs(&j.file(".c")).is_empty(), "control: the route did not reach the program after `env -i`");
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
@@ -610,6 +616,7 @@ fn kill_leaves_a_sibling_command_alive() {
     contained(target.0);
     let code = kill(&j, target.0);
     let outside: Vec<i32> = b.iter().map(|&(p, _)| p).chain([sh.id() as i32]).collect();
+    assert!(signalled(&j).contains(&target.0), "control: the signal log does not name the target: {:?}", j.log());
     assert!(signalled(&j).iter().all(|p| !outside.contains(p)), "a process outside the target's tree was signalled: {:?}", j.log());
     let (a_left, b_left) = (a.iter().filter(|&&(p, id)| same(p, id)).count(), b.iter().filter(|&&(p, id)| same(p, id)).count());
     let sh_alive = matches!(sh.try_wait(), Ok(None));
@@ -665,40 +672,53 @@ fn contained(target: i32) {
     assert_ne!(unsafe { libc::getpgid(target) }, unsafe { libc::getpgrp() }, "the target is in the test binary's group");
 }
 
-/// Start `sh -c 'sheepdog run -- sd-fixture ticker M REC & wait'` in a group of its own; ready
-/// when the job's root named itself and the escapee has its five children (seven recorded).
-/// Returns the shell and the supervisor (the shell's `sheepdog` child).
-fn ticker(marker: &str, rec: &str) -> (Child, (i32, u64)) {
-    use std::os::unix::process::CommandExt;
-    let c = quiet(Command::new("/bin/sh").args(["-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\" & wait", sheepdog(), fixture(), marker, rec]).process_group(0)).spawn().unwrap();
-    let root = format!("{rec}.root");
-    wait_for("the ticker root", Duration::from_secs(15), || std::path::Path::new(&root).exists());
-    wait_for("seven records", Duration::from_secs(15), || read_pairs(&PathBuf::from(rec)).len() >= 7);
-    let sup = found(wait_for_child_named(c.id() as i32, "sheepdog")).expect("the supervisor");
-    (c, sup)
-}
-
-/// Two concurrent jobs: `sheepdog kill` of one job's supervisor leaves the other job whole.
+/// Two concurrent jobs under one shell the test made, in a group of its own: the jobs are
+/// siblings and group-mates (so a kill widened to the group or to siblings would reach the other
+/// job), and nothing outside the cell is. `sheepdog kill` of one job's supervisor leaves the other
+/// job whole, its supervisor and the shell included, and signals none of them.
 #[test]
 fn kill_of_one_job_leaves_a_concurrent_job_whole() {
+    use std::os::unix::process::CommandExt;
     let j = Job::new();
     let k = Job::new();
-    let (mut one, sup1) = ticker(&j.marker, &j.rec());
-    let (mut two, sup2) = ticker(&k.marker, &k.rec());
+    let mut sh = quiet(Command::new("/bin/sh").args([
+        "-c",
+        "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\" & \"$0\" run --quiet -- \"$1\" ticker \"$4\" \"$5\" & wait",
+        sheepdog(),
+        fixture(),
+        &j.marker,
+        &j.rec(),
+        &k.marker,
+        &k.rec(),
+    ]).process_group(0)).spawn().unwrap();
+    for x in [&j, &k] {
+        wait_for("the ticker root", Duration::from_secs(15), || x.file(".root").exists());
+        x.wait_recorded(7);
+    }
+    // each job's supervisor: its root's parent
+    let sup_of = |x: &Job| -> (i32, u64) {
+        let root = read_pairs(&x.file(".root"))[0];
+        let ppid: i32 = String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &root.0.to_string()]).output().unwrap().stdout).trim().parse().unwrap();
+        found(ppid).expect("the supervisor")
+    };
+    let (sup1, sup2) = (sup_of(&j), sup_of(&k));
     contained(sup1.0);
     let code = kill(&j, sup1.0);
-    let _ = wait_bounded(&mut one, Duration::from_secs(10));
     let mut two_all: Vec<(i32, u64)> = k.recorded().into_iter().chain(read_pairs(&k.file(".root"))).chain([sup2]).collect();
     two_all.sort();
     two_all.dedup();
     let two_left: Vec<(i32, u64)> = two_all.iter().copied().filter(|&(p, id)| same(p, id)).collect();
-    let hit: Vec<i32> = signalled(&j).into_iter().filter(|p| two_all.iter().any(|&(q, _)| q == *p)).collect();
+    let sh_alive = matches!(sh.try_wait(), Ok(None));
+    let log = signalled(&j);
+    let hit: Vec<i32> = log.iter().copied().filter(|p| *p == sh.id() as i32 || two_all.iter().any(|&(q, _)| q == *p)).collect();
     send(sup2.0, sup2.1, libc::SIGTERM);
-    let _ = wait_bounded(&mut two, Duration::from_secs(30));
+    let _ = wait_bounded(&mut sh, Duration::from_secs(30));
     assert_eq!(code, Some(0));
     assert_eq!(j.alive(), vec![], "the killed job survived");
+    assert!(log.contains(&sup1.0), "control: the signal log does not name the target: {:?}", j.log());
     assert_eq!(two_left.len(), 8, "the other job lost processes: {two_left:?}");
-    assert_eq!(hit, Vec::<i32>::new(), "processes of the other job were signalled: {:?}", j.log());
+    assert!(sh_alive, "the shared shell ended");
+    assert_eq!(hit, Vec::<i32>::new(), "the other job or the shell was signalled: {:?}", j.log());
 }
 
 /// A same-uid process in the target's process group, started before the target, is not killed
@@ -723,6 +743,7 @@ fn kill_leaves_an_older_process_of_the_targets_group_alive() {
     let code = kill(&j, target.0);
     let older_alive = same(older[0].0, older[0].1);
     let outside = [older[0].0, sh.id() as i32];
+    assert!(signalled(&j).contains(&target.0), "control: the signal log does not name the target: {:?}", j.log());
     assert!(signalled(&j).iter().all(|p| !outside.contains(p)), "a process outside the target's tree was signalled: {:?}", j.log());
     send_child(&mut sh, libc::SIGKILL);
     let _ = sh.wait();

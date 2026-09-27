@@ -71,7 +71,8 @@
 //! - `linger-on M R GO`: S6. Waits for the file GO, then forks C (a new session); C forks G
 //!   (`/bin/sleep M`, recorded), lives 300 ms and exits. This process then waits (60 s at most).
 //! - `escape-exec R PROG ARGS...`: S7 (cells 8, 9). As `escape`, but G records itself and then
-//!   execs PROG ARGS (`/bin/bash`, `env -i`, ...); the root records G too and exits.
+//!   execs PROG ARGS (`/bin/bash`, `env -i`, ...); the root records G too and exits (with
+//!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
@@ -945,6 +946,15 @@ fn main() {
                 libc::_exit(127);
             }) {
                 record(&a[2], g);
+            }
+            // SD_EXEC_READY=<file>: exit only once that file is non-empty (the route has reached
+            // its final program), 10 s at most
+            if let Ok(f) = std::env::var("SD_EXEC_READY") {
+                let mut n = 0;
+                while std::fs::metadata(&f).map_or(true, |m| m.len() == 0) && n < 1000 {
+                    libc::usleep(10_000);
+                    n += 1;
+                }
             }
         }
         std::process::exit(0);
