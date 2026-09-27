@@ -397,10 +397,9 @@ fn walk(p: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The root is journaled before it runs (macOS: before the resuming CONT). A seam SIGKILLs the
-/// supervisor right after the root's line: the journal names the root, and the root never ran
-/// its command. (Linux gets this in P1b, with the root shim.)
-#[cfg(target_os = "macos")]
+/// The root is journaled before it runs (macOS: before the resuming CONT; Linux: before the root
+/// shim's go byte). A seam SIGKILLs the supervisor right after the root's line: the journal names
+/// the root, and the root never ran its command.
 #[test]
 fn the_root_is_journaled_before_it_runs() {
     let d = scratch("rootfirst");

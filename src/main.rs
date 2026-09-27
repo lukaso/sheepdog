@@ -1305,6 +1305,11 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
     let argv: Vec<OsString> = (0..argc.max(0) as usize)
         .map(|i| OsString::from_vec(unsafe { std::ffi::CStr::from_ptr(*argv.add(i)) }.to_bytes().to_vec()))
         .collect();
+    // the Linux root shim runs before anything else: it must not touch a signal disposition
+    #[cfg(target_os = "linux")]
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"__root") {
+        return linux::root_shim(&argv);
+    }
     // PHASE2.md §0.5: a release build has none of the test walls, so it refuses to run in a test
     // environment rather than act on this machine's real state and processes
     if !cfg!(debug_assertions) && (std::env::var_os("SHEEPDOG_TEST_TAG").is_some() || std::env::var_os("SHEEPDOG_TEST_STATE").is_some()) {

@@ -68,8 +68,10 @@ fn parse(args: &[OsString]) -> Option<Args> {
 }
 
 /// Is `pid` a sheepdog (its executable's file name)?
+/// A sheepdog supervisor (a Linux root shim before its exec runs the same binary, but is the
+/// job's root, not a supervisor).
 fn is_sheepdog(pid: i32) -> bool {
-    os::exe_name(pid).as_deref() == Some("sheepdog")
+    os::exe_name(pid).as_deref() == Some("sheepdog") && os::cmdline(pid).get(1).map(String::as_str) != Some("__root")
 }
 
 /// The parent of `pid`. Debug seam SHEEPDOG_TEST_PARENT_UNREADABLE=<pid>: that pid's parent

@@ -10,6 +10,7 @@ use std::io::Write;
 use sheepdog::ident::identity;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 
 /// (ppid, state) from /proc/<pid>/stat; the command name may contain spaces or ')'.
@@ -194,33 +195,268 @@ extern "C" {
     static environ: *const *mut libc::c_char;
 }
 
-/// Spawn the root with posix_spawnp. Its signal dispositions are the caller's (sheepdog
-/// changes none except SIGCHLD, set to default: `#![no_main]`, see main.rs), and its mask is
-/// set to the caller's with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked).
-/// PLAN.md §3.1, cell 23. posix_spawn also avoids running Rust code in a forked child.
-fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<i32, i32> {
+/// The root, started through the shim (PHASE2.md §1 decision 7): its pid, the write end of its
+/// go pipe (the go byte is sent once the root is journaled), and the read end of its error pipe
+/// (an exec failure is reported there; EOF means it exec'd).
+pub struct Root {
+    pub pid: i32,
+    go: i32,
+    err: i32,
+}
+
+impl Root {
+    /// Let the root run its command.
+    pub fn go(&mut self) {
+        if self.go >= 0 {
+            unsafe {
+                libc::write(self.go, b"g".as_ptr() as *const libc::c_void, 1);
+                libc::close(self.go);
+            }
+            self.go = -1;
+        }
+    }
+    /// After the root has exited: did the shim report that its command never ran?
+    pub fn exec_failed(&mut self) -> bool {
+        let mut buf = [0u8; 64];
+        let n = unsafe { libc::read(self.err, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        n > 0 && buf[0] == b'E'
+    }
+}
+
+/// The path this binary is spawned by for the shim: the literal /proc/self/exe (an in-place
+/// upgrade or a removed file does not break it), unless that names a translator (Rosetta, qemu:
+/// the emulated leg), then AT_EXECFN made absolute (never argv[0], which the caller controls).
+fn self_exe() -> Option<CString> {
+    let link = std::fs::read_link("/proc/self/exe").ok()?;
+    let name = link.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name != "rosetta" && !name.starts_with("qemu-") {
+        return CString::new("/proc/self/exe").ok();
+    }
+    let p = unsafe { libc::getauxval(libc::AT_EXECFN) } as *const libc::c_char;
+    if p.is_null() {
+        return None;
+    }
+    let s = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes()));
+    let abs = if s.is_absolute() { s } else { std::env::current_dir().ok()?.join(s) };
+    CString::new(abs.into_os_string().into_vec()).ok()
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
+}
+
+/// Read one handshake line from `fd` within `ms`.
+fn read_line(fd: i32, ms: i32) -> Option<String> {
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(ms as u64);
+    let mut out = Vec::new();
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now()).as_millis() as i32;
+        if left <= 0 {
+            return None;
+        }
+        let mut p = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut p, 1, left) } <= 0 {
+            continue;
+        }
+        let mut b = [0u8; 1];
+        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n <= 0 {
+            return (!out.is_empty()).then(|| String::from_utf8_lossy(&out).into_owned());
+        }
+        if b[0] == b'\n' {
+            return Some(String::from_utf8_lossy(&out).into_owned());
+        }
+        out.push(b[0]);
+    }
+}
+
+/// Start the root through the shim with every signal blocked; it runs its command only after
+/// `Root::go`. Its signal dispositions are the caller's (sheepdog changes none except SIGCHLD,
+/// `#![no_main]`, see main.rs); the shim restores the caller's mask as its last step before the
+/// exec (PLAN.md §3.1, cell 23). posix_spawn also avoids running Rust code in a forked child.
+fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
     let argv: Vec<CString> = cstrings(cmd).map_err(|e| {
         say!("sheepdog: {e}");
         125
     })?;
-    let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
+    let Some(exe) = self_exe() else {
+        say!("sheepdog: cannot find its own executable to start the command");
+        return Err(125);
+    };
+    let (mut go, mut er) = ([0i32; 2], [0i32; 2]);
+    unsafe {
+        if libc::pipe2(go.as_mut_ptr(), libc::O_CLOEXEC) != 0 || libc::pipe2(er.as_mut_ptr(), libc::O_CLOEXEC) != 0 {
+            say!("sheepdog: cannot make a pipe: {}", std::io::Error::last_os_error());
+            return Err(125);
+        }
+        // the shim's ends cross its exec; the shim sets them CLOEXEC again before the command's
+        libc::fcntl(go[0], libc::F_SETFD, 0);
+        libc::fcntl(er[1], libc::F_SETFD, 0);
+    }
+    let mut nonce = [0u8; 8];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut nonce));
+    let nonce = hex(&nonce);
+    let mask = hex(unsafe { std::slice::from_raw_parts(caller_mask as *const _ as *const u8, std::mem::size_of::<libc::sigset_t>()) });
+    let me = unsafe { libc::getpid() };
+    let mut shim: Vec<CString> = ["sheepdog", "__root", &go[0].to_string(), &er[1].to_string(), &me.to_string(), &mask, &nonce, "--"]
+        .iter()
+        .map(|s| CString::new(*s).unwrap())
+        .collect();
+    shim.extend(argv);
+    let mut ptrs: Vec<*mut libc::c_char> = shim.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: libc::pid_t = 0;
     let rc = unsafe {
-        // the root gets the caller's mask (sheepdog blocks TERM and SIGCHLD for itself)
         let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
         libc::posix_spawnattr_init(&mut attr);
-        libc::posix_spawnattr_setsigmask(&mut attr, caller_mask);
+        let mut all: libc::sigset_t = std::mem::zeroed();
+        libc::sigfillset(&mut all);
+        libc::posix_spawnattr_setsigmask(&mut attr, &all);
         libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSIGMASK as libc::c_short);
-        let rc = libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), &attr, ptrs.as_ptr(), environ);
+        let rc = libc::posix_spawn(&mut pid, exe.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), environ);
         libc::posix_spawnattr_destroy(&mut attr);
+        libc::close(go[0]);
+        libc::close(er[1]);
         rc
     };
     if rc != 0 {
-        say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
-        return Err(if rc == libc::ENOENT { 127 } else { 126 });
+        unsafe {
+            libc::close(go[1]);
+            libc::close(er[0]);
+        }
+        say!("sheepdog: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
+        return Err(125);
     }
-    Ok(pid)
+    // the handshake: the shim is running, is this protocol, and holds its PDEATHSIG and parent
+    // (5 s: a cold start under an emulator)
+    let line = read_line(er[0], 5000);
+    if line.as_deref() != Some(format!("H{nonce} 1").as_str()) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL); // raw signal site: the shim this supervisor spawned (PHASE2.md §0.3)
+            let mut st = 0;
+            libc::waitpid(pid, &mut st, 0);
+            libc::close(go[1]);
+            libc::close(er[0]);
+        }
+        let why = match line.as_deref() {
+            Some(l) if l.starts_with('F') => l[1..].to_string(),
+            Some(_) => "an unexpected answer".to_string(),
+            None => "no answer".to_string(),
+        };
+        say!("sheepdog: the command could not be started ({why}); it did not run");
+        return Err(125);
+    }
+    unsafe { libc::fcntl(er[0], libc::F_SETFL, libc::O_NONBLOCK) };
+    Ok(Root { pid, go: go[1], err: er[0] })
+}
+
+/// `sheepdog __root GO ERR SUP MASK NONCE -- cmd...` (PHASE2.md §1 decision 7): the root before
+/// its exec. Every signal is blocked on entry (the supervisor's spawn attribute). It sets
+/// PR_SET_PDEATHSIG(SIGKILL), checks that its parent is the supervisor, answers the handshake,
+/// waits for the go byte (EOF: the supervisor is gone, so it never execs), closes its pipe ends
+/// on exec, restores the caller's mask as its last step, then searches PATH as phase 1's
+/// posix_spawnp did (measured on musl and glibc: no /bin/sh fallback; ENOENT, ENOTDIR, ESTALE,
+/// ENODEV and ETIMEDOUT go on to the next entry; EACCES is remembered and goes on; any other error
+/// stops; an empty entry is the working directory; an unset PATH is the libc's default). An exec
+/// failure is written to the error pipe and ends it with 127 (ENOENT) or 126.
+pub fn root_shim(a: &[OsString]) -> i32 {
+    let arg = |i: usize| a.get(i).and_then(|s| s.to_str()).unwrap_or("");
+    let (Ok(go), Ok(err), Ok(sup)) = (arg(2).parse::<i32>(), arg(3).parse::<i32>(), arg(4).parse::<i32>()) else { return 125 };
+    let Some(mask) = unhex(arg(5)).filter(|m| m.len() == std::mem::size_of::<libc::sigset_t>()) else { return 125 };
+    let nonce = arg(6).to_string();
+    if arg(7) != "--" || a.len() < 9 {
+        return 125;
+    }
+    let cmd = &a[8..];
+    let tell = |s: &str| unsafe {
+        libc::write(err, s.as_ptr() as *const libc::c_void, s.len());
+    };
+    let fail = |what: &str| -> ! {
+        tell(&format!("F{what}\n"));
+        unsafe { libc::_exit(125) }
+    };
+    let no_pdeath = crate::seam_flag("SHEEPDOG_TEST_SHIM_NO_PDEATHSIG");
+    if crate::seam_flag("SHEEPDOG_TEST_SHIM_PRCTL_FAIL") || (!no_pdeath && unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0) {
+        fail("cannot set PR_SET_PDEATHSIG");
+    }
+    if crate::seam_flag("SHEEPDOG_TEST_SHIM_WRONG_PARENT") || unsafe { libc::getppid() } != sup {
+        fail("its parent is not the supervisor");
+    }
+    tell(&format!("H{nonce} 1\n"));
+    let mut b = [0u8; 1];
+    loop {
+        let n = unsafe { libc::read(go, b.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n == 1 {
+            break;
+        }
+        if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe { libc::_exit(125) }; // EOF: the supervisor is gone
+    }
+    unsafe {
+        libc::close(go);
+        libc::fcntl(err, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    crate::seam_hold("SHEEPDOG_TEST_HOLD_SHIM");
+    let argv = match cstrings(cmd) {
+        Ok(v) => v,
+        Err(_) => unsafe { libc::_exit(125) },
+    };
+    let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+    ptrs.push(std::ptr::null());
+    let name = cmd[0].as_bytes();
+    let candidates: Vec<Vec<u8>> = if name.contains(&b'/') {
+        vec![name.to_vec()]
+    } else {
+        let path = std::env::var_os("PATH").map(|p| p.into_vec()).unwrap_or_else(default_path);
+        path.split(|&c| c == b':')
+            .map(|dir| if dir.is_empty() { name.to_vec() } else { [dir, b"/", name].concat() })
+            .collect()
+    };
+    let cands: Vec<CString> = candidates.into_iter().filter_map(|c| CString::new(c).ok()).collect();
+    let mut eacces = false;
+    let mut last = libc::ENOENT;
+    unsafe {
+        // the caller's mask, as the last step: a signal pending until now is delivered here
+        let mut m: libc::sigset_t = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(mask.as_ptr(), &mut m as *mut _ as *mut u8, mask.len());
+        libc::sigprocmask(libc::SIG_SETMASK, &m, std::ptr::null_mut());
+        for c in &cands {
+            libc::execve(c.as_ptr(), ptrs.as_ptr(), environ as *const *const libc::c_char);
+            let e = *libc::__errno_location();
+            match e {
+                libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT => {}
+                libc::EACCES => eacces = true,
+                _ => {
+                    last = e;
+                    break;
+                }
+            }
+            last = e;
+        }
+    }
+    if eacces && matches!(last, libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT) {
+        last = libc::EACCES;
+    }
+    say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(last));
+    tell(&format!("E{last}\n"));
+    unsafe { libc::_exit(if last == libc::ENOENT { 127 } else { 126 }) }
+}
+
+/// The libc's default search path for an unset PATH.
+fn default_path() -> Vec<u8> {
+    let mut buf = vec![0u8; 256];
+    let n = unsafe { libc::confstr(libc::_CS_PATH, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if n == 0 || n > buf.len() {
+        return b"/bin:/usr/bin".to_vec();
+    }
+    buf.truncate(n - 1);
+    buf
 }
 
 /// A signalfd for `set` (PHASE1.md §1.1): CLOEXEC, so it never leaks into the root, and
@@ -391,6 +627,15 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         say!("sheepdog: {why}, so sheepdog cannot tell which processes are this job's. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was started.");
         return 125;
     }
+    // PHASE2.md §1 decision 7: an inherited PR_SET_PDEATHSIG (this run is another run's command)
+    // becomes SIGTERM, so the outer's death is an orderly kill of this job, never a SIGKILL that
+    // leaves it; a run that inherited none sets none
+    unsafe {
+        let mut cur: libc::c_int = 0;
+        if libc::prctl(libc::PR_GET_PDEATHSIG, &mut cur as *mut libc::c_int, 0, 0, 0) == 0 && cur != 0 {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
+        }
+    }
     let relay = match relay_if_needed(sig) {
         Ok(r) => r,
         Err(code) => return code,
@@ -413,18 +658,21 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         return code;
     }
     let journal = std::cell::RefCell::new(crate::journal::Journal::open(&a.owner, &a.argv));
-    let root = match spawn(&a.cmd, &sig.caller_mask) {
+    let mut shim = match spawn(&a.cmd, &sig.caller_mask) {
         Ok(r) => r,
         Err(code) => {
             journal.into_inner().finish(true);
             return code;
         }
     };
+    let root = shim.pid;
     crate::status::set_root("signaled"); // until the root's own end is known
-    // P1a: journaled right after the spawn (the root shim of P1b journals it before it runs)
+    // the root is journaled before it runs: the shim waits for the go byte
     if let Some(id) = sheepdog::ident::identity(root) {
         journal.borrow_mut().record_root(root, id, &a.cmd);
     }
+    crate::seam_hold("SHEEPDOG_TEST_HOLD_BEFORE_GO");
+    shim.go();
     let scan = || {
         let found = descendants(me);
         journal.borrow_mut().record(&found);
@@ -514,6 +762,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     };
     if fd >= 0 {
         unsafe { libc::close(fd) };
+    }
+    if status.is_some() && shim.exec_failed() {
+        crate::status::set_root_final("not-started"); // the shim could not exec the command
     }
     if a.leave_strays && status.is_some() {
         let mut j = journal.into_inner();

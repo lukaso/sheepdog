@@ -8,10 +8,12 @@ struct Status {
     fd: Option<i32>,
     job: Option<String>,
     root: &'static str,
+    /// set once the root's end is known for certain (an exec that failed): later guesses keep off
+    root_final: bool,
     notes: Vec<String>,
 }
 
-static S: Mutex<Status> = Mutex::new(Status { fd: None, job: None, root: "not-started", notes: Vec::new() });
+static S: Mutex<Status> = Mutex::new(Status { fd: None, job: None, root: "not-started", root_final: false, notes: Vec::new() });
 
 fn with<R>(f: impl FnOnce(&mut Status) -> R) -> R {
     f(&mut S.lock().unwrap_or_else(|e| e.into_inner()))
@@ -24,7 +26,19 @@ pub fn set_job(job: Option<String>) {
     with(|s| s.job = job);
 }
 pub fn set_root(root: &'static str) {
-    with(|s| s.root = root);
+    with(|s| {
+        if !s.root_final {
+            s.root = root;
+        }
+    });
+}
+/// The root's end, known for certain; no later `set_root` changes it (Linux: an exec that failed).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn set_root_final(root: &'static str) {
+    with(|s| {
+        s.root = root;
+        s.root_final = true;
+    });
 }
 pub fn add_note(n: &str) {
     with(|s| s.notes.push(n.to_string()));
