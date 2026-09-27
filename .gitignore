@@ -2,3 +2,4 @@ target/
 *.v
 target-linux/
 target-linux-gnu/
+/target-linux-amd64
