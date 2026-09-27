@@ -312,7 +312,7 @@ TDD per the global rules. Every cell that claims sheepdog **catches** something 
 | 3 | **root forks a `setsid` double-fork escapee (intermediate exits in < 1 ms, then exec of `/bin/sleep`) and exits at once** | macOS: the root-disclaim design (r2); Linux: no subreaper |
 | 4 | `nohup … & disown` | shell exit |
 | 5 | child ignores SIGTERM | TERM only |
-| 6 | stopped child, then its parent dies | TERM |
+| 6 | stopped child, then its parent dies. **Amended in S7 (measured):** a TERM at its default action ends even a stopped process (macOS 27), and outside a real session the child's group is orphaned when its parent exits, so the kernel sends it HUP and CONT. The route therefore leaks only for a child that handles TERM, in a terminal job (the group stays non-orphaned); the cell runs in the pty harness | TERM (the handler cannot run while stopped); `--leave-strays` with a HUP-ignoring child (it runs on after the job ends) |
 | 7 | fork storm, 200/s for 3 s; then 0 zombies whose ppid is the supervisor | a one-pass kill; mutant: no orphan reaping |
 | 8 | `/bin/bash` loop (**macOS only**: on Linux the env tag is readable, so this control would not leak) | env-tag sweep |
 | 9 | `env -i` descendant | env-tag sweep |

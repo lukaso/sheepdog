@@ -70,6 +70,10 @@
 //!   and exits at once.
 //! - `linger-on M R GO`: S6. Waits for the file GO, then forks C (a new session); C forks G
 //!   (`/bin/sleep M`, recorded), lives 300 ms and exits. This process then waits (60 s at most).
+//! - `escape-exec R PROG ARGS...`: S7 (cells 8, 9). As `escape`, but G records itself and then
+//!   execs PROG ARGS (`/bin/bash`, `env -i`, ...); the root records G too and exits.
+//! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
+//!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -885,6 +889,65 @@ fn main() {
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
+    }
+    if mode == "storm" && a.len() == 4 {
+        // cell 7 (zombies): C (a new session) forks G every 5 ms for SECS seconds; each G forks
+        // GG and exits at once, so GG is an orphan (adopted by the subreaper on Linux) and exits
+        // 20 ms later. C reaps its own G's. Then this process creates DONE and waits (60 s at
+        // most): the supervisor is still running when the test counts its zombies.
+        let secs: u64 = a[3].parse().unwrap_or_else(|_| usage());
+        let done = a[2].clone();
+        unsafe {
+            libc::alarm(60);
+            match libc::fork() {
+                0 => {
+                    libc::setsid();
+                    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+                    while std::time::Instant::now() < end {
+                        match libc::fork() {
+                            0 => {
+                                if libc::fork() == 0 {
+                                    libc::usleep(20_000);
+                                    libc::_exit(0);
+                                }
+                                libc::_exit(0);
+                            }
+                            _ => {}
+                        }
+                        let mut st = 0;
+                        while libc::waitpid(-1, &mut st, libc::WNOHANG) > 0 {}
+                        libc::usleep(5_000);
+                    }
+                    libc::_exit(0);
+                }
+                -1 => std::process::exit(1),
+                c => {
+                    let mut st = 0;
+                    libc::waitpid(c, &mut st, 0);
+                }
+            }
+            let _ = std::fs::File::create(&done);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if mode == "escape-exec" && a.len() >= 4 {
+        // as `escape`, but G execs PROG ARGS (after recording itself); the root records G
+        let argv: Vec<CString> = a[3..].iter().map(|x| CString::new(x.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        let rec = a[2].clone();
+        unsafe {
+            if let Some(g) = spawn_escapee(&rec, true, || {
+                record(&rec, libc::getpid());
+                libc::execvp(ptrs[0], ptrs.as_ptr());
+                libc::_exit(127);
+            }) {
+                record(&a[2], g);
+            }
+        }
+        std::process::exit(0);
     }
     unsafe {
         match (mode, a.len()) {
