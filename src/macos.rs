@@ -578,12 +578,14 @@ fn wait(
                 Err(e) if e == libc::ESRCH => proc_exiting = true,
                 Err(e) => {
                     say!("sheepdog: cannot watch the command's exit (errno {e}); polling instead");
+                    crate::trace("polling exit".into());
                     polling = true;
                 }
             }
             if watch_term && !polling {
                 if let Err(e) = reg(&ch[1]) {
                     say!("sheepdog: cannot watch TERM (errno {e}); polling instead");
+                    crate::trace("polling term".into());
                     polling = true;
                 }
             }
@@ -603,6 +605,7 @@ fn wait(
                     ev.flags = libc::EV_ADD;
                     if let Err(e) = reg(&ev) {
                         say!("sheepdog: cannot watch signal {s} (errno {e}); polling instead");
+                        crate::trace(format!("polling signal {s}"));
                         polling = true;
                     }
                 }
@@ -737,6 +740,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
+                crate::trace("degraded".into());
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             if let Some(code) = crate::term_before_spawn(sig) {

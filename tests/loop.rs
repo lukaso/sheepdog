@@ -267,10 +267,13 @@ fn s1_term_wakes_the_loop_at_once() {
 #[test]
 fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
     let root = format!("23.{}113001", std::process::id());
+    let logf = tmp("kq-einval-log");
+    let _ = std::fs::remove_file(&logf);
     let mut c = Command::new(sheepdog())
         .args(["run", "--", "/bin/sleep", &root])
         .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
-        .stderr(Stdio::piped())
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", &logf)
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let t = Instant::now();
@@ -287,12 +290,9 @@ fn s1_a_failed_kqueue_registration_falls_back_to_polling() {
     let st = wait_bounded(&mut c, Duration::from_secs(3));
     // KILL, not TERM: a root left stopped would keep TERM pending and the stderr pipe open
     kill_marked(&[&root]);
-    let mut err = String::new();
-    if let Some(mut e) = c.stderr.take() {
-        use std::io::Read;
-        let _ = e.read_to_string(&mut err);
-    }
-    assert!(err.contains("polling instead"), "the seam did not make the wait poll: {err:?}");
+    let log = std::fs::read_to_string(&logf).unwrap_or_default();
+    let _ = std::fs::remove_file(&logf);
+    assert!(log.lines().any(|l| l == "polling exit"), "the seam did not make the wait poll: {log:?}");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "TERM was ignored after a failed registration");
 }
 

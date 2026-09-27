@@ -1222,8 +1222,10 @@ pub fn die_by_term(fallback: i32) -> i32 {
     fallback
 }
 
-/// Report a missed deadline (PLAN.md §3.3 step 6) and return exit code 125.
+/// Report a missed deadline (PLAN.md §3.3 step 6) and return exit code 125. The debug signal log
+/// gets `deadline <pid>...` (the cells read that, never the message).
 pub fn deadline_missed(alive: &[i32]) -> i32 {
+    trace(std::iter::once("deadline".to_string()).chain(alive.iter().map(|p| p.to_string())).collect::<Vec<_>>().join(" "));
     if alive.is_empty() {
         say!("sheepdog: members are still alive at the kill deadline, but none could be listed. The tree is NOT clean.");
     } else {

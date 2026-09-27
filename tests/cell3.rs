@@ -256,15 +256,20 @@ fn cell24_a_member_that_cannot_be_killed_is_reported_not_declared_clean() {
             .env("SHEEPDOG_TEST_FORGET", "1")
             .env("SHEEPDOG_TEST_NOKILL", "1")
             .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", it.rec.with_extension("log"))
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&errf).unwrap())
             .status()
             .unwrap();
         let err = std::fs::read_to_string(&errf).unwrap_or_default();
         let _ = std::fs::remove_file(&errf);
+        let log = std::fs::read_to_string(it.rec.with_extension("log")).unwrap_or_default();
+        let _ = std::fs::remove_file(it.rec.with_extension("log"));
         let g = it.recorded().first().copied().expect("the escapee was recorded").0;
         assert_eq!(st.code(), Some(125), "sheepdog declared clean with a member alive; stderr: {err}");
-        assert!(err.contains("NOT clean") && err.contains(&g.to_string()), "the survivor {g} was not reported: {err}");
+        // the deadline report names the survivor (its trace line: `deadline <pid>...`)
+        let reported = log.lines().any(|l| l.split_whitespace().next() == Some("deadline") && l.split_whitespace().any(|w| w == g.to_string()));
+        assert!(reported, "the survivor {g} was not reported: {log:?}");
         drop(it); // cleanup kills the escapee
     }
 }

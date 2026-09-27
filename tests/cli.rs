@@ -52,9 +52,12 @@ fn a_missing_command_exits_127() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failing_self_reexec_falls_back_instead_of_looping() {
+    let log = std::env::temp_dir().join(format!("sd-degraded-{}", std::process::id()));
+    let _ = std::fs::remove_file(&log);
     let mut child = Command::new(sheepdog())
         .args(["run", "--", "true"])
         .env("SHEEPDOG_TEST_SPI", "broken")
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -69,8 +72,10 @@ fn a_failing_self_reexec_falls_back_instead_of_looping() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let out = child.wait_with_output().unwrap();
+    let degraded = std::fs::read_to_string(&log).unwrap_or_default().lines().any(|l| l == "degraded");
+    let _ = std::fs::remove_file(&log);
     assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("tracking is degraded"));
+    assert!(degraded, "control: the fallback (degraded tracking) was not taken");
 }
 
 // ---- cell 23 (PLAN.md §3.1): the root gets the caller's signal state ------------------
@@ -1030,8 +1035,11 @@ mod relay {
         let (job, root, esc) = (m(13), m(14), m(15));
         let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
         let errf = std::env::temp_dir().join(format!("sd-relay-poll-{}", std::process::id()));
+        let logf = errf.with_extension("log");
+        let _ = std::fs::remove_file(&logf);
         let mut relayed = start(Some(&job), &["sh", "-c", &inner])
             .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", &logf)
             .stderr(std::fs::File::create(&errf).unwrap())
             .spawn()
             .unwrap();
@@ -1053,9 +1061,10 @@ mod relay {
             send(p, id, libc::SIGKILL);
         }
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
-        let err = std::fs::read_to_string(&errf).unwrap_or_default();
         let _ = std::fs::remove_file(&errf);
-        assert!(err.contains("polling instead"), "the seam did not make the wait poll: {err:?}");
+        let log = std::fs::read_to_string(&logf).unwrap_or_default();
+        let _ = std::fs::remove_file(&logf);
+        assert!(log.lines().any(|l| l == "polling exit"), "the seam did not make the wait poll: {log:?}");
         assert_eq!(after, (0, 0), "killing the relay leaked the job while polling (root, escapee)");
     }
 

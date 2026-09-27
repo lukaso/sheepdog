@@ -406,6 +406,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let is_subreaper = subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
     if subreaper && !is_subreaper {
         say!("sheepdog: cannot become a subreaper; tracking is degraded");
+        crate::trace("degraded".into());
     }
     let me = unsafe { libc::getpid() };
     if let Some(code) = crate::term_before_spawn(sig) {

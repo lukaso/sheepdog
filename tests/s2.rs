@@ -315,7 +315,8 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
             .args(["run", "--", "/bin/sleep", &j.marker])
             .env("SHEEPDOG_TEST_KQ_SIG_EINVAL", "1")
             .env("SHEEPDOG_TEST_TICK_MS", "900")
-            .stderr(Stdio::piped())
+            .env("SHEEPDOG_TEST_SIGNAL_LOG", j.rec.with_extension("log"))
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let t = Instant::now();
@@ -330,8 +331,9 @@ fn s2_a_failed_term_registration_still_wakes_on_term() {
         let took = k.elapsed();
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(out.status.signal(), Some(libc::SIGTERM));
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("cannot watch TERM"), "the seam did not fail the TERM registration: {err}");
+        let log = std::fs::read_to_string(j.rec.with_extension("log")).unwrap_or_default();
+        let _ = std::fs::remove_file(j.rec.with_extension("log"));
+        assert!(log.lines().any(|l| l == "polling term"), "the seam did not fail the TERM registration: {log:?}");
         assert!(took < Duration::from_millis(400), "TERM took {took:?} after a failed TERM registration");
     }
 }
