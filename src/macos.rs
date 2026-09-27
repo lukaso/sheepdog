@@ -151,7 +151,9 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
     infos.iter().filter(|i| t.ever.contains(&i.uniq)).map(|i| (i.pid, i.uniq)).collect()
 }
 
-/// `sheepdog kill`: an inner supervisor's escapees are tied to it only by responsibility, which `kill` does not use as proof.
+/// `sheepdog kill`: an inner supervisor's escapees are tied to it only by responsibility, which
+/// `kill` does not use as proof: if it does not end on the TERM (its caller ignores TERM), they
+/// can survive, so `kill` reports that supervisor and exits 125.
 pub const ADOPTS_ESCAPEES: bool = false;
 
 /// Every live (not zombie) process, for `sheepdog kill` (S6).

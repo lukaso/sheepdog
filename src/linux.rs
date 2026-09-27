@@ -39,7 +39,12 @@ fn group_pids(pg: i32) -> Vec<i32> {
     v
 }
 
-/// `sheepdog kill`: an inner supervisor adopts its escapees (subreaper), so they are its descendants and `kill` proves them.
+/// `sheepdog kill`: an inner supervisor that is a subreaper (the default mode) adopts its
+/// escapees, so they are its descendants: even if it does not end on the TERM (its caller ignores
+/// TERM), `kill` proves them and kills them with its tree, and exits 0. An inner supervisor without
+/// its subreaper (`--mode none`, or its prctl failed: degraded) whose caller ignores TERM can
+/// leave escapees that were already orphaned out of the tree before `kill` saw them; `kill` then
+/// still exits 0, without a report (stated in PHASE1.md, S6 review round 7).
 pub const ADOPTS_ESCAPEES: bool = true;
 
 /// Every live (not zombie) process, for `sheepdog kill` (S6). The parent, state and start time

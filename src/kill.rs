@@ -216,9 +216,8 @@ pub fn main(args: &[OsString]) -> i32 {
             // one line that claims only this: `s` is the nearest sheepdog above `t` (by parent,
             // or on macOS by responsibility), and `sheepdog kill s` is the way to end its job:
             // its TERM ends the whole job, strays too, even with --leave-strays. An `s` whose
-            // caller ignores TERM does not end on it: on Linux its escapees are its adopted
-            // descendants and die with its tree; on macOS they can survive, and that kill
-            // reports it (exit 125)
+            // caller ignores TERM does not end on it; what that kill can still prove is said at
+            // `ADOPTS_ESCAPEES`
             say!("sheepdog: pid {t} runs under sheepdog pid {s}. To end that sheepdog's job: sheepdog kill {s}");
         }
     }
