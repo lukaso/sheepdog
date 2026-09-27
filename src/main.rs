@@ -651,9 +651,11 @@ pub struct Signals {
     pub caller_mask: libc::sigset_t,
     /// false when the caller ignored TERM: then TERM stays ignored, for sheepdog and the root
     pub watch_term: bool,
-    /// INT and HUP, each watched only if the caller left it at its default (S4)
+    /// INT, HUP and QUIT, each watched only if the caller left it at its default (S4; QUIT since
+    /// the phase-1 review: ctrl-\ ended sheepdog before its kill)
     pub watch_int: bool,
     pub watch_hup: bool,
+    pub watch_quit: bool,
     /// the stop signals TSTP, TTIN, TTOU and CONT, each watched only at its default (S5)
     pub watch_stop: [bool; 3],
     pub watch_cont: bool,
@@ -661,6 +663,12 @@ pub struct Signals {
 
 /// The stop signals job control handles, in the order `watch_stop` lists them.
 pub const STOPS: [c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
+
+/// Signals whose default action ends a process and that sheepdog never acts on: blocked for
+/// sheepdog itself (`run` and `kill`), so that none of them can end it before or during its kill
+/// (phase-1 review). Faults (SEGV, BUS, ILL, FPE, TRAP, SYS) are left alone.
+pub const QUIET_ENDERS: [c_int; 8] =
+    [libc::SIGPIPE, libc::SIGUSR1, libc::SIGUSR2, libc::SIGALRM, libc::SIGVTALRM, libc::SIGPROF, libc::SIGXCPU, libc::SIGXFSZ];
 
 impl Signals {
     /// The signal set the event loop waits on: CHLD plus every watched signal.
@@ -673,6 +681,7 @@ impl Signals {
                 (self.watch_term, libc::SIGTERM),
                 (self.watch_int, libc::SIGINT),
                 (self.watch_hup, libc::SIGHUP),
+                (self.watch_quit, libc::SIGQUIT),
                 (self.watch_stop[0], STOPS[0]),
                 (self.watch_stop[1], STOPS[1]),
                 (self.watch_stop[2], STOPS[2]),
@@ -702,10 +711,17 @@ fn setup_signals() -> Signals {
             watch_term: at_default(libc::SIGTERM),
             watch_int: at_default(libc::SIGINT),
             watch_hup: at_default(libc::SIGHUP),
+            watch_quit: at_default(libc::SIGQUIT),
             watch_stop: STOPS.map(|s| at_default(s)),
             watch_cont: at_default(libc::SIGCONT),
         };
-        let block = sig.wait_set();
+        let mut block = sig.wait_set();
+        // every other signal whose default action ends a process is blocked for sheepdog alone
+        // (never waited for): sheepdog must not die without its kill (a write to a closed stderr
+        // is EPIPE, not SIGPIPE). The root gets the caller's mask (SETSIGMASK).
+        for s in QUIET_ENDERS {
+            libc::sigaddset(&mut block, s);
+        }
         let mut caller_mask: libc::sigset_t = std::mem::zeroed();
         libc::sigprocmask(libc::SIG_BLOCK, &block, &mut caller_mask);
         Signals { caller_mask, ..sig }
@@ -725,6 +741,11 @@ pub fn consume(sig: c_int) -> bool {
         libc::sigpending(&mut p);
         if libc::sigismember(&p, sig) != 1 {
             return false;
+        }
+        // debug seam: hold between seeing a TSTP pending and clearing it (a CONT sent here
+        // discards that TSTP; the S1 cell for "never sigwait")
+        if sig == libc::SIGTSTP {
+            seam_sleep("SHEEPDOG_TEST_SLEEP_IN_CONSUME_MS");
         }
         libc::signal(sig, libc::SIG_IGN);
         libc::signal(sig, libc::SIG_DFL);
@@ -780,6 +801,7 @@ pub fn exit_status(code: i32) -> c_int {
 pub struct Interrupts {
     got_int: bool,
     got_hup: bool,
+    got_quit: bool,
     leader: bool,
     /// sheepdog's process group is its own: sheepdog or its relay leads it (a shell job, a
     /// terminal). Otherwise it is the caller's group (a harness that did not make a new one).
@@ -799,18 +821,19 @@ impl Interrupts {
         let leader = sid == unsafe { libc::getpid() } || relay.is_some_and(|r| sid == r);
         let pg = unsafe { libc::getpgrp() };
         let own_group = pg == unsafe { libc::getpid() } || relay == Some(pg);
-        Interrupts { got_int: false, got_hup: false, leader, own_group, int_to_root: a.forward_int_to_root, quiet: a.quiet, hint: None, hinted: false }
+        Interrupts { got_int: false, got_hup: false, got_quit: false, leader, own_group, int_to_root: a.forward_int_to_root, quiet: a.quiet, hint: None, hinted: false }
     }
 
     /// No forwarding and no hint (the root-disclaim mode).
     pub fn none() -> Self {
-        Interrupts { got_int: false, got_hup: false, leader: false, own_group: false, int_to_root: false, quiet: true, hint: None, hinted: true }
+        Interrupts { got_int: false, got_hup: false, got_quit: false, leader: false, own_group: false, int_to_root: false, quiet: true, hint: None, hinted: true }
     }
 
-    /// Record a consumed INT or HUP (it decides death by signal at the end).
+    /// Record a consumed INT, HUP or QUIT (it decides death by signal at the end).
     pub fn note(&mut self, sig: c_int) {
         self.got_int |= sig == libc::SIGINT;
         self.got_hup |= sig == libc::SIGHUP;
+        self.got_quit |= sig == libc::SIGQUIT;
     }
 
     /// One INT or HUP consumed while the job runs: rescan, forward, and repeat the scan until
@@ -845,7 +868,8 @@ impl Interrupts {
         // In its own group and in the terminal's foreground, the INT most likely came from the
         // terminal and reached the root too: no hint. In the caller's group (a harness in a
         // terminal) the foreground says nothing about who sent it (S4 review round 2).
-        if !root_got && !self.hinted && self.hint.is_none() && !(self.own_group && in_foreground()) {
+        // (no hint for QUIT: the hint's advice is about INT and HUP)
+        if sig != libc::SIGQUIT && !root_got && !self.hinted && self.hint.is_none() && !(self.own_group && in_foreground()) {
             let ms = seam_ms("SHEEPDOG_TEST_HINT_MS").unwrap_or(3000);
             self.hint = Some((Instant::now() + Duration::from_millis(ms), sig));
         }
@@ -877,6 +901,9 @@ impl Interrupts {
         }
         if sig.watch_hup && consume(libc::SIGHUP) {
             self.got_hup = true;
+        }
+        if sig.watch_quit && consume(libc::SIGQUIT) {
+            self.got_quit = true;
         }
     }
 }
@@ -1074,6 +1101,18 @@ impl JobControl {
     }
 }
 
+/// The supervisor is about to exit: a relay left stopped (it mirrored a stop the job has since
+/// left, while the supervisor was in its kill, where no loop pass continues it) is continued, so
+/// that it sees the exit and ends as the supervisor did (phase-1 review).
+pub fn release_relay(relay: Option<i32>, stopped: fn(i32) -> bool) {
+    if let Some(r) = relay.filter(|&r| r > 1) {
+        if unsafe { libc::getppid() } == r && stopped(r) {
+            trace("relay-released".into());
+            unsafe { libc::kill(r, libc::SIGCONT) };
+        }
+    }
+}
+
 /// Is `sig` pending (blocked, not yet consumed)? Only looks.
 pub fn pending(sig: c_int) -> bool {
     unsafe {
@@ -1127,7 +1166,9 @@ pub fn finish(status: Option<c_int>, result: Result<(), KillError>, ints: &mut I
         (None, Ok(())) => die_by_term(143),
         (Some(st), Ok(())) => {
             let same_signal = libc::WIFSIGNALED(st)
-                && ((libc::WTERMSIG(st) == libc::SIGINT && ints.got_int) || (libc::WTERMSIG(st) == libc::SIGHUP && ints.got_hup));
+                && ((libc::WTERMSIG(st) == libc::SIGINT && ints.got_int)
+                    || (libc::WTERMSIG(st) == libc::SIGHUP && ints.got_hup)
+                    || (libc::WTERMSIG(st) == libc::SIGQUIT && ints.got_quit));
             if same_signal {
                 die_like(st)
             } else {
@@ -1406,5 +1447,10 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(&log);
+        // the variables are process-wide: leave none behind for the other unit cells
+        std::env::remove_var("SHEEPDOG_TEST_PIDFD_ENOSYS");
+        std::env::remove_var("SHEEPDOG_TEST_SIGNAL_LOG");
+        // ./test-all's Linux legs require this line (the cell returns early without SD_REUSE_TEST)
+        eprintln!("race cell ran: 4 legs");
     }
 }

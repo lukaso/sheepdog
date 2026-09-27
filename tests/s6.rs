@@ -52,9 +52,10 @@ impl Job {
     fn recorded(&self) -> Vec<(i32, u64)> {
         read_pairs(&self.rec)
     }
-    /// Processes whose argv carries the marker, other than a sheepdog.
+    /// Processes whose argv carries the marker, other than a sheepdog and a holding shell
+    /// (`Held`: its argv carries the target's command line).
     fn marked(&self) -> Vec<(i32, u64)> {
-        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepdog")).expect("ps failed")
+        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepdog") && w[1] != "/bin/sh").expect("ps failed")
     }
     /// Recorded processes still alive, plus marked ones.
     fn alive(&self) -> Vec<(i32, u64)> {
@@ -180,8 +181,84 @@ fn assert_inert_seam_is_live() {
     assert!(cfg!(debug_assertions), "SHEEPDOG_TEST_INERT needs a debug build: refusing to aim sheepdog at processes it must not signal");
 }
 
-fn spawn_fixture(args: &[&str]) -> Child {
-    Command::new(fixture()).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap()
+/// A shape started under a shell the test made, in a process group of its own, never under the
+/// test binary or in its group (phase-1 review, the S7 class): a regression that widens `sheepdog
+/// kill` (to the target's group, its siblings, its parent's children) then reaches only this
+/// cell's processes, and the cell goes red instead of killing a neighbour. `id()` is the target:
+/// the shell's background command, found by the pid the shell wrote.
+struct Held {
+    sh: Child,
+    pid: i32,
+    pid_id: u64,
+}
+
+impl Held {
+    /// Start `prelude; "$@" & echo $! > PIDFILE; wait` in `/bin/sh`, in a new group.
+    fn start(prelude: &str, args: &[&str]) -> Held {
+        use std::os::unix::process::CommandExt;
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let pidfile = std::env::temp_dir().join(format!("sd-s6-held-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let script = format!("{prelude} \"$@\" & echo $! > '{}'; wait", pidfile.display());
+        let sh = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .arg("sh")
+            .args(args)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut pid = 0;
+        wait_for("the held target's pid", Duration::from_secs(15), || {
+            pid = std::fs::read_to_string(&pidfile).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+            pid > 0
+        });
+        let _ = std::fs::remove_file(&pidfile);
+        let (pid, pid_id) = found(pid).expect("the held target");
+        let ppid: i32 = String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().unwrap().stdout).trim().parse().unwrap();
+        assert_ne!(ppid, std::process::id() as i32, "the target's parent is the test binary");
+        assert_ne!(unsafe { libc::getpgid(pid) }, unsafe { libc::getpgrp() }, "the target is in the test binary's group");
+        Held { sh, pid, pid_id }
+    }
+    fn id(&self) -> u32 {
+        self.pid as u32
+    }
+    /// Signal the target, identity-checked.
+    fn signal(&self, sig: libc::c_int) -> bool {
+        send(self.pid, self.pid_id, sig)
+    }
+    fn running(&self) -> bool {
+        same(self.pid, self.pid_id)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.signal(libc::SIGKILL);
+        send_child(&mut self.sh, libc::SIGKILL);
+        let _ = self.sh.wait();
+    }
+}
+
+/// Wait (bounded) until the held target is gone and its shell has ended; Some(the shell's status).
+fn wait_held(h: &mut Held, limit: Duration) -> Option<ExitStatus> {
+    let end = Instant::now() + limit;
+    while h.running() && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if h.running() {
+        return None;
+    }
+    wait_bounded(&mut h.sh, end.saturating_duration_since(Instant::now()).max(Duration::from_secs(1)))
+}
+
+fn spawn_fixture(args: &[&str]) -> Held {
+    let mut a = vec![fixture()];
+    a.extend_from_slice(args);
+    Held::start("", &a)
 }
 
 /// Cell 27: a live tree 20 deep is killed whole.
@@ -191,7 +268,7 @@ fn s6_kill_of_a_live_tree_20_deep_leaves_no_survivor() {
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "20"]);
     j.wait_recorded(20);
     let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[]);
-    let _ = wait_bounded(&mut c, Duration::from_secs(5));
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -204,7 +281,7 @@ fn s6_a_setsid_grandchild_whose_parent_lives_is_killed() {
     let mut c = spawn_fixture(&["setsid-kid", &j.marker, &j.rec()]);
     j.wait_recorded(3);
     let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[]);
-    let _ = wait_bounded(&mut c, Duration::from_secs(5));
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -220,7 +297,7 @@ fn s6_a_member_that_daemonizes_on_term_is_killed_by_its_puniq() {
     let mut c = spawn_fixture(&["fork-on-term", &j.marker, &j.rec()]);
     j.wait_recorded(2);
     let k = kill(&j, &["--grace", "1s", &c.id().to_string()], &[]);
-    let _ = wait_bounded(&mut c, Duration::from_secs(5));
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(j.recorded().len(), 3, "control: the member did not daemonize on TERM");
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -236,8 +313,8 @@ fn s6_dry_run_lists_the_tree_and_signals_nothing() {
     let alive = j.alive().len();
     let log = j.log();
     let listed = k.listed();
-    send_child(&mut c, libc::SIGKILL);
-    let _ = c.wait();
+    c.signal(libc::SIGKILL);
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(log, Vec::<String>::new(), "a dry run sent signals");
     assert_eq!(alive, 5, "a dry run killed processes");
@@ -279,7 +356,7 @@ fn s6_a_missed_deadline_exits_125() {
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "2"]);
     j.wait_recorded(2);
     let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[("SHEEPDOG_TEST_NEVER_EMPTY", "1"), ("SHEEPDOG_TEST_DEADLINE_MS", "300")]);
-    let _ = wait_bounded(&mut c, Duration::from_secs(5));
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(j.alive(), vec![], "control: the kill did not run (a usage error also exits 125)");
     assert_eq!(k.code, Some(125), "stderr: {}", k.err);
 }
@@ -296,8 +373,8 @@ fn s6_control_the_inert_seam_logs_the_signals_it_withholds() {
     let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[INERT, ("SHEEPDOG_TEST_DEADLINE_MS", "300")]);
     let alive = j.alive().len();
     let log = j.log();
-    send_child(&mut c, libc::SIGKILL);
-    let _ = c.wait();
+    c.signal(libc::SIGKILL);
+    let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(alive, 3, "the inert seam let a signal through");
     let target = c.id().to_string();
     assert!(log.iter().any(|l| l.split_whitespace().any(|w| w == target)), "the inert seam logged no signal to the target: {log:?}");
@@ -384,17 +461,11 @@ fn s6_another_users_process_is_refused() {
 /// Start `sheepdog run -- sd-fixture ticker M R` and wait until the job is complete: the root
 /// has named itself and the escapee has its five ticking children (seven recorded: the root,
 /// the escapee and its children).
-fn ticker_job(j: &Job) -> Child {
-    let c = Command::new(sheepdog())
-        .args(["run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+fn ticker_job(j: &Job) -> Held {
+    let sup = Held::start("", &[sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
-    c
+    sup
 }
 
 /// Every process of the job, including the root, is gone.
@@ -410,17 +481,12 @@ fn job_gone(j: &Job) -> Vec<(i32, u64)> {
 #[test]
 fn s6_an_inner_supervisor_is_ended_first_so_its_escapees_die() {
     let j = Job::new();
-    let mut outer = Command::new("/bin/sh")
-        .args(["-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\"; exit 0", sheepdog(), fixture(), &j.marker, &j.rec()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut outer = Held::start("", &["/bin/sh", "-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\"; exit 0", sheepdog(), fixture(), &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     let k = kill(&j, &["--grace", "0", &outer.id().to_string()], &[]);
-    let _ = wait_bounded(&mut outer, Duration::from_secs(5));
+    let outer_end = wait_held(&mut outer, Duration::from_secs(5));
+    assert!(outer_end.is_some(), "the outer shell (the target) survived");
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the inner job");
 }
@@ -431,7 +497,7 @@ fn s6_kill_of_a_supervisor_ends_its_whole_job() {
     let j = Job::new();
     let mut sup = ticker_job(&j);
     let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[]);
-    let _ = wait_bounded(&mut sup, Duration::from_secs(5));
+    let _ = wait_held(&mut sup, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }
@@ -442,9 +508,9 @@ fn s6_kill_of_a_supervisor_ends_its_whole_job() {
 fn s6_a_stopped_supervisor_is_continued_after_its_term() {
     let j = Job::new();
     let mut sup = ticker_job(&j);
-    assert!(send_child(&mut sup, libc::SIGSTOP));
+    assert!(sup.signal(libc::SIGSTOP));
     let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "3000")]);
-    let _ = wait_bounded(&mut sup, Duration::from_secs(5));
+    let _ = wait_held(&mut sup, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }
@@ -464,10 +530,10 @@ fn s6_kill_of_a_member_kills_its_subtree_only_and_names_the_supervisor() {
     assert!(subtree.iter().any(|&(p, _)| p == g), "control: the escapee {g} is not among the recorded");
     assert_eq!(subtree.len(), 6, "control: the escapee and its five children");
     let k = kill(&j, &["--grace", "0", &g.to_string()], &[]);
-    let (root_alive, sup_running) = (same(root.0, root.1), matches!(sup.try_wait(), Ok(None)));
+    let (root_alive, sup_running) = (same(root.0, root.1), sup.running());
     let left: Vec<(i32, u64)> = subtree.into_iter().filter(|&(p, id)| same(p, id)).collect();
-    send_child(&mut sup, libc::SIGTERM);
-    let _ = wait_bounded(&mut sup, Duration::from_secs(10));
+    sup.signal(libc::SIGTERM);
+    let _ = wait_held(&mut sup, Duration::from_secs(10));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(left, vec![], "the member's subtree survived");
     assert!(root_alive, "the job's root was killed");
@@ -500,7 +566,7 @@ fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
         // the window closes only now: the signal is sent while sheepdog holds after its freeze
         std::fs::File::create(&release).unwrap();
         let st = wait_bounded(&mut k, Duration::from_secs(20));
-        let _ = wait_bounded(&mut c, Duration::from_secs(5));
+        let _ = wait_held(&mut c, Duration::from_secs(5));
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(j.alive(), vec![], "signal {sig}: members were left (stopped)");
         assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
@@ -513,21 +579,14 @@ fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
 /// so the kill after the wait proves and kills them all: exit 0.
 #[test]
 fn s6_a_supervisor_that_ignores_term_is_not_claimed_clean() {
-    use std::os::unix::process::CommandExt;
     let j = Job::new();
-    let mut c = Command::new(sheepdog());
-    c.args(["run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    unsafe {
-        c.pre_exec(|| {
-            libc::signal(libc::SIGTERM, libc::SIG_IGN);
-            Ok(())
-        });
-    }
-    let mut sup = c.spawn().unwrap();
+    // the shell ignores TERM, and so does its background sheepdog (an ignored signal stays
+    // ignored across fork and exec)
+    let mut sup = Held::start("trap '' TERM;", &[sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "1000")]);
-    let _ = wait_bounded(&mut sup, Duration::from_secs(5));
+    let _ = wait_held(&mut sup, Duration::from_secs(5));
     if cfg!(target_os = "macos") {
         assert_eq!(k.code, Some(125), "stderr: {}", k.err);
         assert!(k.err_numbers().contains(&(sup.id() as i32)), "stderr does not name the supervisor {}: {}", sup.id(), k.err);
@@ -546,7 +605,7 @@ fn s6_kill_of_a_jobs_root_ends_the_job_and_names_the_supervisor() {
     let mut sup = ticker_job(&j);
     let root = read_pairs(&j.file(".root"))[0];
     let k = kill(&j, &["--grace", "0", &root.0.to_string()], &[]);
-    let st = wait_bounded(&mut sup, Duration::from_secs(10));
+    let st = wait_held(&mut sup, Duration::from_secs(10));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert!(st.is_some(), "the supervisor did not end");
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
@@ -562,8 +621,10 @@ fn s6_kill_of_a_jobs_root_ends_the_job_and_names_the_supervisor() {
 fn s6_the_tree_is_scanned_while_a_supervisor_is_awaited() {
     let j = Job::new();
     let go = j.file(".tick");
-    let mut outer = Command::new("/bin/sh")
-        .args([
+    let mut outer = Held::start(
+        "",
+        &[
+            "/bin/sh",
             "-c",
             "\"$0\" run --quiet --grace 3s -- \"$1\" fork-on-term \"$2\" \"$3\" & \"$1\" linger-on \"$2\" \"$3\" \"$4\"; wait",
             sheepdog(),
@@ -571,18 +632,15 @@ fn s6_the_tree_is_scanned_while_a_supervisor_is_awaited() {
             &j.marker,
             &j.rec(),
             go.to_str().unwrap(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        ],
+    );
     j.wait_recorded(3);
     let k = spawn_kill(&j, &["--grace", "0", &outer.id().to_string()], &[]);
     wait_for("the supervisor wait", Duration::from_secs(15), || j.log().iter().any(|l| l.starts_with("supervisor ")));
     std::fs::File::create(&go).unwrap();
     let k = finish(&j, k);
-    let _ = wait_bounded(&mut outer, Duration::from_secs(5));
+    let outer_end = wait_held(&mut outer, Duration::from_secs(5));
+    assert!(outer_end.is_some(), "the outer shell (the target) survived");
     assert!(j.recorded().len() >= 5, "control: the sibling's child was not created: {:?}", j.recorded());
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -632,18 +690,10 @@ fn s6_an_unreadable_ancestor_chain_refuses_the_kill() {
 /// no member stopped. The members ignore TERM, so the grace would otherwise last 30 s.
 #[test]
 fn s6_a_signal_during_the_grace_ends_kill_at_once() {
-    use std::os::unix::process::CommandExt;
     for sig in [libc::SIGTERM, libc::SIGINT] {
         let j = Job::new();
-        let mut c = Command::new(fixture());
-        c.args(["deep", &j.marker, &j.rec(), "3"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-        unsafe {
-            c.pre_exec(|| {
-                libc::signal(libc::SIGTERM, libc::SIG_IGN);
-                Ok(())
-            });
-        }
-        let mut c = c.spawn().unwrap();
+        // the tree ignores TERM (inherited from the holding shell)
+        let mut c = Held::start("trap '' TERM;", &[fixture(), "deep", &j.marker, &j.rec(), "3"]);
         j.wait_recorded(3);
         let target = c.id().to_string();
         let mut k = spawn_kill(&j, &["--grace", "30s", &target], &[]);
@@ -659,8 +709,8 @@ fn s6_a_signal_during_the_grace_ends_kill_at_once() {
         let st = wait_bounded(&mut k, Duration::from_secs(20));
         let took = t0.elapsed();
         let stopped: Vec<i32> = j.recorded().iter().filter(|&&(p, id)| same(p, id) && ps_stat(p).starts_with('T')).map(|&(p, _)| p).collect();
-        send_child(&mut c, libc::SIGKILL);
-        let _ = c.wait();
+        c.signal(libc::SIGKILL);
+        let _ = wait_held(&mut c, Duration::from_secs(5));
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
         assert!(took < Duration::from_secs(2), "signal {sig}: sheepdog took {took:?} to act on it");
@@ -679,13 +729,7 @@ fn ps_stat(pid: i32) -> String {
 #[test]
 fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     let j = Job::new();
-    let mut relay = Command::new(fixture())
-        .args(["bg-then-exec", &j.marker, sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut relay = Held::start("", &[fixture(), "bg-then-exec", &j.marker, sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     let bg = scan(&j.marker, |w| w.len() >= 2 && w[1] == "/bin/sleep").expect("ps failed");
@@ -697,7 +741,7 @@ fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     let k = kill(&j, &["--grace", "0", &bgp.to_string()], &[]);
     let (bg_alive, root_alive) = (same(bgp, bgid), same(root.0, root.1));
     let k2 = kill(&j, &["--grace", "0", &root.0.to_string()], &[]);
-    let st = wait_bounded(&mut relay, Duration::from_secs(10));
+    let st = wait_held(&mut relay, Duration::from_secs(10));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert!(!bg_alive, "the background job survived");
     assert!(root_alive, "the job's root was killed with the background job");
@@ -719,9 +763,40 @@ fn s6_dry_run_names_a_supervisor_by_its_program() {
     let j = Job::new();
     let mut sup = ticker_job(&j);
     let k = kill(&j, &["--dry-run", &sup.id().to_string()], &[]);
-    send_child(&mut sup, libc::SIGTERM);
-    let _ = wait_bounded(&mut sup, Duration::from_secs(10));
+    sup.signal(libc::SIGTERM);
+    let _ = wait_held(&mut sup, Duration::from_secs(10));
     let line = k.out.lines().find(|l| l.split_whitespace().next() == Some(&sup.id().to_string())).map(String::from);
     assert_eq!(line.as_deref().and_then(|l| l.split('\t').nth(1)), Some("sheepdog"), "the supervisor's row: {line:?}");
 }
 
+
+/// Phase-1 review (safety F2), Linux: under `unshare --pid --fork` without `--mount-proc`, /proc
+/// belongs to another pid namespace, so every pid, parent and start time sheepdog would read
+/// names someone else's process (a signal would reach whoever has that pid here). `run` refuses
+/// (125) and `kill` refuses (1). Control: with its own /proc (`--mount-proc`) the same job runs.
+/// Needs root (the Linux legs of ./test-all run as root).
+#[cfg(target_os = "linux")]
+#[test]
+fn s6_linux_a_proc_from_another_pid_namespace_is_refused() {
+    // root, and allowed to make a pid namespace (not in the unprivileged enosys leg; the
+    // privileged alpine and debian legs run it)
+    let allowed = unsafe { libc::geteuid() } == 0
+        && Command::new("unshare").args(["--pid", "--fork", "/bin/true"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    if !allowed {
+        eprintln!("skipped: this environment may not create a pid namespace");
+        return;
+    }
+    let run = |mount_proc: bool, args: &[&str]| -> Option<i32> {
+        let mut c = Command::new("unshare");
+        c.args(["--pid", "--fork"]);
+        if mount_proc {
+            c.arg("--mount-proc");
+        }
+        c.arg(sheepdog()).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let mut c = c.spawn().expect("unshare (util-linux) is needed");
+        wait_bounded(&mut c, Duration::from_secs(30)).and_then(|s| s.code())
+    };
+    assert_eq!(run(true, &["run", "--", "/bin/true"]), Some(0), "control: with its own /proc the job runs");
+    assert_eq!(run(false, &["run", "--", "/bin/true"]), Some(125), "run with a foreign /proc was not refused");
+    assert_eq!(run(false, &["kill", "--dry-run", "2"]), Some(1), "kill with a foreign /proc was not refused");
+}

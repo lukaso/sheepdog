@@ -456,7 +456,12 @@ fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
                     // (only a watched TERM counts). Stated: a TERM+CONT that arrives in the instant
                     // between this check and the raise still leaves both stopped.
                     let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
-                    if !(watch_term && crate::pending(libc::SIGTERM)) && !hup {
+                    // and only while the supervisor is still stopped: continued meanwhile (and maybe
+                    // already gone), there is nothing left to mirror (phase-1 review)
+                    if !(watch_term && crate::pending(libc::SIGTERM)) && !hup && stopped(sup) {
+                        // debug seam: hold between that check and the raise (the supervisor can be
+                        // continued here; the level-triggered continue then frees the relay)
+                        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_RAISE_MS");
                         crate::self_stop(libc::WSTOPSIG(st));
                         // resumed: the supervisor too, if it is still stopped (a CONT to the
                         // relay's pid alone); never a CONT to a running supervisor, which could
@@ -585,6 +590,7 @@ fn wait(
             let others = [
                 (sig.watch_int, libc::SIGINT),
                 (sig.watch_hup, libc::SIGHUP),
+                (sig.watch_quit, libc::SIGQUIT),
                 (sig.watch_stop[0], libc::SIGTSTP),
                 (sig.watch_stop[1], libc::SIGTTIN),
                 (sig.watch_stop[2], libc::SIGTTOU),
@@ -639,6 +645,7 @@ fn wait(
             let term = watch_term && crate::consume(libc::SIGTERM);
             let int = sig.watch_int && crate::consume(libc::SIGINT);
             let hup = sig.watch_hup && crate::consume(libc::SIGHUP);
+            let quit = sig.watch_quit && crate::consume(libc::SIGQUIT);
             // all stop signals of one wake are one stop; the first one is raised on sheepdog
             let mut stop = None;
             for (i, &s) in crate::STOPS.iter().enumerate() {
@@ -657,14 +664,14 @@ fn wait(
                 break None;
             }
             if let Some(status) = exited {
-                for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP)] {
+                for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP), (quit, libc::SIGQUIT)] {
                     if got {
                         ints.note(s);
                     }
                 }
                 break Some(status);
             }
-            for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP)] {
+            for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP), (quit, libc::SIGQUIT)] {
                 if got {
                     ints.forward(s, pid, members);
                 }
@@ -808,6 +815,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let mut ours = |pg: i32| crate::only_ours(&group_pids(pg), relay, &tracker.borrow().known);
             let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints) };
             if a.leave_strays && status.is_some() {
+                crate::release_relay(relay, stopped);
                 return crate::finish(status, Ok(()), &mut ints, sig);
             }
             let initial = tracker.borrow().known.clone();
@@ -825,6 +833,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if status.is_none() {
                 let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
             }
+            crate::release_relay(relay, stopped);
             crate::finish(status, result, &mut ints, sig)
         }
         Some("root-disclaim") => {

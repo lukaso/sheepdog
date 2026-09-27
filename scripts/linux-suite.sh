@@ -20,11 +20,16 @@ fi
 rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xf -) && cd /w || exit 3
 export CARGO_TARGET_DIR=/tgt
 cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
-timeout 3000 cargo test --no-fail-fast > /tmp/suite.log 2>&1
+timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
 grep -E '^test result|^thread|FAILED|left:|right:' /tmp/suite.log | cut -c1-200
 left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run)')
 echo "leftovers: $left"
+# the pid-reuse race cell returns early without SD_REUSE_TEST: require that it ran
+race_ok=0
+if [ -n "${SD_REUSE_TEST:-}" ]; then
+  grep -q 'race cell ran: 4 legs' /tmp/suite.log || { echo "the pid-reuse race cell did not run"; race_ok=1; }
+fi
 probe_ok=0
 if [ -n "${SD_LEG_PROBE:-}" ]; then
   # which door delivers signals: a stray the kill must end
@@ -37,4 +42,4 @@ if [ -n "${SD_LEG_PROBE:-}" ]; then
     kill) [ "$p" -eq 0 ] && [ "$k" -gt 0 ] || probe_ok=1 ;;
   esac
 fi
-[ "$rc" -eq 0 ] && [ "$left" -eq 0 ] && [ "$probe_ok" -eq 0 ]
+[ "$rc" -eq 0 ] && [ "$left" -eq 0 ] && [ "$probe_ok" -eq 0 ] && [ "$race_ok" -eq 0 ]

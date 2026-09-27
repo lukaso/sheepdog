@@ -107,6 +107,13 @@ pub fn responsible_pid(_pid: i32) -> Option<i32> {
     None
 }
 
+/// Is /proc this process's own pid namespace's? Under `unshare --pid --fork` without
+/// `--mount-proc` it is another namespace's: every pid, parent and start time read from it names
+/// someone else's process, and a signal sent by that pid reaches whoever has it here.
+pub fn proc_is_ours() -> bool {
+    std::fs::read_link("/proc/self").ok().and_then(|p| p.to_str()?.parse::<i32>().ok()) == Some(unsafe { libc::getpid() })
+}
+
 /// Stopped by a signal (state T; t is a ptrace stop)?
 pub fn stopped(pid: i32) -> bool {
     stat(pid).is_some_and(|(_, st)| st == 'T')
@@ -308,7 +315,12 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             // only a watched one counts). Stated: a TERM+CONT that arrives in the
                             // instant between this check and the raise still leaves both stopped.
                             let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
-                            if !(sig.watch_term && crate::pending(libc::SIGTERM)) && !hup {
+                            // and only while the supervisor is still stopped: continued meanwhile (and
+                            // maybe already gone), there is nothing left to mirror (phase-1 review)
+                            if !(sig.watch_term && crate::pending(libc::SIGTERM)) && !hup && stopped(sup) {
+                                // debug seam: hold between that check and the raise (the supervisor
+                                // can be continued here; the level-triggered continue then frees it)
+                                crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_RAISE_MS");
                                 crate::self_stop(libc::WSTOPSIG(st));
                                 // resumed: the supervisor too, if it is still stopped (a CONT to
                                 // the relay's pid alone); never a CONT to a running supervisor,
@@ -363,6 +375,10 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
 }
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
+    if !proc_is_ours() {
+        say!("sheepdog: /proc belongs to another pid namespace, so sheepdog cannot tell which processes are this job's. Mount a /proc for this namespace (for example unshare --mount-proc). Nothing was started.");
+        return 125;
+    }
     let relay = match relay_if_needed(sig) {
         Ok(r) => r,
         Err(code) => return code,
@@ -407,6 +423,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 (sig.watch_term, libc::SIGTERM),
                 (sig.watch_int, libc::SIGINT),
                 (sig.watch_hup, libc::SIGHUP),
+                (sig.watch_quit, libc::SIGQUIT),
                 (sig.watch_stop[0], libc::SIGTSTP),
                 (sig.watch_stop[1], libc::SIGTTIN),
                 (sig.watch_stop[2], libc::SIGTTOU),
@@ -431,14 +448,14 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             break None;
         }
         if let Some(st) = exited {
-            for s in [libc::SIGINT, libc::SIGHUP] {
+            for s in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
                 if got.contains(&s) {
                     ints.note(s);
                 }
             }
             break Some(st);
         }
-        for s in [libc::SIGINT, libc::SIGHUP] {
+        for s in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
             if got.contains(&s) {
                 ints.forward(s, root, &mut || {
                     tracker.refresh(descendants(me));
@@ -469,6 +486,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         unsafe { libc::close(fd) };
     }
     if a.leave_strays && status.is_some() {
+        crate::release_relay(relay, stopped);
         return crate::finish(status, Ok(()), &mut ints, sig);
     }
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
@@ -480,5 +498,6 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         kill_tree(&opts, || descendants(me), reap, || None, crate::signal, initial)
     };
     reap();
+    crate::release_relay(relay, stopped);
     crate::finish(status, result, &mut ints, sig)
 }

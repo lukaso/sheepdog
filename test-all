@@ -36,19 +36,32 @@ declare -a RESULTS=()
 CONTAINERS=()
 cleanup() {
   for c in "${CONTAINERS[@]:-}"; do [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1; done
+  # the leg containers, by the id each one wrote to its cidfile
+  for f in "$LOGDIR"/*.cid; do [ -s "$f" ] && docker rm -f "$(cat "$f")" >/dev/null 2>&1; done
 }
 trap cleanup EXIT
 
 record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
 
+# A leg container: --init (so a signal to the container ends it: a shell as PID 1 ignores TERM),
+# its id recorded in a cidfile (cleanup removes it even after a timeout or ctrl-C), and bounded.
+leg_run() { # leg-name docker-args...
+  local name=$1; shift
+  rm -f "$LOGDIR/$name.cid"
+  timeout -k 30 3600 docker run --rm --init --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
+  local rc=$?
+  [ -s "$LOGDIR/$name.cid" ] && docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
+  return $rc
+}
+
 suite_in() { # image target-dir leg-name [docker args...]
   local img=$1 tgt=$2 name=$3; shift 3
-  timeout 3600 docker run --rm "$@" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh > "$LOGDIR/$name.log" 2>&1
+  leg_run "$name" "$@" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh
 }
 
 leg_macos() {
   [ "$(uname)" = Darwin ] || { record macos "skipped (not macOS)"; return 0; }
-  timeout 3600 cargo test > "$LOGDIR/macos.log" 2>&1
+  timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
   local rc=$?
   local left
   left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|/bin/sleep 2[0-9]\.)")
@@ -99,6 +112,17 @@ job_ready() { # id
 
 ticks() { docker exec "$1" sh -c 'wc -l < /tmp/r.tick' 2>/dev/null | tr -d ' '; }
 
+# Every recorded member of the job has a line "<door> <pid> <sig>" in sheepdog's signal log
+# (waits up to 10 s).
+logged_for_all() { # id sig
+  local i=0
+  while [ $i -lt 500 ]; do
+    docker exec "$1" sh -c 'for p in $(cut -d" " -f1 /tmp/r); do grep -qE "^(pidfd|kill) $p '"$2"'\$" /tmp/log || exit 1; done' 2>/dev/null && return 0
+    sleep 0.02; i=$((i+1))
+  done
+  return 1
+}
+
 wait_exit() { # id -> exit code (bounded)
   timeout 60 docker wait "$1" 2>/dev/null
 }
@@ -112,14 +136,19 @@ leg_pid1() {
   local pid1
   pid1=$(docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
   case "${pid1%% *}" in */sheepdog) ;; *) why="${why:+$why; }PID 1 is not sheepdog: $pid1" ;; esac
-  # TSTP: sheepdog stops the job, then its own stop is ignored (an init): the job runs on
+  # TSTP: sheepdog stops every member (a STOP in its signal log for each recorded one), then its
+  # own stop is ignored (an init: discarded), so it continues each member it stopped (a CONT for
+  # each) and the job runs on. Read on readiness: the log lines.
   docker kill -s TSTP "$c" >/dev/null
-  local i=0
-  while [ $i -lt 500 ] && ! docker exec "$c" grep -q '^stop-wait$' /tmp/log 2>/dev/null; do sleep 0.02; i=$((i+1)); done
-  docker exec "$c" grep -q '^stop-wait$' /tmp/log 2>/dev/null || why="${why:+$why; }no stop after TSTP"
-  sleep 2 # the member wait (1 s) and the discarded self-stop
-  local t1 t2
-  t1=$(ticks "$c"); sleep 1; t2=$(ticks "$c")
+  if ! logged_for_all "$c" 19; then
+    why="${why:+$why; }not every member got a STOP after TSTP"
+  fi
+  if ! logged_for_all "$c" 18; then
+    why="${why:+$why; }not every member got a CONT after the discarded stop"
+  fi
+  local t1 t2 i=0
+  t1=$(ticks "$c")
+  while [ $i -lt 250 ]; do t2=$(ticks "$c"); [ -n "$t1" ] && [ -n "$t2" ] && [ "$t2" -gt "$t1" ] && break; sleep 0.02; i=$((i+1)); done
   [ -n "$t1" ] && [ -n "$t2" ] && [ "$t2" -gt "$t1" ] || why="${why:+$why; }the job does not run after TSTP ($t1 -> $t2)"
   docker kill -s TERM "$c" >/dev/null
   local code
@@ -155,8 +184,8 @@ leg_enosys() {
 leg_other_user() {
   # --init: the script's shell must not be PID 1 (BusyBox `timeout` execs the command, so a test
   # binary would be a child of PID 1, which a cell that needs an ancestor above it refuses)
-  timeout 3600 docker run --rm --init -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh /src/scripts/linux-other-user.sh \
-    > "$LOGDIR/other-user.log" 2>&1 && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
+  leg_run other-user -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh /src/scripts/linux-other-user.sh \
+    && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
 }
 
 leg_tcc() {

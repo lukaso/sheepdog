@@ -182,7 +182,22 @@ fn grace_of(pid: i32) -> Duration {
 }
 
 pub fn main(args: &[OsString]) -> i32 {
+    // signals that would end sheepdog at their default action and that it never uses: blocked
+    // for the whole run (a closed stderr is EPIPE, never SIGPIPE; phase-1 review)
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for s in crate::QUIET_ENDERS {
+            libc::sigaddset(&mut set, s);
+        }
+        libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
     let Some(a) = parse(args) else { return usage() };
+    #[cfg(target_os = "linux")]
+    if !os::proc_is_ours() {
+        say!("sheepdog: /proc belongs to another pid namespace, so sheepdog cannot tell which process pid {} is. Mount a /proc for this namespace (for example unshare --mount-proc). Nothing was signalled.", a.pid);
+        return 1;
+    }
     let t = a.pid;
     if t == 1 {
         say!("sheepdog: refusing to kill pid 1: it is the system's init process. Nothing was signalled.");

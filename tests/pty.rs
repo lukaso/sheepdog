@@ -1923,7 +1923,8 @@ fn term_and_cont_to_the_relay_before_it_mirrors_end_the_job() {
 }
 
 /// S5 review round 5 (P3-1): the supervisor is continued alone (a CONT to its pid) while the relay
-/// is about to mirror its stop (a debug seam holds the relay there). The relay must not end up
+/// is about to mirror its stop: past its check that the supervisor is stopped, before its raise
+/// (a debug seam holds the relay there; since the phase-1 review the relay checks first). The relay must not end up
 /// stopped while the supervisor runs: the job runs on and nothing waits on a stopped relay.
 #[test]
 fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
@@ -1934,7 +1935,7 @@ fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
     let r = ready.display().to_string();
     let log = std::env::temp_dir().join(format!("sd-s5-mirrorlog-{}", t.marker));
     let _ = std::fs::remove_file(&log);
-    let (relay, id) = relay_direct_env(&bg, &t.args(&[]), Some(&log), &[("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", &r)]);
+    let (relay, id) = relay_direct_env(&bg, &t.args(&[]), Some(&log), &[("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_RAISE_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", &r)]);
     t.ready();
     t.ticking();
     let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
@@ -2101,4 +2102,165 @@ fn cell6_a_stopped_orphan_is_killed_and_term_alone_leaks() {
             _ => {}
         }
     }
+}
+
+// ---- S1 (macOS consumption), built in the phase-1 review --------------------------------------
+
+/// PHASE1 S1 (macOS): sheepdog clears a pending signal with the SIG_IGN/SIG_DFL toggle, never
+/// with `sigwait`. A CONT sent while a TSTP is pending discards that TSTP, so a `sigwait` for it
+/// would block for good and a later TERM could never end the job. A debug seam holds sheepdog
+/// right after it saw the TSTP pending (it creates the ready file there): the test sends CONT,
+/// then TERM, and sheepdog must die of the TERM within a bound.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cont_while_a_tstp_is_pending_does_not_block_a_later_term() {
+    let m = short_marker(20);
+    let ready = std::env::temp_dir().join(format!("sd-s1-consume-{m}"));
+    let _ = std::fs::remove_file(&ready);
+    let r = ready.display().to_string();
+    let (mut c, id) = direct(&["--quiet"], &["/bin/sleep".into(), m.clone()], &[("SHEEPDOG_TEST_SLEEP_IN_CONSUME_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", &r)]);
+    wait_for("the root", Duration::from_secs(15), || (sleeps(&m).len() == 1).then_some(()));
+    assert!(send(c.id() as i32, id, libc::SIGTSTP));
+    let in_window = wait_for_opt(Duration::from_secs(10), || ready.exists());
+    assert!(send(c.id() as i32, id, libc::SIGCONT));
+    assert!(send(c.id() as i32, id, libc::SIGTERM));
+    let st = wait_bounded(&mut c, Duration::from_secs(8));
+    if st.is_none() {
+        common::send_child(&mut c, libc::SIGKILL);
+        let _ = c.wait();
+    }
+    let left = sleeps(&m);
+    for p in &left {
+        if let Some(pid_id) = identity(*p) {
+            send(*p, pid_id, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_file(&ready);
+    use std::os::unix::process::ExitStatusExt;
+    assert!(in_window, "control: sheepdog never saw the TSTP pending (the seam was not reached)");
+    assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "the TERM after the CONT did not end the job: {st:?}");
+    assert_eq!(left, Vec::<i32>::new(), "the job survived");
+}
+
+// ---- phase-1 review: every signal that ends by default ------------------------------------
+
+/// Phase-1 review (P1): ctrl-\ sends QUIT to the foreground group. The root dies of it; sheepdog
+/// must still run its kill (the escapee is gone), and then die of QUIT as the root did (the same
+/// rule as INT). Before the fix sheepdog died of QUIT at once and the escapee lived.
+#[test]
+fn ctrl_backslash_ends_the_job_and_leaves_no_escapee() {
+    let job = Job::new();
+    let mut pty = Pty::shell(&[], &run_args(&[], &job.args()));
+    pty.started();
+    let ((esc, esc_id), (root, root_id)) = job.ready();
+    pty.write(b"\x1c");
+    let end = pty.outcome(Duration::from_secs(10));
+    let esc_gone = wait_for_opt(Duration::from_secs(5), || !same(esc, esc_id));
+    let root_alive = same(root, root_id);
+    assert!(esc_gone, "sheepdog ended ({end:?}) and left the escapee {esc} running");
+    assert!(!root_alive, "control: the root survived ctrl-\\");
+    assert_eq!(end, Some(format!("signaled {}", libc::SIGQUIT)), "sheepdog did not die of QUIT as the root did");
+}
+
+/// A signal whose default action ends a process, sent to sheepdog's pid while it holds right
+/// after its first freeze (debug seam): nothing may be left stopped or alive, and sheepdog exits
+/// as the root did (it exited 0; the signal did not end it).
+fn a_signal_in_the_freeze_leaves_nothing(sig: libc::c_int) {
+    let m = short_marker(20);
+    let dir = std::env::temp_dir().join(format!("sd-p1-freeze-{m}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ready, release) = (dir.join("ready"), dir.join("release"));
+    let (r, rel) = (ready.display().to_string(), release.display().to_string());
+    // the member ignores HUP: if sheepdog dies in the freeze, the kernel's HUP+CONT to the
+    // orphaned group must not end it for sheepdog (the member is then seen alive)
+    let script = format!("trap '' HUP; /bin/sleep {m} & exit 0");
+    let (mut c, id) = direct(&["--quiet", "--grace", "0"], &["/bin/sh".into(), "-c".into(), script], &[("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", &rel), ("SHEEPDOG_TEST_READY_FILE", &r)]);
+    let in_window = wait_for_opt(Duration::from_secs(15), || ready.exists());
+    assert!(send(c.id() as i32, id, sig));
+    std::fs::write(&release, "x").unwrap();
+    let st = wait_bounded(&mut c, Duration::from_secs(20));
+    if st.is_none() {
+        common::send_child(&mut c, libc::SIGKILL);
+        let _ = c.wait();
+    }
+    let left: Vec<(i32, Option<char>)> = sleeps(&m).into_iter().map(|p| (p, state(p))).collect();
+    for (p, _) in &left {
+        if let Some(pid_id) = identity(*p) {
+            send(*p, pid_id, libc::SIGKILL);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(in_window, "control: the kill never reached its freeze");
+    assert_eq!(left, vec![], "signal {sig}: members were left (stopped or alive)");
+    assert_eq!(st.and_then(|s| s.code()), Some(0), "signal {sig}: sheepdog did not exit as the root did: {st:?}");
+}
+
+/// Phase-1 review (P1): QUIT between the freeze and the KILL.
+#[test]
+fn a_quit_in_the_freeze_leaves_nothing() {
+    a_signal_in_the_freeze_leaves_nothing(libc::SIGQUIT);
+}
+
+/// Phase-1 review (P2): USR1 (a signal sheepdog never uses) between the freeze and the KILL.
+#[test]
+fn a_usr1_in_the_freeze_leaves_nothing() {
+    a_signal_in_the_freeze_leaves_nothing(libc::SIGUSR1);
+}
+
+/// Phase-1 review (P2): sheepdog's stderr is a pipe nobody reads. Its deadline report then gets
+/// EPIPE, never SIGPIPE: the exit is 125 (the deadline), not death by SIGPIPE (141).
+#[test]
+fn a_closed_stderr_does_not_turn_a_missed_deadline_into_sigpipe() {
+    let m = short_marker(20);
+    let script = format!("/bin/sleep {m} & exit 0");
+    let mut c = Command::new(sheepdog());
+    c.args(["run", "--quiet", "--grace", "0", "--", "/bin/sh", "-c", &script])
+        .env("SHEEPDOG_TEST_NEVER_EMPTY", "1")
+        .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut c = c.spawn().unwrap();
+    drop(c.stderr.take()); // the read end closes: every write gets EPIPE (or SIGPIPE)
+    let st = wait_bounded(&mut c, Duration::from_secs(20));
+    for p in sleeps(&m) {
+        if let Some(pid_id) = identity(p) {
+            send(p, pid_id, libc::SIGKILL);
+        }
+    }
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(125), None)), "a missed deadline with a closed stderr: {st:?}");
+}
+
+/// Phase-1 review (P3): the supervisor is continued (a group CONT, as `fg` sends) while the relay
+/// sits between reading the supervisor's stop and mirroring it, and the root exits at once. The
+/// supervisor ends the job; the relay (the pid the caller waits on) must end too, not stop for
+/// good with nothing left to continue it.
+#[test]
+fn the_relay_is_not_stranded_by_a_stop_after_the_job_ended() {
+    let bg = new_marker();
+    let m = short_marker(7);
+    let dir = std::env::temp_dir().join(format!("sd-p1-relay-{m}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ready, go, started) = (dir.join("ready"), dir.join("go"), dir.join("started"));
+    let r = ready.display().to_string();
+    let root = format!(": > '{}'; while [ ! -e '{}' ]; do /bin/sleep 0.02; done", started.display(), go.display());
+    let (mut relay, id) = relay_direct_env(&bg, &["/bin/sh".into(), "-c".into(), root], None, &[("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", &r)]);
+    wait_for("the root", Duration::from_secs(15), || started.exists().then_some(()));
+    let (sup, sup_id) = wait_for("the supervisor", Duration::from_secs(15), || supervisor_of(relay.id()));
+    assert!(send_group(relay.id() as i32, id, libc::SIGTSTP));
+    let in_window = wait_for_opt(Duration::from_secs(8), || ready.exists());
+    let sup_stopped = state(sup) == Some('T');
+    std::fs::write(&go, "x").unwrap();
+    assert!(send_group(relay.id() as i32, id, libc::SIGCONT));
+    let sup_gone = wait_for_opt(Duration::from_secs(8), || !same(sup, sup_id));
+    // the relay leaves the seam 1.5 s after the ready file: give it that and a margin, bounded
+    let exited = wait_for_opt(Duration::from_secs(6), || matches!(relay.try_wait(), Ok(Some(_))));
+    let rs = state(relay.id() as i32);
+    let _ = std::fs::remove_dir_all(&dir);
+    end_relay(relay, &bg, &[]);
+    assert!(in_window, "control: the relay never reached the mirror");
+    assert!(sup_stopped, "control: the supervisor was not stopped at the mirror");
+    assert!(sup_gone, "control: the supervisor did not end after the root exited");
+    assert!(exited, "the job ended but the relay (the pid the caller waits on) is left in state {rs:?}");
 }

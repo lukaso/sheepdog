@@ -13,10 +13,16 @@ bins=$(cargo test --no-run --message-format=json 2>/dev/null | grep '"profile":{
 [ -n "$bins" ] || { echo "no test executables found"; exit 3; }
 adduser -D sd 2>/dev/null
 mkdir -p /tmp/decoy && chmod 777 /tmp/decoy
-/bin/setpriv --reuid=65534 --regid=65534 --clear-groups /tgt/debug/sd-fixture decoy /tmp/decoy/rec &
+/bin/setpriv --reuid=65534 --regid=65534 --clear-groups /tgt/debug/sd-fixture sigcount /tmp/decoy/rec &
 i=0; while [ ! -s /tmp/decoy/rec ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 decoy=$(cut -d' ' -f1 /tmp/decoy/rec)
 echo "decoy pid $decoy (uid $(ps -o uid= -p "$decoy" | tr -d ' '))"
+# control: the decoy counts a signal (one USR1 from root, by its recorded pid)
+kill -USR1 "$decoy"
+i=0; while [ "$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)" -lt 1 ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
+before=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
+echo "decoy control: $before signal(s) counted"
+[ "$before" -eq 1 ] || { echo "the decoy does not count signals"; exit 3; }
 rc=0
 for b in $bins; do
   # a shell of `sd` stays as the test binary's parent (it does not exec it): a cell that walks
@@ -27,9 +33,9 @@ for b in $bins; do
 done
 st=$(ps -o stat= -p "$decoy" | tr -d ' ')
 sigs=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
-echo "decoy: state=${st:-gone} signals=$sigs"
+echo "decoy: state=${st:-gone} signals=$sigs (1 is the control)"
 kill -KILL "$decoy" 2>/dev/null
 sleep 0.2
 left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run)')
 echo "leftovers: $left"
-[ "$rc" -eq 0 ] && [ -n "$st" ] && [ "${st#T}" = "$st" ] && [ "$sigs" -eq 0 ] && [ "$left" -eq 0 ]
+[ "$rc" -eq 0 ] && [ -n "$st" ] && [ "${st#T}" = "$st" ] && [ "$sigs" -eq 1 ] && [ "$left" -eq 0 ]

@@ -75,7 +75,7 @@
 //!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
-//! - `decoy R`: S8 (another-user leg). Records itself, then counts every catchable signal as a
+//! - `sigcount R`: S8 (another-user leg). Records itself, then counts every catchable signal as a
 //!   line `SIG <n>` in `R.sig` and keeps running (SIGALRM ends it after 1800 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
@@ -918,7 +918,7 @@ fn main() {
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
     }
-    if mode == "decoy" && a.len() == 3 {
+    if mode == "sigcount" && a.len() == 3 {
         // S8 (another-user leg): record itself, then count every catchable signal (a line
         // `SIG <n>` in R.sig) and keep running; SIGALRM keeps its default action and ends it
         // after 1800 s at most
