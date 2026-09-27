@@ -177,10 +177,16 @@ pub enum Sent {
 pub fn trace(line: String) {
     if cfg!(debug_assertions) {
         if let Ok(p) = std::env::var("SHEEPDOG_TEST_SIGNAL_LOG") {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(p) {
-                let _ = writeln!(f, "{line}");
-            }
+            trace_to(std::path::Path::new(&p), &line);
         }
+    }
+}
+
+/// Append one line to the log at `path`, in one write: the relay and the supervisor both write
+/// this log, and a line written in two parts can be merged with the other writer's.
+fn trace_to(path: &std::path::Path, line: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+        let _ = f.write_all(format!("{line}\n").as_bytes());
     }
 }
 
@@ -904,6 +910,7 @@ impl JobControl {
     pub fn keep_relay_running(&self, stopped: fn(i32) -> bool) {
         if let Some(r) = self.relay.filter(|&r| r > 1) {
             if unsafe { libc::getppid() } == r && stopped(r) {
+                trace("relay-continued".into());
                 unsafe { libc::kill(r, libc::SIGCONT) };
             }
         }
@@ -1222,6 +1229,33 @@ mod tests {
     /// (the user had stopped the member, the stranger runs), SD_OTHER_STOPPED (another actor had
     /// stopped the stranger: resumed too, the stated cost of an unknowable prior state), neither
     /// (both running).
+    /// Two processes (the relay and the supervisor) append to one signal log: a line must never
+    /// be merged with another writer's (S5 review round 8, P3-2).
+    #[test]
+    fn trace_lines_from_concurrent_writers_are_never_merged() {
+        let log = std::env::temp_dir().join(format!("sd-trace-merge-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let writers: Vec<_> = ["relay-mirror", "kill 12345 19"]
+            .into_iter()
+            .map(|line| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..5000 {
+                        trace_to(&log, line);
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let s = std::fs::read_to_string(&log).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let bad = s.lines().filter(|l| *l != "relay-mirror" && *l != "kill 12345 19").count();
+        assert_eq!(bad, 0, "merged or split lines in the log");
+        assert_eq!(s.lines().count(), 10_000);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_stop_that_lands_on_a_reused_pid_is_rolled_back() {

@@ -1942,9 +1942,10 @@ fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
     let in_window = wait_for_opt(Duration::from_secs(8), || ready.exists());
     let sup_stopped = state(sup) == Some('T');
     assert!(send(sup, sup_id, libc::SIGCONT));
-    // the relay leaves the seam 1.5 s after the ready file and mirrors the stop it read (its own
-    // trace says so), then the supervisor, running, continues it: it is not left in T
-    let mirrored = wait_for_opt(Duration::from_secs(5), || log_has(&log, "relay-mirror"));
+    // the relay leaves the seam 1.5 s after the ready file and mirrors the stop it read; the
+    // supervisor, running, reads the relay in T and continues it (its trace says so): the relay is
+    // not left in T
+    let mirrored = wait_for_opt(Duration::from_secs(5), || log_has(&log, "relay-continued"));
     let freed = wait_for_opt(Duration::from_secs(5), || state(relay.id() as i32) != Some('T'));
     let (rs, ss) = (state(relay.id() as i32), state(sup));
     let ticks = t.advance();
@@ -1953,7 +1954,7 @@ fn a_supervisor_continued_while_the_relay_mirrors_does_not_strand_it() {
     end_relay(relay, &bg, &[]);
     assert!(in_window, "control: the relay never reached the mirror");
     assert!(sup_stopped, "control: the supervisor was not stopped when the relay reached the mirror");
-    assert!(mirrored, "control: the relay was never seen mirroring the stop");
+    assert!(mirrored, "control: the supervisor never saw the relay stopped (it did not mirror the stop)");
     assert!(freed, "the relay stayed stopped while the supervisor runs");
     assert_ne!(rs, Some('T'), "the relay is stopped while the supervisor runs");
     assert_ne!(ss, Some('T'), "the supervisor is stopped");

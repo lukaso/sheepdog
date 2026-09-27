@@ -241,7 +241,6 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             // instant between this check and the raise still leaves both stopped.
                             let hup = libc::getsid(0) == relay && crate::pending(libc::SIGHUP);
                             if !(sig.watch_term && crate::pending(libc::SIGTERM)) && !hup {
-                                crate::trace("relay-mirror".into());
                                 crate::self_stop(libc::WSTOPSIG(st));
                                 // resumed: the supervisor too, if it is still stopped (a CONT to
                                 // the relay's pid alone); never a CONT to a running supervisor,
