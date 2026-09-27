@@ -62,7 +62,8 @@ fn journaled_root(s: &Path) -> Option<(i32, u64)> {
     for b in std::fs::read_dir(s.join("jobs")).ok()?.flatten() {
         for f in std::fs::read_dir(b.path()).ok()?.flatten() {
             for l in std::fs::read_to_string(f.path()).unwrap_or_default().lines() {
-                let j = json::parse(l).ok()?;
+                // a line being appended while this reads does not parse: skip it
+                let Ok(j) = json::parse(l) else { continue };
                 if j.get("root") == Some(&Json::Bool(true)) {
                     return Some((j.get("pid")?.num()? as i32, j.get("id")?.num()? as u64));
                 }
@@ -198,26 +199,37 @@ fn the_path_search_matches_phase_one() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The command holds no fd of sheepdog's (the shim's go and error pipes are closed at its exec):
-/// a command that lists its own open fds (`exec ls /proc/self/fd`) finds exactly as many as the
-/// same command run without sheepdog (the control: `ls`'s own directory fd, and under an
-/// emulator the translator's fds, are in both).
+/// The command holds no fd of sheepdog's (the shim's go and error pipes, the journal): a command
+/// that lists its own open fds (`exec ls -l /proc/self/fd`) finds no fd from 3 up that is a pipe,
+/// a socket or a journal. The same listing without sheepdog is the control (it must pass the same
+/// check, or the harness hands out such fds itself). Under an emulator the translator keeps fds
+/// of the binaries it ran (measured under Rosetta: busybox, sheepdog); those are files, not pipes.
 #[test]
 fn the_command_holds_no_shim_fd() {
     let d = scratch("fds");
-    let count = |under: bool| -> usize {
+    let leaked = |under: bool| -> Vec<String> {
         let out = d.join(if under { "under" } else { "plain" });
-        let script = format!(r#"exec ls /proc/self/fd > "{}""#, out.display());
+        let script = format!(r#"exec ls -l /proc/self/fd > "{}""#, out.display());
         let code = if under {
             finish(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).spawn().unwrap())
         } else {
             finish(Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap())
         };
         assert_eq!(code, Some(0));
-        std::fs::read_to_string(&out).unwrap().split_whitespace().filter(|x| x.parse::<i32>().is_ok()).count()
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                let (lhs, target) = l.split_once(" -> ")?;
+                let fd: i32 = lhs.split_whitespace().last()?.parse().ok()?;
+                let bad = target.starts_with("pipe:") || target.starts_with("socket:") || target.contains(".journal") || target.contains(".tmp-j-");
+                (fd >= 3 && bad).then(|| l.to_string())
+            })
+            .collect()
     };
-    let (plain, under) = (count(false), count(true));
-    assert_eq!(under, plain, "fds under sheepdog {under}, without it {plain}");
+    assert!(leaked(false).is_empty(), "control: the harness itself hands the command a pipe");
+    let under = leaked(true);
+    assert!(under.is_empty(), "the command holds sheepdog's fds: {under:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
