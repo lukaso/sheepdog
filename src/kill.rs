@@ -214,9 +214,11 @@ pub fn main(args: &[OsString]) -> i32 {
     if !is_sheepdog(t) {
         if let Some(s) = job_of(t) {
             // one line that claims only this: `s` is the nearest sheepdog above `t` (by parent,
-            // or on macOS by responsibility), and `sheepdog kill s` ends its job: its TERM ends
-            // the whole job, strays too, even with --leave-strays, unless the caller of `s`
-            // ignores TERM, which that kill then reports (exit 125 on macOS)
+            // or on macOS by responsibility), and `sheepdog kill s` is the way to end its job:
+            // its TERM ends the whole job, strays too, even with --leave-strays. An `s` whose
+            // caller ignores TERM does not end on it: on Linux its escapees are its adopted
+            // descendants and die with its tree; on macOS they can survive, and that kill
+            // reports it (exit 125)
             say!("sheepdog: pid {t} runs under sheepdog pid {s}. To end that sheepdog's job: sheepdog kill {s}");
         }
     }
