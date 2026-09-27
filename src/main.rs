@@ -1221,21 +1221,13 @@ mod tests {
             .unwrap_or('?')
     }
 
-    /// PLAN.md §3.3 steps 2 and 4, the real race (Linux, needs --privileged for ns_last_pid; run
-    /// with SD_REUSE_TEST=1, as the Linux matrix does): the member's pid is reused by a stranger
-    /// between the identity check and the kill (the WRONG_FREEZE seam makes the check pass, as
-    /// that race does), so the STOP lands on the stranger. The identity is read AFTER the STOP,
-    /// so the stranger is recorded, and it is resumed whatever its state was: SD_MEMBER_STOPPED
-    /// (the user had stopped the member, the stranger runs), SD_OTHER_STOPPED (another actor had
-    /// stopped the stranger: resumed too, the stated cost of an unknowable prior state), neither
-    /// (both running).
     /// Two processes (the relay and the supervisor) append to one signal log: a line must never
     /// be merged with another writer's (S5 review round 8, P3-2).
     #[test]
     fn trace_lines_from_concurrent_writers_are_never_merged() {
         let log = std::env::temp_dir().join(format!("sd-trace-merge-{}", std::process::id()));
         let _ = std::fs::remove_file(&log);
-        let writers: Vec<_> = ["relay-mirror", "kill 12345 19"]
+        let writers: Vec<_> = ["relay-continued", "kill 12345 19"]
             .into_iter()
             .map(|line| {
                 let log = log.clone();
@@ -1251,11 +1243,19 @@ mod tests {
         }
         let s = std::fs::read_to_string(&log).unwrap();
         let _ = std::fs::remove_file(&log);
-        let bad = s.lines().filter(|l| *l != "relay-mirror" && *l != "kill 12345 19").count();
+        let bad = s.lines().filter(|l| *l != "relay-continued" && *l != "kill 12345 19").count();
         assert_eq!(bad, 0, "merged or split lines in the log");
         assert_eq!(s.lines().count(), 10_000);
     }
 
+    /// PLAN.md §3.3 steps 2 and 4, the real race (Linux, needs --privileged for ns_last_pid; run
+    /// with SD_REUSE_TEST=1, as the Linux matrix does): the member's pid is reused by a stranger
+    /// between the identity check and the kill (the WRONG_FREEZE seam makes the check pass, as
+    /// that race does), so the STOP lands on the stranger. The identity is read AFTER the STOP,
+    /// so the stranger is recorded, and it is resumed whatever its state was: SD_MEMBER_STOPPED
+    /// (the user had stopped the member, the stranger runs), SD_OTHER_STOPPED (another actor had
+    /// stopped the stranger: resumed too, the stated cost of an unknowable prior state), neither
+    /// (both running).
     #[cfg(target_os = "linux")]
     #[test]
     fn a_stop_that_lands_on_a_reused_pid_is_rolled_back() {
