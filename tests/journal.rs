@@ -96,34 +96,50 @@ fn marker() -> String {
     format!("29.{:09}", n)
 }
 
-/// A member's journal line is written before the first signal to it: in the signal log, the
-/// `journal <pid>` line of the escapee comes before every signal line that names it.
+/// A member's journal line is written before the first signal to it: in the signal log, every
+/// pid that is signalled has a `journal <pid>` line before its first signal line. The shape: a
+/// member that forks an escapee when it gets TERM (`fork-on-term`), so the escapee is born during
+/// the kill's grace, is first seen by a grace scan, and gets its TERM right after that very scan
+/// (a journal written one scan late would come after it). The job is ended by a TERM to sheepdog.
 #[test]
 fn a_member_is_journaled_before_its_first_signal() {
     let d = scratch("order");
     let s = state(&d);
     let r = d.join("rec");
     let log = d.join("log");
-    let code = finish(
-        Command::new(sheepdog())
-            .args(["run", "--grace", "0", "--", fixture(), "escape", &marker()])
-            .arg(&r)
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
-            .spawn()
-            .unwrap(),
-    );
-    let g = records(&r, 1)[0];
-    let alive = common::alive(g);
-    common::send(g.0, g.1, libc::SIGKILL);
-    assert_eq!(code, Some(0));
-    assert!(!alive, "the escapee was killed");
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--grace", "0.5", "--", fixture(), "fork-on-term", &marker()])
+        .arg(&r)
+        .env("SHEEPDOG_TEST_STATE", &s)
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
+        .spawn()
+        .unwrap();
+    let started = records(&r, 2).len() == 2;
+    common::send_child(&mut c, libc::SIGTERM);
+    let _ = finish(c);
+    let recs = records(&r, 3);
+    for p in recs.iter().filter(|p| common::alive(**p)) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert!(started, "the member was ready");
+    assert_eq!(recs.len(), 3, "the escapee was born during the kill: {recs:?}");
     let text = std::fs::read_to_string(&log).unwrap();
-    let pos = |pred: &dyn Fn(&[&str]) -> bool| text.lines().position(|l| pred(&l.split_whitespace().collect::<Vec<_>>()));
-    let gs = g.0.to_string();
-    let journaled = pos(&|w| w.len() >= 2 && w[0] == "journal" && w[1] == gs).expect("the escapee was journaled");
-    let first_signal = pos(&|w| w.len() >= 2 && (w[0] == "kill" || w[0] == "pidfd") && w[1] == gs).expect("the escapee was signalled");
-    assert!(journaled < first_signal, "journal at line {journaled}, first signal at line {first_signal}:\n{text}");
+    let mut journaled = std::collections::HashSet::new();
+    let mut checked = std::collections::HashSet::new();
+    for l in text.lines() {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        match w.as_slice() {
+            ["journal", p, ..] => {
+                journaled.insert(p.to_string());
+            }
+            [k, p, ..] if *k == "kill" || *k == "pidfd" => {
+                assert!(journaled.contains(*p), "pid {p} was signalled before it was journaled:\n{text}");
+                checked.insert(p.to_string());
+            }
+            _ => {}
+        }
+    }
+    assert!(checked.contains(&recs[2].0.to_string()), "control: the escapee born in the kill was signalled:\n{text}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
