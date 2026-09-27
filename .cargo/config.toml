@@ -1,0 +1,4 @@
+# Every test binary runs in the test environment (PHASE2.md §0.4): scripts/test-env hands a
+# binary under a `deps` directory to `sd-fixture test-env`, and runs anything else unchanged.
+[target.'cfg(all())']
+runner = "scripts/test-env"

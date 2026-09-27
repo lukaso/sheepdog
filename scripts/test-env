@@ -1,0 +1,9 @@
+#!/bin/sh
+# The cargo runner (.cargo/config.toml, PHASE2.md §0.4). A test binary (one in a `deps`
+# directory) runs under `sd-fixture test-env`, which sets the test environment and checks the
+# canary and the withheld sink after it; anything else (`cargo run`) runs unchanged.
+d=$(dirname "$1")
+[ "$(basename "$d")" = deps ] || exec "$@"
+f=$(dirname "$d")/sd-fixture
+[ -x "$f" ] || { echo "sd-test-env: $f is missing (build the fixture first)" >&2; exit 125; }
+exec "$f" test-env "$@"

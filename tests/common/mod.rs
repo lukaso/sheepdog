@@ -81,3 +81,23 @@ pub fn kill_marked(markers: &[&str]) {
         }
     }
 }
+
+/// The test environment (PHASE2.md §0.4) is in place: the cargo runner (`scripts/test-env`)
+/// started this binary with a test tag, a canary state directory (no sentinel), a withheld sink,
+/// and the debug `sheepdog` first on PATH, so a nested `sheepdog` found by name is this build.
+/// Checked once per test binary; every helper that names a binary calls it.
+pub fn test_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        assert!(cfg!(debug_assertions), "the tests need a debug build: its test walls do not exist in a release build");
+        let tag = std::env::var("SHEEPDOG_TEST_TAG").unwrap_or_default();
+        assert!(tag.len() >= 16 && tag.bytes().all(|b| b.is_ascii_hexdigit()), "no test tag: run the tests through cargo (the runner in .cargo/config.toml)");
+        let canary = std::path::PathBuf::from(std::env::var_os("SHEEPDOG_TEST_STATE").unwrap_or_default());
+        assert!(canary.is_dir() && !canary.join(".sheepdog-test").exists(), "no canary state directory");
+        assert!(std::env::var_os("SHEEPDOG_TEST_SINK").is_some(), "no withheld sink");
+        let path = std::env::var("PATH").unwrap_or_default();
+        let first = std::path::Path::new(path.split(':').next().unwrap_or("")).join("sheepdog");
+        let ours = std::fs::canonicalize(env!("CARGO_BIN_EXE_sheepdog")).ok();
+        assert!(ours.is_some() && std::fs::canonicalize(&first).ok() == ours, "the first sheepdog on PATH is not this debug build");
+    });
+}

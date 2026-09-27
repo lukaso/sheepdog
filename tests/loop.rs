@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn sheepdog() -> &'static str {
+    common::test_env();
     env!("CARGO_BIN_EXE_sheepdog")
 }
 

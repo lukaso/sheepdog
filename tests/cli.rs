@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn sheepdog() -> &'static str {
+    common::test_env();
     env!("CARGO_BIN_EXE_sheepdog")
 }
 
@@ -145,6 +146,7 @@ fn cell23_an_ignored_sigpipe_stays_ignored() {
 // ---- phase-0 fix review, round 2 --------------------------------------------------------
 
 fn fixture() -> &'static str {
+    common::test_env();
     env!("CARGO_BIN_EXE_sd-fixture")
 }
 
@@ -1274,4 +1276,10 @@ fn a_forwarded_hup_does_not_leak_the_tree() {
     kill_marked(&[&job, &root, &esc]);
     assert_eq!(after, (0, 0), "a forwarded HUP leaked the tree (root, escapee)");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGHUP), "the relay must die of HUP: {st:?}");
+}
+
+/// PHASE2.md §0.4: every test binary runs in the test environment the cargo runner sets up.
+#[test]
+fn the_tests_run_in_the_test_environment() {
+    common::test_env();
 }

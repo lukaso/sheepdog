@@ -24,6 +24,13 @@
 //! - `exec-chld-ignored PROG ARGS...`: set SIGCHLD to ignored, then exec PROG. Shells cannot
 //!   do this (`trap '' CHLD` leaves SIGCHLD handled), so the SIGCHLD test needs it.
 //! - `print-mask`: print the numbers of the blocked signals, one per line.
+//! - `test-env TESTBIN ARGS...`: the cargo runner's body (`scripts/test-env`, PHASE2.md §0.4).
+//!   Runs TESTBIN with the test environment: a tag (`SHEEPDOG_LEG_TAG` if set, else 128 random
+//!   bits) in `SHEEPDOG_TEST_TAG`, a canary `SHEEPDOG_TEST_STATE` without the sentinel, a
+//!   withheld sink in `SHEEPDOG_TEST_SINK`, and first on PATH a directory whose `sheepdog` is a
+//!   symlink to the debug binary next to TESTBIN's `deps` directory; every other inherited
+//!   `SHEEPDOG_*` and `XDG_STATE_HOME` removed. It forwards TERM and INT, waits, passes the exit
+//!   status on, and fails the run if anything was written to the canary or the sink.
 //! - `term-logger M R [stop]`: as `escape`, but G does not exec: it catches TERM, appends
 //!   `TERM <pid>` to `<R>.term` and exits 0. With `stop`, G first stops itself (SIGSTOP), so it
 //!   can only see a TERM if someone continues it. G's argv carries the marker M.
@@ -511,6 +518,92 @@ unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     libc::_exit(3) // SETEXEC returns only on failure
 }
 
+/// The child the test-env runner waits for, for its TERM/INT forwarding handler.
+static TEST_ENV_CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn test_env_forward(sig: libc::c_int) {
+    let c = TEST_ENV_CHILD.load(std::sync::atomic::Ordering::SeqCst);
+    if c > 1 {
+        unsafe { libc::kill(c, sig) }; // the child this runner spawned, never a group
+    }
+}
+
+/// The cargo runner's body: see `test-env` in the header.
+fn test_env(argv: &[String]) -> ! {
+    use std::path::{Path, PathBuf};
+    let bin = PathBuf::from(&argv[0]);
+    let profile = bin.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
+    let tag = std::env::var("SHEEPDOG_LEG_TAG").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| {
+        let mut b = [0u8; 16];
+        let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b)).is_ok();
+        if !ok {
+            eprintln!("sd-test-env: cannot read /dev/urandom");
+            std::process::exit(125);
+        }
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    });
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("sd-testenv.{}.{nanos}", std::process::id()));
+    let (bindir, canary, sink) = (dir.join("bin"), dir.join("canary"), dir.join("sink"));
+    let made = std::fs::create_dir_all(&bindir)
+        .and_then(|_| std::fs::create_dir(&canary))
+        .and_then(|_| std::fs::write(&sink, b""))
+        .and_then(|_| std::os::unix::fs::symlink(profile.join("sheepdog"), bindir.join("sheepdog")));
+    if let Err(e) = made {
+        eprintln!("sd-test-env: cannot make {}: {e}", dir.display());
+        std::process::exit(125);
+    }
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(&argv[1..]);
+    for (k, _) in std::env::vars_os() {
+        if k.to_string_lossy().starts_with("SHEEPDOG_") {
+            cmd.env_remove(&k);
+        }
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut newpath = bindir.clone().into_os_string();
+    newpath.push(":");
+    newpath.push(path);
+    cmd.env_remove("XDG_STATE_HOME")
+        .env("SHEEPDOG_TEST_TAG", &tag)
+        .env("SHEEPDOG_TEST_STATE", &canary)
+        .env("SHEEPDOG_TEST_SINK", &sink)
+        .env("PATH", newpath);
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("sd-test-env: cannot run {}: {e}", bin.display());
+            std::process::exit(125);
+        }
+    };
+    TEST_ENV_CHILD.store(child.id() as i32, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        libc::signal(libc::SIGTERM, test_env_forward as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, test_env_forward as *const () as libc::sighandler_t);
+    }
+    let status = child.wait();
+    let mut rc = match status {
+        Ok(s) => s.code().unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&s).unwrap_or(0)),
+        Err(_) => 125,
+    };
+    let canary_used = std::fs::read_dir(&canary).map(|mut d| d.next().is_some()).unwrap_or(true);
+    let sink_used = std::fs::metadata(&sink).map(|m| m.len() > 0).unwrap_or(true);
+    if canary_used {
+        eprintln!("sd-test-env: something wrote to the canary state directory {}", canary.display());
+    }
+    if sink_used {
+        eprintln!("sd-test-env: signals were withheld; see {}", sink.display());
+    }
+    if canary_used || sink_used {
+        if rc == 0 {
+            rc = 1;
+        }
+    } else {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    std::process::exit(rc)
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
@@ -518,6 +611,9 @@ fn main() {
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
+    if mode == "test-env" && a.len() >= 3 {
+        test_env(&a[2..]);
+    }
     #[cfg(target_os = "macos")]
     if mode == "redisclaim-c" && a.len() == 4 {
         // C after its disclaim re-exec: start GG, live SD_C_LIFE_MS (default 700 ms), exit.

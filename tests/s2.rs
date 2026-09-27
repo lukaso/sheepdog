@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn sheepdog() -> &'static str {
+    common::test_env();
     env!("CARGO_BIN_EXE_sheepdog")
 }
 fn fixture() -> &'static str {
+    common::test_env();
     env!("CARGO_BIN_EXE_sd-fixture")
 }
 
