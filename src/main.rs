@@ -18,6 +18,7 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
 
+mod kill;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -152,6 +153,13 @@ pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
     // Test seam (debug builds only): SHEEPDOG_TEST_NOKILL=1 makes every signal fail, as EPERM
     // would after a member's setuid exec (cells 20 and 24-lite).
     if seam("SHEEPDOG_TEST_NOKILL") {
+        return Sent::No;
+    }
+    // Test seam (debug builds only): SHEEPDOG_TEST_INERT=1 sends nothing at all and logs each
+    // signal it withholds, so a cell can aim `sheepdog kill` at a process it must never signal
+    // (pid 1, its own caller) and still see a broken target check as a logged signal (S6).
+    if seam("SHEEPDOG_TEST_INERT") {
+        trace(format!("inert {pid} {sig}"));
         return Sent::No;
     }
     // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,
@@ -434,7 +442,7 @@ pub fn kill_tree(
         Err(_) => {
             let known = known.borrow();
             for (&p, &id) in known.iter() {
-                if p > 1 && same(p, id) {
+                if p > 1 && same(p, id) && !seam("SHEEPDOG_TEST_INERT") {
                     unsafe { libc::kill(p, libc::SIGKILL) };
                 }
             }
@@ -559,6 +567,7 @@ fn kill_loop(
         if opts.panic_after_stop {
             panic!("test seam: panic after the freeze");
         }
+        seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_FREEZE_MS");
         refresh(&mut known.borrow_mut(), scan());
         let all: Vec<(i32, u64)> = known.borrow().iter().map(|(&p, &id)| (p, id)).collect();
         for &(p, id) in &all {
@@ -1131,6 +1140,9 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 }
 
 fn run(argv: Vec<OsString>) -> i32 {
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
+        return kill::main(&argv[2..]);
+    }
     let args = match parse(argv) {
         Ok(a) => a,
         Err(code) => return code,

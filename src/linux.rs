@@ -39,6 +39,47 @@ fn group_pids(pg: i32) -> Vec<i32> {
     v
 }
 
+/// Every live (not zombie) process, for `sheepdog kill` (S6).
+pub fn procs() -> Vec<crate::kill::Proc> {
+    let mut v = Vec::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for e in dir.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else { continue };
+            let Ok(uid) = e.metadata().map(|m| m.uid()) else { continue };
+            let (Some((ppid, st)), Some(id)) = (stat(pid), identity(pid)) else { continue };
+            if st != 'Z' {
+                v.push(crate::kill::Proc { pid, ppid, uid, id, puniq: None });
+            }
+        }
+    }
+    v
+}
+
+/// The parent pid of `pid`, if it is alive.
+pub fn parent(pid: i32) -> Option<i32> {
+    stat(pid).map(|(ppid, _)| ppid)
+}
+
+/// The file name of `pid`'s executable (` (deleted)` stripped: the binary was replaced).
+pub fn exe_name(pid: i32) -> Option<String> {
+    let p = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let s = p.to_string_lossy();
+    let s = s.strip_suffix(" (deleted)").unwrap_or(&s);
+    Some(s.rsplit('/').next()?.to_string())
+}
+
+/// `pid`'s argv (empty if unreadable).
+pub fn cmdline(pid: i32) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map(|b| b.split(|&c| c == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect())
+        .unwrap_or_default()
+}
+
+/// Linux has no responsible process.
+pub fn responsible_pid(_pid: i32) -> Option<i32> {
+    None
+}
+
 /// Stopped by a signal (state T; t is a ptrace stop)?
 pub fn stopped(pid: i32) -> bool {
     stat(pid).is_some_and(|(_, st)| st == 'T')

@@ -61,6 +61,13 @@
 //!   line to stdout every 50 ms (TTOU in the background with `tostop`); otherwise it waits.
 //! - `int-exit CODE M READY`: exit CODE on INT (a root that handles ctrl-C itself); creates
 //!   READY once the handler is installed; else waits.
+//! - `deep M R N`: phase-1 S6 (cell 27). A live chain of N processes, this one first: each
+//!   records itself, forks the next and waits for it; the last runs `/bin/sleep M`.
+//! - `setsid-kid M R`: S6 (cell 28(a)). This process forks C and waits; C starts a new session,
+//!   forks G (`/bin/sleep M`) and waits. All three are recorded.
+//! - `fork-on-term M R`: S6 (macOS `puniq`). This process forks C and waits; C waits, and on TERM
+//!   forks G (a new session, TERM ignored, recorded; it keeps this image and waits, 60 s at most)
+//!   and exits at once.
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -343,6 +350,29 @@ extern "C" fn slow_tstp(_: libc::c_int) {
         libc::raise(libc::SIGTSTP);
         // continued: handle the next ctrl-Z the same way
         libc::signal(libc::SIGTSTP, slow_tstp as *const () as usize);
+    }
+}
+
+static mut TERM_REC: [u8; 512] = [0; 512];
+
+/// fork-on-term: on TERM, fork G (a new session, TERM ignored, recorded, then waiting, 60 s at
+/// most), then exit: G's parent is gone before anything could see G as its child. G keeps this
+/// image (argv with the marker): on macOS an exec after the reparenting would reset its `puniq`
+/// to 1 (PLAN.md §2). It allocates in the handler (`record`, in the forked child only): safe
+/// because the main loop sits in `pause()`.
+extern "C" fn fork_on_term(_: libc::c_int) {
+    unsafe {
+        if libc::fork() == 0 {
+            libc::setsid();
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            let rec = std::ffi::CStr::from_ptr(std::ptr::addr_of!(TERM_REC) as *const libc::c_char);
+            record(&rec.to_string_lossy(), libc::getpid());
+            libc::alarm(60);
+            loop {
+                libc::pause();
+            }
+        }
+        libc::_exit(0);
     }
 }
 
@@ -861,6 +891,78 @@ fn main() {
                 let via_pipe = mode == "escape";
                 if let Some(g) = spawn_escapee(&a[3], via_pipe, || { exec_sleep(&m); }) {
                     record(&a[3], g);
+                }
+            }
+            ("deep", 5) => {
+                // a live chain of N processes (this one first): each records itself, forks the
+                // next and waits for it; the last runs `/bin/sleep M`
+                let m = CString::new(a[2].as_str()).unwrap();
+                let n: u32 = a[4].parse().unwrap_or_else(|_| usage());
+                for _ in 1..n {
+                    record(&a[3], libc::getpid());
+                    match libc::fork() {
+                        0 => continue,
+                        -1 => libc::_exit(1),
+                        c => {
+                            let mut st = 0;
+                            libc::waitpid(c, &mut st, 0);
+                            libc::_exit(0);
+                        }
+                    }
+                }
+                record(&a[3], libc::getpid());
+                exec_sleep(&m);
+            }
+            ("setsid-kid", 4) => {
+                // this process forks C and waits; C starts a new session, forks G (`/bin/sleep M`)
+                // and waits: G is a grandchild in another session whose parent lives
+                record(&a[3], libc::getpid());
+                match libc::fork() {
+                    0 => {
+                        libc::setsid();
+                        match libc::fork() {
+                            0 => {
+                                record(&a[3], libc::getpid());
+                                exec_sleep(&CString::new(a[2].as_str()).unwrap());
+                            }
+                            -1 => libc::_exit(1),
+                            g => {
+                                record(&a[3], libc::getpid());
+                                let mut st = 0;
+                                libc::waitpid(g, &mut st, 0);
+                                libc::_exit(0);
+                            }
+                        }
+                    }
+                    -1 => std::process::exit(1),
+                    c => {
+                        let mut st = 0;
+                        libc::waitpid(c, &mut st, 0);
+                    }
+                }
+            }
+            ("fork-on-term", 4) => {
+                // this process forks C and waits; C waits too, and on TERM forks an escapee and
+                // exits (a member that daemonizes when it is told to stop). This process keeps
+                // TERM at its default. C records itself once its handler is set.
+                record(&a[3], libc::getpid());
+                let r = a[3].as_bytes();
+                std::ptr::copy_nonoverlapping(r.as_ptr(), std::ptr::addr_of_mut!(TERM_REC) as *mut u8, r.len().min(511));
+                match libc::fork() {
+                    0 => {
+                        on(libc::SIGTERM, fork_on_term as *const () as usize, false);
+                        unblock_all();
+                        record(&a[3], libc::getpid());
+                        libc::alarm(60);
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    -1 => std::process::exit(1),
+                    c => {
+                        let mut st = 0;
+                        libc::waitpid(c, &mut st, 0);
+                    }
                 }
             }
             ("escape-nomarker", 3) => {

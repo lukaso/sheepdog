@@ -151,6 +151,61 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
     infos.iter().filter(|i| t.ever.contains(&i.uniq)).map(|i| (i.pid, i.uniq)).collect()
 }
 
+/// Every live (not zombie) process, for `sheepdog kill` (S6).
+pub fn procs() -> Vec<crate::kill::Proc> {
+    all_pids()
+        .into_iter()
+        .filter(|&p| p > 0)
+        .filter_map(|p| {
+            let b = bsd(p)?; // fails for a zombie or a gone process
+            let (id, pu) = uniq(p)?;
+            Some(crate::kill::Proc { pid: p, ppid: b.pbi_ppid as i32, uid: b.pbi_uid, id, puniq: Some(pu) })
+        })
+        .collect()
+}
+
+/// The parent pid of `pid`, if it is alive.
+pub fn parent(pid: pid_t) -> Option<pid_t> {
+    bsd(pid).map(|b| b.pbi_ppid as pid_t)
+}
+
+/// The file name of `pid`'s executable.
+pub fn exe_name(pid: pid_t) -> Option<String> {
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
+    if n <= 0 {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+    Some(s.rsplit('/').next()?.to_string())
+}
+
+/// `pid`'s argv (empty if unreadable), from KERN_PROCARGS2: argc, the exec path, NUL padding,
+/// then argv.
+pub fn cmdline(pid: pid_t) -> Vec<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut len = buf.len();
+    let r = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr() as *mut c_void, &mut len, std::ptr::null_mut(), 0) };
+    if r != 0 || len < 4 {
+        return Vec::new();
+    }
+    let argc = i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]).max(0) as usize;
+    let rest = &buf[4..len];
+    let Some(end) = rest.iter().position(|&c| c == 0) else { return Vec::new() };
+    let rest = &rest[end..];
+    let Some(start) = rest.iter().position(|&c| c != 0) else { return Vec::new() };
+    rest[start..].split(|&c| c == 0).take(argc).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+}
+
+/// The pid of the process responsible for `pid` (PLAN.md §4.3: resolved with dlsym).
+pub fn responsible_pid(pid: pid_t) -> Option<pid_t> {
+    type RespPid = unsafe extern "C" fn(pid_t) -> pid_t;
+    let f: RespPid = sym("responsibility_get_pid_responsible_for_pid")?;
+    let r = unsafe { f(pid) };
+    (r > 0).then_some(r)
+}
+
 /// Live, same-uid processes (not zombies) other than this one, whose responsible uniqueid is
 /// `r`, with their identities.
 fn responsible_to(r: u64) -> Vec<(pid_t, u64)> {
