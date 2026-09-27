@@ -418,6 +418,8 @@ fn the_root_is_journaled_before_it_runs() {
             .args(["run", "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())])
             .env("SHEEPDOG_TEST_STATE", &s)
             .env("SHEEPDOG_TEST_KILL_AFTER_ROOT_JOURNAL", "1")
+            // Linux: PDEATHSIG would kill the shim anyway; off, only the go byte holds it back
+            .env("SHEEPDOG_TEST_SHIM_NO_PDEATHSIG", "1")
             .spawn()
             .unwrap(),
     );
@@ -476,3 +478,103 @@ fn the_status_line_names_the_root_the_job_and_the_notes() {
     assert_eq!(st.get("root").and_then(Json::str), Some("not-started"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A running job's journal is locked for as long as the job runs, also after a journal write
+/// failed (the published file must never look like a dead job's to `sweep`), and no journal is
+/// left after a clean end. Probed mid-run, while the root waits.
+#[test]
+fn a_running_job_s_journal_stays_locked() {
+    for fail in [false, true] {
+        let d = scratch(if fail { "lockfail" } else { "lockok" });
+        let s = state(&d);
+        let (go, ready) = (d.join("go"), d.join("ready"));
+        // the root starts an escapee, so a scan has a member line to write (and fail on)
+        let script = format!(
+            r#""$FX" escape {} "$R"; touch "{}"; while [ ! -e "{}" ]; do sleep 0.01; done"#,
+            marker(),
+            ready.display(),
+            go.display()
+        );
+        let mut cmd = Command::new(sheepdog());
+        cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("R", d.join("rec")).env("SHEEPDOG_TEST_STATE", &s);
+        if fail {
+            cmd.env("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL", "1");
+        }
+        let c = cmd.spawn().unwrap();
+        let started = wait_for(&ready, 20);
+        std::thread::sleep(Duration::from_millis(600)); // a few scans (and failed writes)
+        let unlocked: Vec<PathBuf> = journals(&s)
+            .into_iter()
+            .filter(|j| {
+                let f = std::fs::File::open(j).unwrap();
+                unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&f), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+            })
+            .collect();
+        let published = journals(&s).len();
+        std::fs::write(&go, b"").unwrap();
+        let code = finish(c);
+        for p in records(&d.join("rec"), 1) {
+            common::send(p.0, p.1, libc::SIGKILL);
+        }
+        assert!(started, "fail {fail}");
+        assert!(fail || published == 1, "control: the journal is published");
+        assert!(unlocked.is_empty(), "fail {fail}: a running job's journal is unlocked: {unlocked:?}");
+        assert_eq!(code, Some(0), "fail {fail}");
+        assert!(journals(&s).is_empty(), "fail {fail}: a journal is left after a clean end");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+/// `--status-fd` gets exactly one line, from the supervisor, also when sheepdog runs with a
+/// relay (it started with children of its own: here the shell's background `sleep`), and also
+/// when the job ends by a TERM to sheepdog. The relay never writes it.
+#[test]
+fn the_status_line_is_written_once_with_a_relay() {
+    let d = scratch("relay");
+    let s = state(&d);
+    let m = marker();
+    for term in [false, true] {
+        let (out, ready) = (d.join(format!("status-{term}")), d.join(format!("ready-{term}")));
+        let root = if term { format!(r#"touch "{}"; sleep 30"#, ready.display()) } else { "exit 0".to_string() };
+        let mut c = Command::new("/bin/sh")
+            .args(["-c", &format!(r#"sleep {m} & exec "$SD" run --status-fd 3 -- /bin/sh -c '{root}' 3>"{}""#, out.display())])
+            .env("SD", sheepdog())
+            .env("SHEEPDOG_TEST_STATE", &s)
+            .spawn()
+            .unwrap();
+        if term {
+            let started = wait_for(&ready, 20);
+            common::send_child(&mut c, libc::SIGTERM);
+            assert!(started);
+        }
+        let _ = finish(c);
+        let text = std::fs::read_to_string(&out).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        common::kill_marked(&[&m]);
+        assert_eq!(lines.len(), 1, "term {term}: {text:?}");
+        let j = json::parse(lines[0]).unwrap();
+        assert!(j.get("job").and_then(Json::str).is_some_and(|x| x.starts_with("j-")), "term {term}: {text}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Under the phase-1 opt-out (PHASE2.md §0.1) no journal is written: the opt-out disables the
+/// state outright. The control is every cell above, where the same run writes one.
+#[test]
+fn the_phase_one_opt_out_writes_no_journal() {
+    let d = scratch("optout");
+    let s = state(&d);
+    let code = finish(
+        Command::new(sheepdog())
+            .args(["run", "--", "/bin/sh", "-c", "exit 0"])
+            .env("SHEEPDOG_TEST_STATE", &s)
+            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPDOG_TEST_PHASE1", "1")
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(code, Some(0));
+    assert!(!s.join("jobs").exists(), "a journal was written under the opt-out");
+    let _ = std::fs::remove_dir_all(&d);
+}
+

@@ -93,7 +93,8 @@ leg_macos() {
   bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
   local rc=$?
   local left
-  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|/bin/sleep 2[0-9]\.)")
+  # a nested run or a root shim found through the test PATH has argv[0] `sheepdog`
+  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
   [ $rc -eq 0 ] && [ "$left" -eq 0 ] && record macos PASS || record macos "FAIL (rc $rc, leftovers $left; $LOGDIR/macos.log)"
 }
 

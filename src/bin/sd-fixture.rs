@@ -82,7 +82,10 @@
 //!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
-//! - `swarm N R`: PHASE2.md §0.1 (the stress cell). The root forks N children, each a fixture
+//! - `spawnp PROG ARGS...`: run PROG with posix_spawnp in this environment (PATH may be unset)
+//!   and exit with its code, or 127 (ENOENT) / 126 when the spawn fails: phase 1's search, for a
+//!   cell that compares the root shim's search with it.
+//! - `swarm N R [STEP_US]`: PHASE2.md §0.1 (the stress cell). The root forks N children, each a fixture
 //!   process (its environment readable on macOS), records each, and exits. Even children exit
 //!   on TERM after a short delay (i*100 µs), so some members are exiting while the kill runs;
 //!   odd children ignore TERM and die only of SIGKILL. SIGALRM ends each after 60 s at most.
@@ -1028,14 +1031,37 @@ fn main() {
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
     }
-    if mode == "swarm" && a.len() == 4 {
+    if mode == "spawnp" && a.len() >= 3 {
+        let argv: Vec<CString> = a[2..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
+        ptrs.push(std::ptr::null_mut());
+        extern "C" {
+            static environ: *const *mut libc::c_char;
+        }
+        let mut pid = 0;
+        let rc = unsafe { libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), std::ptr::null(), ptrs.as_ptr(), environ) };
+        if rc != 0 {
+            std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
+        }
+        let mut st = 0;
+        unsafe { libc::waitpid(pid, &mut st, 0) };
+        std::process::exit(if libc::WIFEXITED(st) { libc::WEXITSTATUS(st) } else { 128 + libc::WTERMSIG(st) });
+    }
+    if mode == "swarm" && (a.len() == 4 || a.len() == 5) {
         let n: u32 = a[2].parse().unwrap_or_else(|_| usage());
+        // with STEP_US, child i also exits by itself i*STEP_US after it starts: members that
+        // are exiting while the kill freezes them
+        let step: u32 = a.get(4).map(|s| s.parse().unwrap_or_else(|_| usage())).unwrap_or(0);
         let r = a[3].clone();
         unsafe {
             for i in 0..n {
                 match libc::fork() {
                     0 => {
                         libc::alarm(60);
+                        if step > 0 {
+                            libc::usleep(i * step);
+                            libc::_exit(0);
+                        }
                         if i % 2 == 0 {
                             SWARM_DELAY_US.store(i * 100, std::sync::atomic::Ordering::SeqCst);
                             on(libc::SIGTERM, swarm_term as *const () as usize, true);

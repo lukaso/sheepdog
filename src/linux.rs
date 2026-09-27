@@ -215,6 +215,13 @@ impl Root {
             self.go = -1;
         }
     }
+    /// Never let the root run: close the go pipe unsent, so the shim exits without its exec.
+    pub fn abandon(&mut self) {
+        if self.go >= 0 {
+            unsafe { libc::close(self.go) };
+            self.go = -1;
+        }
+    }
     /// After the root has exited: did the shim report that its command never ran?
     pub fn exec_failed(&mut self) -> bool {
         let mut buf = [0u8; 64];
@@ -329,7 +336,7 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
             libc::close(er[0]);
         }
         say!("sheepdog: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
-        return Err(125);
+        return Err(126); // as phase 1's posix_spawnp reported a spawn that failed (EAGAIN, ENOMEM)
     }
     // the handshake: the shim is running, is this protocol, and holds its PDEATHSIG and parent
     // (5 s: a cold start under an emulator)
@@ -410,7 +417,9 @@ pub fn root_shim(a: &[OsString]) -> i32 {
     let mut ptrs: Vec<*const libc::c_char> = argv.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
     let name = cmd[0].as_bytes();
-    let candidates: Vec<Vec<u8>> = if name.contains(&b'/') {
+    let candidates: Vec<Vec<u8>> = if name.is_empty() {
+        Vec::new() // an empty name is not found (ENOENT), as posix_spawnp has it
+    } else if name.contains(&b'/') {
         vec![name.to_vec()]
     } else {
         let path = std::env::var_os("PATH").map(|p| p.into_vec()).unwrap_or_else(default_path);
@@ -430,7 +439,7 @@ pub fn root_shim(a: &[OsString]) -> i32 {
             libc::execve(c.as_ptr(), ptrs.as_ptr(), environ as *const *const libc::c_char);
             let e = *libc::__errno_location();
             match e {
-                libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT => {}
+                e if goes_on(e) => {}
                 libc::EACCES => eacces = true,
                 _ => {
                     last = e;
@@ -440,7 +449,7 @@ pub fn root_shim(a: &[OsString]) -> i32 {
             last = e;
         }
     }
-    if eacces && matches!(last, libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT) {
+    if eacces && goes_on(last) {
         last = libc::EACCES;
     }
     say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(last));
@@ -448,7 +457,25 @@ pub fn root_shim(a: &[OsString]) -> i32 {
     unsafe { libc::_exit(if last == libc::ENOENT { 127 } else { 126 }) }
 }
 
-/// The libc's default search path for an unset PATH.
+/// An exec error after which the search goes on to the next PATH entry, as this libc's own
+/// posix_spawnp does: glibc also goes on after ESTALE, ENODEV and ETIMEDOUT; musl does not.
+fn goes_on(e: libc::c_int) -> bool {
+    match e {
+        libc::ENOENT | libc::ENOTDIR => true,
+        libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT => cfg!(target_env = "gnu"),
+        _ => false,
+    }
+}
+
+/// The default search path for an unset PATH, as this libc's posix_spawnp uses it: musl's
+/// execvpe searches /usr/local/bin:/bin:/usr/bin; glibc uses confstr(_CS_PATH).
+#[cfg(target_env = "musl")]
+fn default_path() -> Vec<u8> {
+    b"/usr/local/bin:/bin:/usr/bin".to_vec()
+}
+
+/// The default search path for an unset PATH, as this libc's posix_spawnp uses it.
+#[cfg(not(target_env = "musl"))]
 fn default_path() -> Vec<u8> {
     let mut buf = vec![0u8; 256];
     let n = unsafe { libc::confstr(libc::_CS_PATH, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
@@ -543,6 +570,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                 Err(125)
             }
             sup => {
+                crate::status::disable(); // the supervisor writes the status line
                 // The relay keeps the stop signals blocked (it never stops on its own: a TSTP to
                 // it alone stops nothing) and mirrors the supervisor instead: when the supervisor
                 // has stopped the job and itself, the relay stops with the same signal, so the
@@ -672,6 +700,15 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         journal.borrow_mut().record_root(root, id, &a.cmd);
     }
     crate::seam_hold("SHEEPDOG_TEST_HOLD_BEFORE_GO");
+    // a TERM that came while the root was being journaled: the command never runs (closing the
+    // go pipe unsent makes the shim exit without its exec)
+    if sig.watch_term && crate::term_pending() {
+        shim.abandon();
+        unsafe { libc::waitpid(root, std::ptr::null_mut(), 0) };
+        crate::status::set_root_final("not-started");
+        journal.into_inner().finish(true);
+        return crate::die_by_term(143);
+    }
     shim.go();
     let scan = || {
         let found = descendants(me);

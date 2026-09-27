@@ -72,26 +72,38 @@ fn cache() -> &'static Mutex<(HashMap<(i32, u64), TagVerdict>, HashSet<(i32, u64
     C.get_or_init(|| Mutex::new((HashMap::new(), HashSet::new())))
 }
 
-fn verdict_for(pid: i32, tag: &str) -> TagVerdict {
+fn verdict_for(pid: i32, id: u64, tag: &str) -> TagVerdict {
     let Some(live) = identity(pid) else { return TagVerdict::Gone };
+    // the pid is no longer the process the caller means: nothing may be sent to it, and it is
+    // no untagged target either (the identity check would refuse it too)
+    if live != id {
+        return TagVerdict::Gone;
+    }
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(&v) = c.0.get(&(pid, live)) {
         return v;
     }
     // debug seam: a read after this target's first signal finds an empty environment
-    let read = if crate::seam_flag("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live)) {
-        EnvRead::Block(Vec::new())
-    } else {
-        envtag::read_env(pid)
-    };
+    let seam_empty = crate::seam_flag("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live));
+    let read_once = || if seam_empty { EnvRead::Block(Vec::new()) } else { envtag::read_env(pid) };
+    let mut read = read_once();
+    // Linux shows an empty environment for a moment inside an exec (before the new image's
+    // stack is set up): read once more before calling an empty block untagged
+    if matches!(read, EnvRead::Block(ref e) if e.is_empty()) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        read = read_once();
+    }
     // the read must describe the process whose identity was taken
     if identity(pid) != Some(live) {
         return TagVerdict::Gone;
     }
     let tagged = matches!(read, EnvRead::Block(ref e) if envtag::has_tag(e, tag));
-    let exiting = !tagged && envtag::exiting(pid);
+    // exiting, or reaped and reused meanwhile: either way not the process to signal
+    let exiting = !tagged && (envtag::exiting(pid) || identity(pid) != Some(live));
     let v = envtag::verdict(&read, tag, exiting);
-    if matches!(v, TagVerdict::Tagged | TagVerdict::Withheld) {
+    // a verdict from an empty block is never kept: it may be a moment of an exec
+    let empty = matches!(read, EnvRead::Block(ref e) if e.is_empty());
+    if v == TagVerdict::Tagged || (v == TagVerdict::Withheld && !empty) {
         c.0.insert((pid, live), v);
     }
     if v == TagVerdict::Tagged {
@@ -102,7 +114,7 @@ fn verdict_for(pid: i32, tag: &str) -> TagVerdict {
 
 /// The door's wall check for `sig` to `pid` (called after the inert seam and, on Linux, after
 /// the pidfd is open, before the identity check). True = the door may go on.
-pub fn admit(pid: i32, sig: c_int) -> bool {
+pub fn admit(pid: i32, id: u64, sig: c_int) -> bool {
     if !cfg!(debug_assertions) {
         return true;
     }
@@ -113,7 +125,7 @@ pub fn admit(pid: i32, sig: c_int) -> bool {
         return true;
     }
     let v = match own_tag() {
-        Some(tag) => verdict_for(pid, tag),
+        Some(tag) => verdict_for(pid, id, tag),
         None => TagVerdict::Withheld,
     };
     let word = match v {

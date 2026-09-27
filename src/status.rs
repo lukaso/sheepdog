@@ -44,6 +44,12 @@ pub fn add_note(n: &str) {
     with(|s| s.notes.push(n.to_string()));
 }
 
+/// This process is a relay (sheepdog started with children): only the supervisor writes the
+/// status line, so the relay drops the fd from its state.
+pub fn disable() {
+    with(|s| s.fd = None);
+}
+
 /// Write the status line (once) and return `code`.
 pub fn write(code: i32) -> i32 {
     with(|s| {

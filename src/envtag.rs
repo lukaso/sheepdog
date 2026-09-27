@@ -75,7 +75,7 @@ pub fn exiting(pid: i32) -> bool {
 #[cfg(target_os = "macos")]
 pub fn read_env(pid: i32) -> EnvRead {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-    let mut buf = vec![0u8; 256 * 1024];
+    let mut buf = vec![0u8; arg_max()];
     let mut len = buf.len();
     let r = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr() as *mut libc::c_void, &mut len, std::ptr::null_mut(), 0) };
     if r != 0 || len < 4 {
@@ -90,6 +90,20 @@ pub fn read_env(pid: i32) -> EnvRead {
     let strings: Vec<&[u8]> = rest[start..].split(|&c| c == 0).collect();
     let env = strings.iter().skip(argc).take_while(|e| !e.is_empty()).map(|e| e.to_vec()).collect();
     EnvRead::Block(env)
+}
+
+/// KERN_ARGMAX: the largest argument and environment area (256 KiB if unreadable).
+#[cfg(target_os = "macos")]
+fn arg_max() -> usize {
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let r = unsafe { libc::sysctl(mib.as_mut_ptr(), 2, &mut v as *mut _ as *mut libc::c_void, &mut len, std::ptr::null_mut(), 0) };
+    if r == 0 && v > 0 {
+        v as usize
+    } else {
+        256 * 1024
+    }
 }
 
 /// `kinfo_proc`'s `p_flag` and `p_stat` (offsets 32 and 36 of the 648-byte struct, which the

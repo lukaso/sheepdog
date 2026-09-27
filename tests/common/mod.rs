@@ -84,6 +84,22 @@ pub fn kill_marked(markers: &[&str]) {
     }
 }
 
+/// PHASE2.md §0.4: the ONE place a cell points sheepdog's withheld lines at a sink of its own
+/// (a wall-control cell that expects a line); every other run writes to the run's sink, which
+/// the runner requires empty. Grep for `cell_sink` to find every override.
+pub fn cell_sink(cmd: &mut Command, sink: &std::path::Path) {
+    cmd.env("SHEEPDOG_TEST_SINK", sink);
+}
+
+/// Whether a recorded process is stopped now (state T in `ps`).
+pub fn stopped(p: (i32, u64)) -> bool {
+    if !alive(p) {
+        return false;
+    }
+    let out = Command::new("ps").args(["-o", "stat=", "-p", &p.0.to_string()]).output();
+    out.map(|o| String::from_utf8_lossy(&o.stdout).trim_start().starts_with('T')).unwrap_or(false)
+}
+
 /// The test environment (PHASE2.md §0.4) is in place: the cargo runner (`scripts/test-env`)
 /// started this binary with a test tag, a canary state directory (no sentinel), a withheld sink,
 /// and the debug `sheepdog` first on PATH, so a nested `sheepdog` found by name is this build.

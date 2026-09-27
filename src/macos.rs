@@ -392,7 +392,10 @@ fn relay_if_needed(sig: &crate::Signals) -> Option<i32> {
                 say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
                 Some(125)
             }
-            sup => Some(relay_loop(sup, relay, sig.watch_term)),
+            sup => {
+                crate::status::disable(); // the supervisor writes the status line
+                Some(relay_loop(sup, relay, sig.watch_term))
+            }
         }
     }
 }

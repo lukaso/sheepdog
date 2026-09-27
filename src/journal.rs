@@ -36,6 +36,9 @@ pub struct Journal {
     seen: HashSet<(i32, u64)>,
     job: Option<String>,
     warned: bool,
+    /// a write failed: nothing more is written, but the fd (and so the lock) is kept until the
+    /// end, so the published file never looks like a dead job's to `sweep`
+    dead: bool,
 }
 
 /// The text form of raw bytes (see the module header), before JSON escaping.
@@ -166,7 +169,7 @@ impl Journal {
     fn off(why: &str) -> Journal {
         crate::note(why.to_string());
         crate::status::add_note(why);
-        Journal { file: None, path: None, seen: HashSet::new(), job: None, warned: false }
+        Journal { file: None, path: None, seen: HashSet::new(), job: None, warned: false, dead: false }
     }
 
     fn failed(&mut self, what: &str) {
@@ -177,15 +180,19 @@ impl Journal {
         }
         crate::note(n.clone());
         crate::status::add_note(&n);
-        self.file = None;
+        self.dead = true; // the fd stays open: a published journal stays locked until the end
     }
 
     /// Publish this job's journal (after the macOS SETEXEC, before the root runs).
     pub fn open(owner: &str, argv: &[OsString]) -> Journal {
+        // the phase-1 opt-out disables state outright (PHASE2.md §0.1)
+        if crate::seam_flag("SHEEPDOG_TEST_PHASE1") {
+            return Journal::off("journal-disabled");
+        }
         let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else {
             return Journal::off("state-unset");
         };
-        let mut j = Journal { file: None, path: None, seen: HashSet::new(), job: None, warned: false };
+        let mut j = Journal { file: None, path: None, seen: HashSet::new(), job: None, warned: false, dead: false };
         let Some(boot) = boot_id() else {
             j.failed("no boot id");
             return j;
@@ -256,7 +263,11 @@ impl Journal {
         j
     }
 
-    fn write(&mut self, out: &str) {
+    /// One write; false if it failed (then the journal is dead).
+    fn write(&mut self, out: &str) -> bool {
+        if self.dead || self.file.is_none() {
+            return false;
+        }
         let r = if crate::seam_flag("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL") {
             Err(std::io::Error::other("test seam"))
         } else {
@@ -265,12 +276,14 @@ impl Journal {
         };
         if let Err(e) = r {
             self.failed(&format!("write: {e}"));
+            return false;
         }
+        true
     }
 
     /// Journal the members of one scan that are new: one write, before the caller signals any.
     pub fn record(&mut self, found: &[(i32, u64)]) {
-        if self.file.is_none() {
+        if self.file.is_none() || self.dead {
             return;
         }
         let mut out = String::new();
@@ -293,9 +306,10 @@ impl Journal {
         if out.is_empty() {
             return;
         }
-        self.write(&out);
-        for p in new {
-            crate::trace(format!("journal {p}"));
+        if self.write(&out) {
+            for p in new {
+                crate::trace(format!("journal {p}"));
+            }
         }
     }
 
@@ -312,8 +326,9 @@ impl Journal {
                 num(puniq),
                 json_str(&text(&joined(cmd)))
             );
-            self.write(&line);
-            crate::trace(format!("journal {pid}"));
+            if self.write(&line) {
+                crate::trace(format!("journal {pid}"));
+            }
         }
         if crate::seam_flag("SHEEPDOG_TEST_KILL_AFTER_ROOT_JOURNAL") {
             unsafe { libc::raise(libc::SIGKILL) }; // raw signal site: this process (PHASE2.md §0.3)
@@ -322,9 +337,7 @@ impl Journal {
 
     /// The root ended by itself under `--leave-strays`: say so, and keep the journal.
     pub fn mark_leave_strays(&mut self) {
-        if self.file.is_some() {
-            self.write("{\"v\":1,\"kind\":\"leave-strays\"}\n");
-        }
+        self.write("{\"v\":1,\"kind\":\"leave-strays\"}\n");
     }
 
     /// The end: after a clean kill the journal is unlinked, then the lock released by closing
@@ -332,9 +345,7 @@ impl Journal {
     pub fn finish(mut self, clean: bool) {
         if clean && !crate::seam_flag("SHEEPDOG_TEST_KEEP_JOURNAL") {
             if let Some(p) = &self.path {
-                if self.file.is_some() {
-                    let _ = std::fs::remove_file(p);
-                }
+                let _ = std::fs::remove_file(p); // before the lock is released below
             }
         }
         self.file = None; // closing the fd releases the lock

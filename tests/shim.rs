@@ -334,3 +334,67 @@ fn a_root_killed_before_its_go_byte_does_not_kill_the_supervisor() {
     assert_eq!(st.as_ref().and_then(|j| j.get("root")).and_then(Json::str), Some("signaled"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// With PATH unset, the shim searches the libc's own default, as phase 1's posix_spawnp did: a
+/// tool that exists only in /usr/local/bin gives the same exit code under sheepdog as under a
+/// direct posix_spawnp (the fixture's `spawnp`) on this libc (musl searches /usr/local/bin,
+/// glibc does not). Runs where /usr/local/bin is writable (the containers' root).
+#[test]
+fn an_unset_path_searches_what_posix_spawnp_searches() {
+    let name = format!("sd-localtool-{}", std::process::id());
+    let tool = Path::new("/usr/local/bin").join(&name);
+    if std::fs::write(&tool, "#!/bin/sh\nexit 7\n").is_err() {
+        eprintln!("skipped: /usr/local/bin is not writable here");
+        return;
+    }
+    std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let code = |prog: &str, args: &[&str]| Command::new(prog).args(args).env_remove("PATH").status().unwrap().code();
+    let direct = code(fixture(), &["spawnp", &name]);
+    let under = code(sheepdog(), &["run", "--", &name]);
+    let _ = std::fs::remove_file(&tool);
+    assert!(direct == Some(7) || direct == Some(127), "control: {direct:?}");
+    assert_eq!(under, direct, "sheepdog {under:?}, posix_spawnp {direct:?}");
+}
+
+/// An empty command name is "not found" (127), as posix_spawnp gives it.
+#[test]
+fn an_empty_command_name_is_not_found() {
+    let under = Command::new(sheepdog()).args(["run", "--", ""]).status().unwrap().code();
+    let direct = Command::new(fixture()).args(["spawnp", ""]).status().unwrap().code();
+    assert_eq!(under, direct, "sheepdog {under:?}, posix_spawnp {direct:?}");
+    assert_eq!(under, Some(127));
+}
+
+/// A TERM that reaches sheepdog before the go byte (while it journals the root) ends the job
+/// before the command runs: the root is `not-started` and sheepdog dies of that TERM.
+#[test]
+fn a_term_before_the_go_byte_means_the_command_never_runs() {
+    let d = scratch("lateterm");
+    let s = state(&d);
+    let (rel, ready, ran, out) = (d.join("release"), d.join("ready"), d.join("ran"), d.join("status"));
+    let c = Command::new("/bin/sh")
+        .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'touch "{}"' 3>"{}""#, ran.display(), out.display())])
+        .env("SD", sheepdog())
+        .env("SHEEPDOG_TEST_STATE", &s)
+        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .spawn()
+        .unwrap();
+    let held = wait_for(&ready, 20);
+    let sd = c.id() as i32; // the shell exec'd sheepdog: same pid
+    let sd_id = sheepdog::ident::identity(sd);
+    if let Some(id) = sd_id {
+        common::send(sd, id, libc::SIGTERM);
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::write(&rel, b"").unwrap();
+    let code = finish(c);
+    std::thread::sleep(Duration::from_millis(200));
+    let st = json::parse(std::fs::read_to_string(&out).unwrap_or_default().trim_end()).ok();
+    assert!(held && sd_id.is_some());
+    assert!(!ran.exists(), "the command ran after the TERM");
+    assert_eq!(code, None, "sheepdog dies of the TERM");
+    assert_eq!(st.as_ref().and_then(|j| j.get("root")).and_then(Json::str), Some("not-started"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+

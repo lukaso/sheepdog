@@ -209,8 +209,8 @@ fn two_members(d: &Path, sheepdog_env: &[(&str, &str)], remove_own_tag: bool, ta
         .env("R1", &r1)
         .env("R2", &r2)
         .env("SHEEPDOG_TEST_DEADLINE_MS", "1500")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", d.join("log"))
-        .env("SHEEPDOG_TEST_SINK", d.join("sink"));
+        .env("SHEEPDOG_TEST_SIGNAL_LOG", d.join("log"));
+    common::cell_sink(&mut cmd, &d.join("sink"));
     if remove_own_tag {
         cmd.env_remove("SHEEPDOG_TEST_TAG");
     }
@@ -218,9 +218,17 @@ fn two_members(d: &Path, sheepdog_env: &[(&str, &str)], remove_own_tag: bool, ta
         cmd.env(k, v);
     }
     let code = finish(cmd.spawn().unwrap());
-    let t = records(&r1, 1)[0];
-    let u = records(&r2, 1)[0];
-    (code, t, u)
+    // a missing record must not leak the other member: kill what was recorded, then fail
+    let (t, u) = (records(&r1, 1).first().copied(), records(&r2, 1).first().copied());
+    match (t, u) {
+        (Some(t), Some(u)) => (code, t, u),
+        _ => {
+            for p in t.iter().chain(u.iter()) {
+                common::send(p.0, p.1, libc::SIGKILL);
+            }
+            panic!("a member did not record itself: tagged {t:?}, untagged {u:?}");
+        }
+    }
 }
 
 fn counted(r: &Path) -> usize {
@@ -250,11 +258,12 @@ fn the_latch_withholds_every_signal_to_an_untagged_target() {
     let d = scratch("latch");
     let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
-    let (tagged_alive, untagged_alive) = (common::alive(t), common::alive(u));
+    let (tagged_alive, untagged_alive, untagged_stopped) = (common::alive(t), common::alive(u), common::stopped(u));
     common::send(t.0, t.1, libc::SIGKILL);
     common::send(u.0, u.1, libc::SIGKILL);
     assert!(!tagged_alive, "the tagged member dies");
     assert!(untagged_alive, "the untagged member survives");
+    assert!(!untagged_stopped, "the untagged member was stopped");
     assert_eq!(counted(&d.join("untagged")), 0, "no catchable signal reached it");
     assert!(!lines.is_empty(), "withheld lines");
     assert!(lines.iter().all(|(k, p, _)| k == "withheld" && *p == u.0), "{lines:?}");
@@ -297,24 +306,30 @@ fn a_door_without_its_own_tag_withholds_everything() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// PHASE2.md §0.1: the stress cell. 50 tagged fixture members, half of them exiting on TERM
-/// while the kill runs, killed through the full TERM, STOP, KILL, CONT sequence with the latch
-/// on, 20 times: every member dies and not one line is withheld or unreadable (an exiting
-/// process is `gone`, and a verdict is taken once per identity, so the CONT after a KILL does
-/// not re-read a dying process).
+/// PHASE2.md §0.1: the stress cell. 50 tagged fixture members killed with the latch on, 20
+/// times: every member dies and not one line is withheld or unreadable (an exiting process is
+/// `gone`, and a verdict is taken once per identity, so the CONT after a KILL does not re-read a
+/// dying process). Half the runs kill members that exit on TERM or die of the kill; the other
+/// half race members that exit by themselves while the kill freezes them. It detects false lines
+/// in a real kill; whether one run meets a process mid-exit is chance, so the rule "an exiting
+/// process is gone" is proved by envtag's unit cell, not here.
 #[test]
 fn the_latch_never_withholds_from_a_tagged_member_that_is_dying() {
     let d = scratch("stress");
     for i in 0..20 {
         let r = d.join(format!("rec{i}"));
         let sink = d.join(format!("sink{i}"));
-        let c = Command::new(sheepdog())
-            .args(["run", "--grace", "0.05", "--", fixture(), "swarm", "50"])
-            .arg(&r)
-            .env("SHEEPDOG_TEST_LATCH", "1")
-            .env("SHEEPDOG_TEST_SINK", &sink)
-            .spawn()
-            .unwrap();
+        // even runs: members that die of the kill (TERM, STOP, KILL, CONT); odd runs: members
+        // that exit by themselves, 0.2 ms apart, while the kill freezes them (grace 0)
+        let mut cmd = Command::new(sheepdog());
+        if i % 2 == 0 {
+            cmd.args(["run", "--grace", "0.05", "--", fixture(), "swarm", "50"]).arg(&r);
+        } else {
+            cmd.args(["run", "--grace", "0", "--", fixture(), "swarm", "50"]).arg(&r).arg("200");
+        }
+        cmd.env("SHEEPDOG_TEST_LATCH", "1");
+        common::cell_sink(&mut cmd, &sink);
+        let c = cmd.spawn().unwrap();
         let code = finish(c);
         let recs = records(&r, 50);
         let alive: Vec<_> = recs.iter().filter(|p| common::alive(**p)).copied().collect();
@@ -360,5 +375,61 @@ fn a_nested_sheepdog_found_by_name_is_this_debug_build() {
     assert!(st.success(), "{st:?}");
     let notes = std::fs::read_to_string(&t).unwrap_or_default();
     assert!(notes.lines().any(|l| l.starts_with("start debug ")), "{notes:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The rollback CONT (PLAN.md §3.3 step 4) undoes this supervisor's own STOP, so the wall does
+/// not hold it back: a debug seam makes a STOP land on a process that is not a member (as a pid
+/// reused between the identity check and `kill` would; that STOP passed the wall for the member),
+/// here an untagged one, with the latch on. It is continued: at the end it is not stopped.
+#[test]
+fn the_rollback_cont_is_not_withheld() {
+    let d = scratch("rollback");
+    let rec = d.join("stranger");
+    // an untagged process the test built (its environment has no tag)
+    let mut stranger = Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&rec).spawn().unwrap();
+    let s = records(&rec, 1).first().copied();
+    let code = s.map(|s| {
+        // one tagged member, so the kill reaches its freeze pass (where the seam acts)
+        let mut cmd = Command::new(sheepdog());
+        cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", r#""$FX" sigcount "$R2" & while [ ! -s "$R2" ]; do sleep 0.01; done"#])
+            .env("FX", fixture())
+            .env("R2", d.join("member"))
+            .env("SHEEPDOG_TEST_LATCH", "1")
+            .env("SHEEPDOG_TEST_WRONG_FREEZE", s.0.to_string());
+        common::cell_sink(&mut cmd, &d.join("sink"));
+        finish(cmd.spawn().unwrap())
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let was_stopped = s.is_some_and(common::stopped);
+    common::send_child(&mut stranger, libc::SIGKILL);
+    for m in records(&d.join("member"), 1) {
+        common::send(m.0, m.1, libc::SIGKILL);
+    }
+    let _ = stranger.wait();
+    let s = s.expect("the stranger recorded itself");
+    assert!(!was_stopped, "the stranger {s:?} was left stopped");
+    assert_eq!(code.flatten(), Some(0));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A panic outside the kill loop still writes the status line (exit 125): a debug seam panics in
+/// `run` after the status fd is known, and `--status-fd` gets one line with code 125.
+#[test]
+fn a_panic_writes_the_status_line() {
+    let d = scratch("panicstatus");
+    let out = d.join("status");
+    let code = finish(
+        Command::new("/bin/sh")
+            .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'exit 0' 3>"{}""#, out.display())])
+            .env("SD", sheepdog())
+            .env("SHEEPDOG_TEST_PANIC_IN_RUN", "1")
+            .spawn()
+            .unwrap(),
+    );
+    let text = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_eq!(code, Some(125));
+    assert_eq!(text.lines().count(), 1, "{text:?}");
+    assert!(text.contains("\"code\":125"), "{text}");
     let _ = std::fs::remove_dir_all(&d);
 }

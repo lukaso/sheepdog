@@ -246,7 +246,8 @@ fn rollback(pid: i32, landed_on: u64) {
     }
     if same(pid, landed_on) {
         trace(format!("rollback {pid}"));
-        let _ = send_checked(pid, landed_on, libc::SIGCONT);
+        // it undoes this supervisor's own STOP: identity-checked, never held back by the wall
+        let _ = send_checked_as(pid, landed_on, libc::SIGCONT, false);
     }
 }
 
@@ -257,8 +258,13 @@ fn rollback(pid: i32, landed_on: u64) {
 /// SHEEPDOG_TEST_PIDFD_ENOSYS for the open, SHEEPDOG_TEST_PIDFD_SEND_ENOSYS for the send),
 /// the check and `kill` remain; the window between them is the stated residual, and the
 /// freeze's rollback covers a STOP that lands in it.
-#[cfg(target_os = "linux")]
+/// `send_checked_as` with the test wall (every sender but the rollback).
 fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
+    send_checked_as(pid, id, sig, true)
+}
+
+#[cfg(target_os = "linux")]
+fn send_checked_as(pid: i32, id: u64, sig: c_int, wall: bool) -> Sent {
     if pid <= 1 {
         return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
     }
@@ -275,7 +281,8 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
         }
         (fd >= 0).then_some(fd)
     };
-    if !wall::admit(pid, sig) {
+    // the wrong-freeze seam simulates a pid reused after every check passed for the member
+    if wall && !race && !wall::admit(pid, id, sig) {
         if let Some(fd) = fd {
             unsafe { libc::close(fd) };
         }
@@ -332,18 +339,20 @@ fn wrong_freeze_race(pid: i32, sig: c_int) -> bool {
 /// macOS: the uniqueid is re-read just before `kill` (the window between them is the stated
 /// residual; the freeze's rollback covers a STOP that lands on a reused pid).
 #[cfg(target_os = "macos")]
-fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
+fn send_checked_as(pid: i32, id: u64, sig: c_int, wall: bool) -> Sent {
     if pid <= 1 {
         return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
     }
     if inert(pid, sig) {
         return Sent::No;
     }
-    if !wall::admit(pid, sig) {
+    // the wrong-freeze seam simulates a pid reused after every check passed for the member
+    let race = wrong_freeze_race(pid, sig);
+    if wall && !race && !wall::admit(pid, id, sig) {
         return Sent::No;
     }
     trace(format!("kill {pid} {sig}"));
-    if (wrong_freeze_race(pid, sig) || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
+    if (race || same(pid, id)) && unsafe { libc::kill(pid, sig) } == 0 {
         return Sent::Unpinned;
     }
     Sent::No
@@ -1290,6 +1299,9 @@ fn run(argv: Vec<OsString>) -> i32 {
     if let Some(fd) = args.status_fd {
         status::set_fd(fd);
     }
+    if seam("SHEEPDOG_TEST_PANIC_IN_RUN") {
+        panic!("test seam: panic in run");
+    }
     let sig = setup_signals();
     #[cfg(target_os = "macos")]
     let code = macos::run(&args, &sig);
@@ -1318,7 +1330,7 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
     }
     note(format!("start debug {}", std::process::id()));
     // a panic must not unwind out of an extern "C" fn (undefined behaviour before Rust 1.81)
-    std::panic::catch_unwind(|| run(argv)).unwrap_or(125)
+    std::panic::catch_unwind(|| run(argv)).unwrap_or_else(|_| status::write(125))
 }
 
 #[cfg(test)]

@@ -39,6 +39,6 @@ sigs=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
 echo "decoy: state=${st:-gone} signals=$sigs (1 is the control)"
 kill -KILL "$decoy" 2>/dev/null
 sleep 0.2
-left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run)')
+left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
 echo "leftovers: $left"
 [ "$rc" -eq 0 ] && [ -n "$st" ] && [ "${st#T}" = "$st" ] && [ "$sigs" -eq 1 ] && [ "$left" -eq 0 ]

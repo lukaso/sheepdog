@@ -23,7 +23,7 @@ cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
 grep -E '^test result|^thread|FAILED|left:|right:' /tmp/suite.log | cut -c1-200
-left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run)')
+left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
 echo "leftovers: $left"
 # the pid-reuse race cell returns early without SD_REUSE_TEST: require that it ran
 race_ok=0
