@@ -213,10 +213,10 @@ pub fn main(args: &[OsString]) -> i32 {
     let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
     if !is_sheepdog(t) {
         if let Some(s) = job_of(t) {
-            // one line, true for every target below a sheepdog: the root, a member, or (on the
-            // relay path) a job the caller started before sheepdog, whose nearest sheepdog is the
-            // relay
-            say!("sheepdog: pid {t} is a descendant of sheepdog pid {s}. `kill {t}` takes {t} and the processes it started; if {t} is the root of that sheepdog's job, the job then ends too. To end that sheepdog's job: sheepdog kill {s}");
+            // one line that claims only this: `s` is the nearest sheepdog above `t` (by parent,
+            // or on macOS by responsibility), and a TERM to it ends its whole job (strays too,
+            // even with --leave-strays)
+            say!("sheepdog: pid {t} runs under sheepdog pid {s}. To end that sheepdog's job: sheepdog kill {s}");
         }
     }
     if a.dry_run {
