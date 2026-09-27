@@ -2025,34 +2025,33 @@ fn an_ignored_term_to_the_relay_does_not_cancel_a_stop() {
 // ---- cell 6 (S7): a stopped child whose parent dies ----------------------------------------
 
 /// Cell 6: a child that handles TERM stops itself, then its parent exits. Two measured facts
-/// shape the cell: outside a real session the child's group is orphaned and the kernel sends it
-/// HUP and CONT; and a TERM at its default action ends even a stopped process (macOS 27). So
-/// the route leaks only for a child that handles TERM (its handler cannot run while it is
-/// stopped), in a terminal job, where the group stays non-orphaned (sheepdog, or the outer
-/// shell, has its parent, the shell, in another group of the same session). Control: a TERM
-/// leaves it stopped and alive (the naive kill leaks). Then the root exits: sheepdog ends it (TERM
-/// and CONT, then KILL). Control: with `--leave-strays` (and no TERM from the test) it survives
-/// the job's end: it ignores the kernel's HUP to its orphaned group and runs on after the CONT.
+/// shape the cell: a TERM at its default action ends even a stopped process (macOS 27), and when
+/// a stopped process's group becomes orphaned the kernel sends it HUP and CONT. So the route leaks
+/// only for a child that handles TERM, while its group stays non-orphaned, as in a terminal job.
+/// The job here is `sh -c 'sheepdog run ...; wait for HOLD'`: the outer shell (its parent, the
+/// pty's shell, is in another group of the same session) keeps the group non-orphaned even after
+/// sheepdog exits, so only sheepdog's own signals can end the child. Legs: 0, the naive TERM
+/// leaves it stopped and alive (the control); 1, sheepdog ends it before it exits; 2,
+/// `--leave-strays`: it survives sheepdog (the control of leg 1).
 #[test]
 fn cell6_a_stopped_orphan_is_killed_and_term_alone_leaks() {
-    // legs: 0 the naive TERM (the control); 1 sheepdog's kill; 2 --leave-strays (the control of
-    // leg 1). Only leg 0 sends the test's TERM: a pending TERM ends the child as soon as the kernel
-    // continues it at the job's end, which would make leg 1 pass without sheepdog.
     for leg in 0..3 {
         let leave = leg == 2;
         let m = new_marker();
         let go = std::env::temp_dir().join(format!("sd-cell6-{m}"));
+        let hold = std::env::temp_dir().join(format!("sd-cell6-hold-{m}"));
         let _ = std::fs::remove_file(&go);
-        // the child: ignore HUP, trap TERM, stop itself, then (if ever continued) loop for 30 s
-        // at most. HUP is ignored so that the kernel's HUP+CONT to an orphaned group at the job's
-        // end does not end it: with --leave-strays it then runs on (the leak sheepdog prevents).
-        let child = "trap \"\" HUP; trap \"exit 0\" TERM; kill -STOP $$; i=0; while [ $i -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done";
+        let _ = std::fs::remove_file(&hold);
+        // the child: trap TERM, stop itself, then (if ever continued) loop for 30 s at most
+        let child = "trap \"exit 0\" TERM; kill -STOP $$; i=0; while [ $i -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done";
         let outer = format!(
             "/bin/sh -c '/bin/sh -c '\\''{child}'\\'' {m} & exit 0'; while [ ! -e {go} ]; do /bin/sleep 0.01; done",
             go = go.display()
         );
         let flags: &[&str] = if leave { &["--quiet", "--leave-strays"] } else { &["--quiet"] };
-        let mut pty = Pty::shell(&[], &run_args(flags, &["/bin/sh".to_string(), "-c".to_string(), outer]));
+        let mut job = vec!["/bin/sh".to_string(), "-c".to_string(), format!("\"$@\"; while [ ! -e {} ]; do /bin/sleep 0.01; done", hold.display()), "job".to_string()];
+        job.extend(run_args(flags, &["/bin/sh".to_string(), "-c".to_string(), outer]));
+        let mut pty = Pty::shell(&[], &job);
         pty.started();
         // the orphan: the child (its argv ends with the marker, its $0), stopped, and its
         // parent is no longer a shell (the inner shell exited)
@@ -2067,26 +2066,38 @@ fn cell6_a_stopped_orphan_is_killed_and_term_alone_leaks() {
             })
         });
         let id = id.expect("the orphan's identity");
-        // the naive TERM (not in the --leave-strays leg: its pending TERM would end the child as
-        // soon as anything continues it)
-        let after_term = if leg != 0 {
-            (true, Some('T'))
-        } else {
+        // the naive TERM, in leg 0 only: a TERM left pending would end the child as soon as
+        // anything continues it
+        let after_term = if leg == 0 {
             assert!(send(p, id, libc::SIGTERM));
             std::thread::sleep(Duration::from_millis(300));
             (same(p, id), state(p))
+        } else {
+            (true, Some('T'))
         };
+        // let the root exit, then wait for sheepdog to be gone (the outer shell still holds the
+        // group), and look at the child before anything else can act on it
         std::fs::File::create(&go).unwrap();
-        let end = pty.outcome(Duration::from_secs(20));
+        let sd_gone = wait_for_opt(Duration::from_secs(20), || {
+            let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().unwrap();
+            !String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+                let w: Vec<&str> = l.split_whitespace().collect();
+                w.len() > 1 && w[1].ends_with("sheepdog") && w.iter().any(|x| *x == m)
+            })
+        });
         std::thread::sleep(Duration::from_millis(200));
         let survived = same(p, id);
         send(p, id, libc::SIGKILL);
+        std::fs::File::create(&hold).unwrap();
+        let end = pty.outcome(Duration::from_secs(20));
         let _ = std::fs::remove_file(&go);
+        let _ = std::fs::remove_file(&hold);
         assert_eq!(after_term, (true, Some('T')), "control: TERM ended the stopped orphan (the naive kill did not leak)");
+        assert!(sd_gone, "sheepdog did not end");
         assert!(end.is_some(), "the job did not end");
         match leg {
             1 => assert!(!survived, "the stopped orphan survived sheepdog"),
-            2 => assert!(survived, "control: with --leave-strays the stopped orphan should survive"),
+            2 => assert!(survived, "control: with --leave-strays the stopped orphan should survive sheepdog"),
             _ => {}
         }
     }

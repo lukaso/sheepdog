@@ -51,6 +51,7 @@ impl Job {
     fn recorded(&self) -> Vec<(i32, u64)> {
         let mut v = read_pairs(&self.rec);
         v.extend(read_pairs(&self.file(".b")));
+        v.extend(read_pairs(&self.file(".c")));
         v
     }
     /// Live processes whose argv carries the marker, other than a sheepdog.
@@ -77,6 +78,13 @@ impl Job {
             v.len() >= n
         });
     }
+    /// Wait for `/bin/sleep <marker>`, the process at the end of a route (a shell or `script`
+    /// that carries the marker in its argv exists before it).
+    fn wait_sleep(&self) {
+        wait_for("the route's /bin/sleep", Duration::from_secs(15), || {
+            !scan(&self.marker, |w| w.len() >= 2 && w[1] == "/bin/sleep").expect("ps failed").is_empty()
+        });
+    }
     fn wait_marked(&self, n: usize) {
         wait_for(&format!("{n} marked processes"), Duration::from_secs(15), || self.marked().len() >= n);
     }
@@ -86,7 +94,7 @@ impl Job {
     }
 }
 
-const EXTS: [&str; 7] = ["", ".b", ".root", ".tick", ".log", ".go", ".err"];
+const EXTS: [&str; 8] = ["", ".b", ".c", ".root", ".tick", ".log", ".go", ".err"];
 
 impl Drop for Job {
     fn drop(&mut self) {
@@ -265,6 +273,21 @@ fn cell5_control_term_only_leaks() {
 // Cell 6 (a stopped child whose parent dies) needs a real session, so it lives in tests/pty.rs:
 // outside one, the orphan's group is orphaned and the kernel HUPs and CONTs it.
 
+/// Live (non-zombie) processes whose parent is `ppid`, from /proc.
+#[cfg(target_os = "linux")]
+fn children_of(ppid: i32) -> usize {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("stat")).ok())
+        .filter(|s| {
+            let Some(rest) = s.rfind(')').and_then(|i| s.get(i + 2..)) else { return false };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            f.first() != Some(&"Z") && f.get(1).and_then(|p| p.parse::<i32>().ok()) == Some(ppid)
+        })
+        .count()
+}
+
 /// Zombies (state Z) whose parent is `ppid`, from /proc.
 #[cfg(target_os = "linux")]
 fn zombies_of(ppid: i32) -> usize {
@@ -289,10 +312,18 @@ fn cell7_a_fork_storm_leaves_no_zombie_of_the_supervisor() {
     let j = Job::new();
     let done = j.file(".go");
     let mut sd = under_sheepdog(&[fixture(), "storm", done.to_str().unwrap(), "3"]);
-    wait_for("the storm", Duration::from_secs(30), || done.exists());
+    let sup = sd.id() as i32;
+    // during the storm, count the supervisor's children beyond its root: the adopted orphans
+    // (without adoption the zero-zombie count below would say nothing)
+    let mut adopted = 0;
+    wait_for("the storm", Duration::from_secs(30), || {
+        adopted = adopted.max(children_of(sup).saturating_sub(1));
+        done.exists()
+    });
     std::thread::sleep(Duration::from_millis(200)); // the last orphans (20 ms) have exited
-    let z = zombies_of(sd.id() as i32);
+    let z = zombies_of(sup);
     term_and_wait(&mut sd);
+    assert!(adopted > 0, "control: the supervisor adopted no orphan during the storm");
     assert_eq!(z, 0, "zombies of the supervisor after the storm");
 }
 
@@ -329,12 +360,14 @@ fn tag_sweep(tag: &str) -> Vec<(i32, u64)> {
 
 /// The control of an env-tag sweep: the escape shape runs with SD_TAG set, next to a tagged
 /// witness (an sd-fixture, whose environment the sweep can read). The sweep kills what it
-/// finds: it must find the witness (it works) and must miss the escapee (the route leaks).
-fn tag_sweep_control(j: &Job, escape: &[&str]) {
+/// finds: it must find the witness (it works), and must miss the escapee (`leaks`) or find it
+/// (the paired control). `ready` says when the escapee runs its final program.
+fn tag_sweep_control(j: &Job, escape: &[&str], ready: impl Fn(i32) -> bool, leaks: bool) {
     let mut witness = quiet(Command::new(fixture()).args(["deep", &j.marker, j.file(".b").to_str().unwrap(), "2"]).env("SD_TAG", &j.marker)).spawn().unwrap();
     let mut root = quiet(Command::new(fixture()).args(escape).env("SD_TAG", &j.marker)).spawn().unwrap();
     wait_bounded(&mut root, Duration::from_secs(15)).expect("the escape root did not exit");
     let g = read_pairs(&j.rec).first().copied().expect("the escapee was not recorded");
+    wait_for("the escapee's final program", Duration::from_secs(15), || ready(g.0));
     let w = read_pairs(&j.file(".b")).first().copied().expect("the witness was not recorded");
     let swept = tag_sweep(&j.marker);
     for &(p, id) in &swept {
@@ -342,7 +375,17 @@ fn tag_sweep_control(j: &Job, escape: &[&str]) {
     }
     let _ = wait_bounded(&mut witness, Duration::from_secs(5));
     assert!(swept.iter().any(|&(p, _)| p == w.0), "control: the sweep did not find the tagged witness {w:?}: {swept:?}");
-    assert!(same(g.0, g.1), "control: the sweep found the escapee, so the route did not leak");
+    if leaks {
+        assert!(same(g.0, g.1), "control: the sweep found the escapee, so the route did not leak");
+    } else {
+        assert!(swept.iter().any(|&(p, _)| p == g.0), "paired control: the sweep missed the escapee {g:?} although its environment is intact");
+    }
+}
+
+/// `pid` runs the program `prog` (its argv[0]).
+fn runs(pid: i32, prog: &str) -> bool {
+    let out = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+    String::from_utf8_lossy(&out.stdout).split_whitespace().next() == Some(prog)
 }
 
 fn bash_loop() -> &'static str {
@@ -364,14 +407,28 @@ fn cell8_an_escaped_bash_loop_leaves_no_survivor() {
 #[test]
 fn cell8_control_an_env_tag_sweep_misses_an_apple_binary() {
     let j = Job::new();
-    tag_sweep_control(&j, &["escape-exec", &j.rec(), "/bin/bash", "-c", bash_loop(), &j.marker]);
+    tag_sweep_control(&j, &["escape-exec", &j.rec(), "/bin/bash", "-c", bash_loop(), &j.marker], |g| runs(g, "/bin/bash"), true);
+}
+
+/// The cell-9 escapee's program after `env [-i]`: the fixture (not an Apple binary, so on macOS
+/// `ps eww` could read its environment), which records itself in `.c` once it runs.
+fn env_route(j: &Job, drop_env: bool) -> Vec<String> {
+    let mut v = vec!["escape-exec".to_string(), j.rec(), "/usr/bin/env".to_string()];
+    if drop_env {
+        v.push("-i".into());
+    }
+    v.extend([fixture().to_string(), "deep".into(), j.marker.clone(), j.file(".c").display().to_string(), "2".into()]);
+    v
 }
 
 /// Cell 9: an escapee that runs `env -i` (it drops every variable): 0 survivors.
 #[test]
 fn cell9_an_env_i_escapee_leaves_no_survivor() {
     let j = Job::new();
-    run_under_sheepdog(&[fixture(), "escape-exec", &j.rec(), "/usr/bin/env", "-i", "/bin/sleep", &j.marker]);
+    let r = env_route(&j, true);
+    let mut a = vec![fixture()];
+    a.extend(r.iter().map(String::as_str));
+    run_under_sheepdog(&a);
     assert!(!j.recorded().is_empty(), "control: the escapee was not created");
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -380,7 +437,19 @@ fn cell9_an_env_i_escapee_leaves_no_survivor() {
 #[test]
 fn cell9_control_an_env_tag_sweep_misses_env_i() {
     let j = Job::new();
-    tag_sweep_control(&j, &["escape-exec", &j.rec(), "/usr/bin/env", "-i", "/bin/sleep", &j.marker]);
+    let r = env_route(&j, true);
+    let r: Vec<&str> = r.iter().map(String::as_str).collect();
+    tag_sweep_control(&j, &r, |_| !read_pairs(&j.file(".c")).is_empty(), true);
+}
+
+/// Cell 9 paired control: the same program without `-i` is found by the sweep (so the leak above
+/// is `env -i`'s doing, not a blind spot of the sweep).
+#[test]
+fn cell9_control_without_env_i_the_sweep_finds_it() {
+    let j = Job::new();
+    let r = env_route(&j, false);
+    let r: Vec<&str> = r.iter().map(String::as_str).collect();
+    tag_sweep_control(&j, &r, |_| !read_pairs(&j.file(".c")).is_empty(), false);
 }
 
 /// `script` running CMD in a new session on a pty (the syntax differs by OS; Alpine needs the
@@ -404,7 +473,7 @@ fn cell10_a_script_pty_leaves_no_survivor() {
     let a = script_args(&hup_proof(&j.marker));
     let a: Vec<&str> = a.iter().map(String::as_str).collect();
     let mut sd = under_sheepdog(&a);
-    j.wait_marked(1);
+    j.wait_sleep();
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -416,7 +485,7 @@ fn cell10_control_a_group_kill_leaks() {
     let j = Job::new();
     let a = script_args(&hup_proof(&j.marker));
     let mut c = quiet(Command::new(&a[0]).args(&a[1..]).process_group(0)).spawn().unwrap();
-    j.wait_marked(1);
+    j.wait_sleep();
     let (pg, id) = found(c.id() as i32).unwrap();
     assert!(send_group(pg, id, libc::SIGKILL));
     let _ = c.wait();
@@ -436,29 +505,25 @@ fn cell11_set_m_leaves_no_survivor() {
     let a = set_m(&j.marker);
     let a: Vec<&str> = a.iter().map(String::as_str).collect();
     let mut sd = under_sheepdog(&a);
-    j.wait_marked(1);
+    j.wait_sleep();
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
-/// Cell 11 control: the group a `kill -<pid>` expects was never made (the #332 hang). Measured:
-/// the route depends on the bash build. macOS's bash 3.2 and Alpine's bash make no group; on
-/// Debian `set -m` makes one led by that pid, so a group kill reaches the job and there is no
-/// route to show (the cell says so and asserts nothing more).
+/// Cell 11 control: the group a `kill -<pid>` expects was never made (the #332 hang). The cell
+/// reads the group (no pgid equal to the pid) instead of sending `kill -<pid>`: a group it did
+/// not create is never signalled.
 #[test]
 fn cell11_control_no_group_is_made_for_kill_pgid() {
     let j = Job::new();
     let a = set_m(&j.marker);
     let mut c = quiet(Command::new(&a[0]).args(&a[1..])).spawn().unwrap();
-    j.wait_marked(1);
+    j.wait_sleep();
     let pid = c.id() as i32;
     let pg = unsafe { libc::getpgid(pid) };
     send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
-    if pg == pid {
-        eprintln!("this bash makes a group for `set -m; \"$@\"`: the #332 route does not exist here");
-        return;
-    }
+    assert_ne!(pg, pid, "control: bash made a group, so `kill -{pid}` would reach it");
     // the job leaks; with macOS's bash 3.2 `set -m` does not exec the last command, so the shell
     // it runs leaks with it
     assert!(!j.alive().is_empty(), "control: the job should have leaked");
@@ -535,13 +600,17 @@ fn signalled(j: &Job) -> Vec<i32> {
 #[test]
 fn kill_leaves_a_sibling_command_alive() {
     let j = Job::new();
+    use std::os::unix::process::CommandExt;
     let script = format!("\"$0\" deep {m} \"$1\" 2 & \"$0\" deep {m} \"$2\" 2 & wait", m = j.marker);
-    let mut sh = quiet(Command::new("/bin/sh").args(["-c", &script, fixture(), &j.rec(), j.file(".b").to_str().unwrap()])).spawn().unwrap();
+    let mut sh = quiet(Command::new("/bin/sh").args(["-c", &script, fixture(), &j.rec(), j.file(".b").to_str().unwrap()]).process_group(0)).spawn().unwrap();
     j.wait_recorded(4);
     let a = read_pairs(&j.rec);
     let b = read_pairs(&j.file(".b"));
     let target = a[0]; // A's first level (it records itself first)
+    contained(target.0);
     let code = kill(&j, target.0);
+    let outside: Vec<i32> = b.iter().map(|&(p, _)| p).chain([sh.id() as i32]).collect();
+    assert!(signalled(&j).iter().all(|p| !outside.contains(p)), "a process outside the target's tree was signalled: {:?}", j.log());
     let (a_left, b_left) = (a.iter().filter(|&&(p, id)| same(p, id)).count(), b.iter().filter(|&&(p, id)| same(p, id)).count());
     let sh_alive = matches!(sh.try_wait(), Ok(None));
     send_child(&mut sh, libc::SIGKILL);
@@ -556,11 +625,13 @@ fn kill_leaves_a_sibling_command_alive() {
 #[test]
 fn kill_does_not_signal_a_tee_partner() {
     let j = Job::new();
+    use std::os::unix::process::CommandExt;
     let script = format!("\"$0\" deep {m} \"$1\" 2 | tee /dev/null", m = j.marker);
-    let mut sh = quiet(Command::new("/bin/sh").args(["-c", &script, fixture(), &j.rec()])).spawn().unwrap();
+    let mut sh = quiet(Command::new("/bin/sh").args(["-c", &script, fixture(), &j.rec()]).process_group(0)).spawn().unwrap();
     j.wait_recorded(2);
     let tee = wait_for_child_named(sh.id() as i32, "tee");
     let target = read_pairs(&j.rec)[0];
+    contained(target.0);
     let code = kill(&j, target.0);
     let _ = wait_bounded(&mut sh, Duration::from_secs(10));
     assert_eq!(code, Some(0));
@@ -585,14 +656,26 @@ fn wait_for_child_named(parent: i32, name: &str) -> i32 {
     pid
 }
 
-/// Start `sheepdog run -- sd-fixture ticker M REC`; ready when its root named itself and the
-/// escapee has its five children (seven recorded).
-fn ticker(marker: &str, rec: &str) -> Child {
-    let c = under_sheepdog(&[fixture(), "ticker", marker, rec]);
+/// The target of a `kill_*` cell sits under a parent and in a group the test made, never under
+/// the test binary or in its group: a regression that widens the kill set (to the group, the
+/// siblings, the parent's children) then reaches only this cell's processes.
+fn contained(target: i32) {
+    let ppid: i32 = String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &target.to_string()]).output().unwrap().stdout).trim().parse().unwrap();
+    assert_ne!(ppid, std::process::id() as i32, "the target's parent is the test binary");
+    assert_ne!(unsafe { libc::getpgid(target) }, unsafe { libc::getpgrp() }, "the target is in the test binary's group");
+}
+
+/// Start `sh -c 'sheepdog run -- sd-fixture ticker M REC & wait'` in a group of its own; ready
+/// when the job's root named itself and the escapee has its five children (seven recorded).
+/// Returns the shell and the supervisor (the shell's `sheepdog` child).
+fn ticker(marker: &str, rec: &str) -> (Child, (i32, u64)) {
+    use std::os::unix::process::CommandExt;
+    let c = quiet(Command::new("/bin/sh").args(["-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\" & wait", sheepdog(), fixture(), marker, rec]).process_group(0)).spawn().unwrap();
     let root = format!("{rec}.root");
     wait_for("the ticker root", Duration::from_secs(15), || std::path::Path::new(&root).exists());
     wait_for("seven records", Duration::from_secs(15), || read_pairs(&PathBuf::from(rec)).len() >= 7);
-    c
+    let sup = found(wait_for_child_named(c.id() as i32, "sheepdog")).expect("the supervisor");
+    (c, sup)
 }
 
 /// Two concurrent jobs: `sheepdog kill` of one job's supervisor leaves the other job whole.
@@ -600,19 +683,22 @@ fn ticker(marker: &str, rec: &str) -> Child {
 fn kill_of_one_job_leaves_a_concurrent_job_whole() {
     let j = Job::new();
     let k = Job::new();
-    let mut one = ticker(&j.marker, &j.rec());
-    let mut two = ticker(&k.marker, &k.rec());
-    let code = kill(&j, one.id() as i32);
+    let (mut one, sup1) = ticker(&j.marker, &j.rec());
+    let (mut two, sup2) = ticker(&k.marker, &k.rec());
+    contained(sup1.0);
+    let code = kill(&j, sup1.0);
     let _ = wait_bounded(&mut one, Duration::from_secs(10));
-    let mut two_left: Vec<(i32, u64)> = k.recorded().into_iter().chain(read_pairs(&k.file(".root"))).filter(|&(p, id)| same(p, id)).collect();
-    two_left.sort();
-    two_left.dedup();
-    let two_running = matches!(two.try_wait(), Ok(None));
-    term_and_wait(&mut two);
+    let mut two_all: Vec<(i32, u64)> = k.recorded().into_iter().chain(read_pairs(&k.file(".root"))).chain([sup2]).collect();
+    two_all.sort();
+    two_all.dedup();
+    let two_left: Vec<(i32, u64)> = two_all.iter().copied().filter(|&(p, id)| same(p, id)).collect();
+    let hit: Vec<i32> = signalled(&j).into_iter().filter(|p| two_all.iter().any(|&(q, _)| q == *p)).collect();
+    send(sup2.0, sup2.1, libc::SIGTERM);
+    let _ = wait_bounded(&mut two, Duration::from_secs(30));
     assert_eq!(code, Some(0));
     assert_eq!(j.alive(), vec![], "the killed job survived");
-    assert_eq!(two_left.len(), 7, "the other job lost processes: {two_left:?}");
-    assert!(two_running, "the other job's supervisor ended");
+    assert_eq!(two_left.len(), 8, "the other job lost processes: {two_left:?}");
+    assert_eq!(hit, Vec::<i32>::new(), "processes of the other job were signalled: {:?}", j.log());
 }
 
 /// A same-uid process in the target's process group, started before the target, is not killed
@@ -625,12 +711,19 @@ fn kill_leaves_an_older_process_of_the_targets_group_alive() {
     let mut sh = quiet(Command::new("/bin/sh").args(["-c", &script, fixture(), &j.rec()]).process_group(0)).spawn().unwrap();
     j.wait_recorded(2);
     let tree = read_pairs(&j.rec);
-    let older: Vec<(i32, u64)> = scan(&j.marker, |w| w.len() == 3 && w[1] == "/bin/sleep").unwrap().into_iter().filter(|&(p, _)| !tree.iter().any(|&(q, _)| q == p)).collect();
-    assert_eq!(older.len(), 1, "control: the older process of the group: {older:?}");
+    // the older process, once it runs /bin/sleep (before that it is a fork of the shell)
+    let mut older: Vec<(i32, u64)> = Vec::new();
+    wait_for("the older /bin/sleep", Duration::from_secs(15), || {
+        older = scan(&j.marker, |w| w.len() == 3 && w[1] == "/bin/sleep").unwrap().into_iter().filter(|&(p, _)| !tree.iter().any(|&(q, _)| q == p)).collect();
+        older.len() == 1
+    });
     let target = tree[0];
+    contained(target.0);
     assert_eq!(unsafe { libc::getpgid(older[0].0) }, unsafe { libc::getpgid(target.0) }, "control: not in the target's group");
     let code = kill(&j, target.0);
     let older_alive = same(older[0].0, older[0].1);
+    let outside = [older[0].0, sh.id() as i32];
+    assert!(signalled(&j).iter().all(|p| !outside.contains(p)), "a process outside the target's tree was signalled: {:?}", j.log());
     send_child(&mut sh, libc::SIGKILL);
     let _ = sh.wait();
     assert_eq!(code, Some(0));
