@@ -233,8 +233,11 @@ fn counted(r: &Path) -> usize {
 fn without_the_latch_both_members_die() {
     let d = scratch("nolatch");
     let (code, t, u) = two_members(&d, &[], false, None);
+    let (ta, ua) = (common::alive(t), common::alive(u));
+    common::send(t.0, t.1, libc::SIGKILL);
+    common::send(u.0, u.1, libc::SIGKILL);
     assert_eq!(code, Some(0));
-    assert!(!common::alive(t) && !common::alive(u));
+    assert!(!ta && !ua);
     assert!(sink_lines(&d.join("sink")).is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -247,9 +250,10 @@ fn the_latch_withholds_every_signal_to_an_untagged_target() {
     let d = scratch("latch");
     let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
-    let untagged_alive = common::alive(u);
+    let (tagged_alive, untagged_alive) = (common::alive(t), common::alive(u));
+    common::send(t.0, t.1, libc::SIGKILL);
     common::send(u.0, u.1, libc::SIGKILL);
-    assert!(!common::alive(t), "the tagged member dies");
+    assert!(!tagged_alive, "the tagged member dies");
     assert!(untagged_alive, "the untagged member survives");
     assert_eq!(counted(&d.join("untagged")), 0, "no catchable signal reached it");
     assert!(!lines.is_empty(), "withheld lines");
@@ -265,9 +269,10 @@ fn the_panic_path_goes_through_the_door() {
     let d = scratch("panic");
     let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_PANIC_AFTER_STOP", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
-    let untagged_alive = common::alive(u);
+    let (tagged_alive, untagged_alive) = (common::alive(t), common::alive(u));
+    common::send(t.0, t.1, libc::SIGKILL);
     common::send(u.0, u.1, libc::SIGKILL);
-    assert!(!common::alive(t), "the tagged member dies by the panic path");
+    assert!(!tagged_alive, "the tagged member dies by the panic path");
     assert!(untagged_alive, "the panic path did not kill the untagged member");
     assert!(lines.iter().any(|(k, p, s)| k == "withheld" && *p == u.0 && *s == libc::SIGKILL), "{lines:?}");
     assert!(lines.iter().all(|(_, p, _)| *p == u.0), "{lines:?}");
@@ -332,8 +337,10 @@ fn the_verdict_is_taken_once_per_identity() {
     let d = scratch("once");
     let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
+    let tagged_alive = common::alive(t);
+    common::send(t.0, t.1, libc::SIGKILL);
     common::send(u.0, u.1, libc::SIGKILL);
-    assert!(!common::alive(t), "the tagged member dies");
+    assert!(!tagged_alive, "the tagged member dies");
     assert!(lines.iter().all(|(_, p, _)| *p == u.0), "a later signal to the tagged member was withheld: {lines:?}");
     assert_eq!(code, Some(125));
     let _ = std::fs::remove_dir_all(&d);
