@@ -2315,7 +2315,23 @@ fn signals_that_end_by_default() -> Vec<libc::c_int> {
     let rt = unsafe { libc::SIGRTMIN()..=libc::SIGRTMAX() };
     #[cfg(target_os = "macos")]
     let rt = 1..=0;
-    (1..=31).chain(rt).filter(|s| !not.contains(s)).collect()
+    // measured, not assumed: keep a signal only if it ends a throwaway child at its default
+    // action (SIGIO, for one, is discarded on macOS); each kept signal is its own control
+    (1..=31)
+        .chain(rt)
+        .filter(|s| !not.contains(s))
+        .filter(|&sig| {
+            let mut c = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+            common::send_child(&mut c, sig);
+            let st = wait_bounded(&mut c, Duration::from_millis(500));
+            if st.is_none() {
+                common::send_child(&mut c, libc::SIGKILL);
+                let _ = c.wait();
+            }
+            use std::os::unix::process::ExitStatusExt;
+            st.and_then(|s| s.signal()) == Some(sig)
+        })
+        .collect()
 }
 
 /// Phase-1 review round 2 (P2): no such signal, sent to sheepdog's pid, ends it: it keeps its
@@ -2325,7 +2341,9 @@ fn signals_that_end_by_default() -> Vec<libc::c_int> {
 #[test]
 fn no_signal_that_ends_by_default_ends_sheepdog_without_its_kill() {
     let mut ended = Vec::new();
-    for sig in signals_that_end_by_default() {
+    let set = signals_that_end_by_default();
+    assert!(set.contains(&libc::SIGUSR1) && set.contains(&libc::SIGPIPE), "control: the measured set misses USR1 or PIPE: {set:?}");
+    for sig in set {
         if [libc::SIGTERM].contains(&sig) {
             continue; // TERM ends the job by design (with its kill)
         }

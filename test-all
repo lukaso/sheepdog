@@ -34,10 +34,19 @@ LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
 mkdir -p "$LOGDIR"
 declare -a RESULTS=()
 CONTAINERS=()
+BGPID=""
 cleanup() {
-  for c in "${CONTAINERS[@]:-}"; do [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1; done
+  # the step running in the background (see bg_wait): TERM it; GNU timeout passes the TERM on
+  # to its whole group (cargo, the test binaries, what they started there), a `docker run`
+  # client passes it on to its container. It is our own child, recorded by pid.
+  if [ -n "$BGPID" ] && kill -0 "$BGPID" 2>/dev/null; then
+    kill -TERM "$BGPID" 2>/dev/null
+    local i=0
+    while kill -0 "$BGPID" 2>/dev/null && [ $i -lt 450 ]; do sleep 0.1; i=$((i+1)); done
+  fi
+  for c in "${CONTAINERS[@]:-}"; do [ -n "$c" ] && timeout 60 docker rm -f "$c" >/dev/null 2>&1; done
   # the leg containers, by the id each one wrote to its cidfile
-  for f in "$LOGDIR"/*.cid; do [ -s "$f" ] && docker rm -f "$(cat "$f")" >/dev/null 2>&1; done
+  for f in "$LOGDIR"/*.cid; do [ -s "$f" ] && timeout 60 docker rm -f "$(cat "$f")" >/dev/null 2>&1; done
 }
 trap cleanup EXIT
 # a ctrl-C (INT) or a TERM ends the whole run at once, and the EXIT trap removes the containers.
@@ -47,11 +56,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Run "$@" in the background and wait for it (see the traps above); its exit code.
+# Run "$@" in the background and wait for it (see the traps above); its exit code. Its pid is
+# recorded while it runs, so an interrupt's cleanup can end it (it is in a group of its own).
 bg_wait() {
   "$@" &
-  local p=$!
-  wait "$p"
+  BGPID=$!
+  wait "$BGPID"
+  local rc=$?
+  BGPID=""
+  return $rc
 }
 
 record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
@@ -63,7 +76,7 @@ leg_run() { # leg-name docker-args...
   rm -f "$LOGDIR/$name.cid"
   bg_wait timeout -k 30 3600 docker run --rm --init --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
   local rc=$?
-  [ -s "$LOGDIR/$name.cid" ] && docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
+  [ -s "$LOGDIR/$name.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
   return $rc
 }
 
@@ -92,9 +105,9 @@ leg_debian() {
 }
 
 leg_amd64() {
-  if ! docker image inspect sd-amd64-alpine >/dev/null 2>&1; then
+  if ! timeout 60 docker image inspect sd-amd64-alpine >/dev/null 2>&1; then
     printf 'FROM --platform=linux/amd64 rust:1-alpine\nRUN apk add -q procps bash util-linux-misc\n' \
-      | timeout 1800 docker build --platform linux/amd64 -t sd-amd64-alpine - > "$LOGDIR/amd64-image.log" 2>&1 \
+      | bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t sd-amd64-alpine - > "$LOGDIR/amd64-image.log" 2>&1 \
       || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
   fi
   suite_in sd-amd64-alpine target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
@@ -108,8 +121,11 @@ build_alpine() {
 }
 
 # Start `sheepdog run -- sd-fixture ticker` as the container's main process; prints the id.
+# (a command substitution runs this in a subshell: its id goes to a cidfile of its own, which
+# cleanup's *.cid glob covers even if the interrupt comes before the caller records it)
 start_job() { # extra docker args...
-  docker run -d "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro rust:1-alpine \
+  local cf="$LOGDIR/job-$RANDOM$RANDOM.cid"
+  timeout 60 docker run -d --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro rust:1-alpine \
     /tgt/debug/sheepdog run --quiet -- /tgt/debug/sd-fixture ticker 29.1 /tmp/r
 }
 

@@ -664,9 +664,11 @@ pub struct Signals {
 /// The stop signals job control handles, in the order `watch_stop` lists them.
 pub const STOPS: [c_int; 3] = [libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU];
 
-/// The faults: left unblocked, so that a real fault in sheepdog still ends it (a fault while its
-/// signal is blocked is undefined on some systems), and sent with `kill` they are the signals
-/// that can still end sheepdog without its kill (with KILL; stated).
+/// Left unblocked. The faults (SEGV, BUS, ILL, FPE, TRAP, SYS): a real fault in sheepdog must
+/// still end it (a fault while its signal is blocked is undefined on some systems). ABRT (which
+/// `abort()` delivers even when blocked): it stays the way a watchdog ends a hung sheepdog
+/// (systemd's WatchdogSignal is SIGABRT). Sent with `kill`, these (with KILL) are the signals
+/// that still end sheepdog without its kill: PHASE1.md §4 names that residual.
 pub const FAULTS: [c_int; 7] = [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGTRAP, libc::SIGSYS, libc::SIGABRT];
 
 /// Add to `set` every signal except the faults (and KILL and STOP, which cannot be blocked):
