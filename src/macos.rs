@@ -467,7 +467,7 @@ fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
                         // relay's pid alone); never a CONT to a running supervisor, which could
                         // call off a new stop
                         if stopped(sup) {
-                            libc::kill(sup, libc::SIGCONT);
+                            libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                         }
                     }
                     continue;
@@ -482,13 +482,13 @@ fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
             // the job is ending: continue the supervisor unconditionally
             // only a TERM the caller did not ignore
             if watch_term && crate::consume(libc::SIGTERM) {
-                libc::kill(sup, libc::SIGTERM);
-                libc::kill(sup, libc::SIGCONT);
+                libc::kill(sup, libc::SIGTERM); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
+                libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
             }
             if crate::consume(libc::SIGHUP) && libc::getsid(0) == relay {
-                libc::kill(sup, libc::SIGHUP);
+                libc::kill(sup, libc::SIGHUP); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                 if stopped(sup) {
-                    libc::kill(sup, libc::SIGCONT);
+                    libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                 }
             }
             // never forwarded: the terminal sent it to the group. Not with --forward-int-to-root
@@ -512,7 +512,7 @@ fn relay_loop(sup: pid_t, relay: pid_t, watch_term: bool) -> i32 {
 /// NOTE_EXIT (or ESRCH when registering it). The parent pid is a fallback only when kqueue is
 /// unusable: a debugger's attach also changes it.
 fn relay_died() {
-    unsafe { libc::raise(libc::SIGTERM) };
+    unsafe { libc::raise(libc::SIGTERM) }; // raw signal site: this process (PHASE2.md §0.3)
 }
 
 /// The event loop's wait (PHASE1.md §1): returns the root's wait status, or None if the job
@@ -790,7 +790,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 // (S2 review rounds 4-5).
                 if relay.is_some_and(relay_exited) || (sig.watch_term && crate::term_pending()) {
                     unsafe {
-                        libc::kill(root, libc::SIGKILL);
+                        libc::kill(root, libc::SIGKILL); // raw signal site: the root this supervisor spawned (PHASE2.md §0.3)
                         let mut st = 0;
                         libc::waitpid(root, &mut st, 0);
                     }
@@ -803,7 +803,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                             let _ = std::fs::File::create(f);
                         }
                     }
-                    unsafe { libc::kill(root, libc::SIGCONT) };
+                    unsafe { libc::kill(root, libc::SIGCONT) }; // raw signal site: the root this supervisor spawned (PHASE2.md §0.3)
                 }
             }
             // On an early end the signals that end sheepdog stay held through the kill and the

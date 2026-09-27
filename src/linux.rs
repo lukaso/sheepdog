@@ -338,7 +338,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                                 // the relay's pid alone); never a CONT to a running supervisor,
                                 // which could call off a new stop
                                 if stopped(sup) {
-                                    libc::kill(sup, libc::SIGCONT);
+                                    libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                                 }
                             }
                             continue;
@@ -366,13 +366,13 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             // ignored TERM on the signalfd; forwarding it with a CONT would call
                             // off a stop in progress)
                             libc::SIGTERM if sig.watch_term => {
-                                libc::kill(sup, libc::SIGTERM);
-                                libc::kill(sup, libc::SIGCONT);
+                                libc::kill(sup, libc::SIGTERM); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
+                                libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                             }
                             libc::SIGHUP if libc::getsid(0) == relay => {
-                                libc::kill(sup, libc::SIGHUP);
+                                libc::kill(sup, libc::SIGHUP); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                                 if stopped(sup) {
-                                    libc::kill(sup, libc::SIGCONT);
+                                    libc::kill(sup, libc::SIGCONT); // raw signal site: the relay's own child, the supervisor (PHASE2.md §0.3)
                                 }
                             }
                             // SIGCHLD, INT (never forwarded, also with --forward-int-to-root: a late

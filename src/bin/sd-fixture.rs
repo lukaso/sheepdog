@@ -82,6 +82,10 @@
 //!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
+//! - `swarm N R`: PHASE2.md §0.1 (the stress cell). The root forks N children, each a fixture
+//!   process (its environment readable on macOS), records each, and exits. Even children exit
+//!   on TERM after a short delay (i*100 µs), so some members are exiting while the kill runs;
+//!   odd children ignore TERM and die only of SIGKILL. SIGALRM ends each after 60 s at most.
 //! - `sigcount R`: S8 (another-user leg). Records itself, then counts every catchable signal as a
 //!   line `SIG <n>` in `R.sig` and keeps running (SIGALRM ends it after 1800 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
@@ -516,6 +520,16 @@ unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETEXEC as i16);
     libc::posix_spawn(std::ptr::null_mut(), path.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), *_NSGetEnviron() as *const *mut libc::c_char);
     libc::_exit(3) // SETEXEC returns only on failure
+}
+
+/// `swarm`: how long an even child waits after TERM before it exits.
+static SWARM_DELAY_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn swarm_term(_: libc::c_int) {
+    unsafe {
+        libc::usleep(SWARM_DELAY_US.load(std::sync::atomic::Ordering::SeqCst));
+        libc::_exit(0);
+    }
 }
 
 /// The child the test-env runner waits for, for its TERM/INT forwarding handler.
@@ -1013,6 +1027,32 @@ fn main() {
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
+    }
+    if mode == "swarm" && a.len() == 4 {
+        let n: u32 = a[2].parse().unwrap_or_else(|_| usage());
+        let r = a[3].clone();
+        unsafe {
+            for i in 0..n {
+                match libc::fork() {
+                    0 => {
+                        libc::alarm(60);
+                        if i % 2 == 0 {
+                            SWARM_DELAY_US.store(i * 100, std::sync::atomic::Ordering::SeqCst);
+                            on(libc::SIGTERM, swarm_term as *const () as usize, true);
+                        } else {
+                            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                        }
+                        unblock_all();
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    c if c > 0 => record(&r, c),
+                    _ => std::process::exit(3),
+                }
+            }
+        }
+        std::process::exit(0);
     }
     if mode == "sigcount" && a.len() == 3 {
         // S8 (another-user leg): record itself, then count every catchable signal (a line

@@ -29,7 +29,8 @@ rc=0
 for b in $bins; do
   # a shell of `sd` stays as the test binary's parent (it does not exec it): a cell that walks
   # its own ancestors needs one of its own user above it
-  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp /bin/sh -c '"$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
+  # through the cargo runner, as cargo test would (PHASE2.md §0.4: the test environment)
+  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp /bin/sh -c '/w/scripts/test-env "$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
   echo "$(basename "$b"): $(grep -E '^test result' /tmp/b.log | cut -c1-80)"
   grep -E '^thread|FAILED' /tmp/b.log | cut -c1-200
 done

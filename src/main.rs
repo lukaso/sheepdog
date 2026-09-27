@@ -19,6 +19,8 @@
 #![cfg_attr(test, allow(dead_code))]
 
 mod kill;
+mod state;
+mod wall;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -183,9 +185,19 @@ pub fn trace(line: String) {
     }
 }
 
+/// Debug seam SHEEPDOG_TEST_TRACE: one line per event that is not a signal (a start, a disabled
+/// source), kept out of the signal log so its exact-content checks stay about signals.
+pub fn note(line: String) {
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("SHEEPDOG_TEST_TRACE") {
+            trace_to(std::path::Path::new(&p), &line);
+        }
+    }
+}
+
 /// Append one line to the log at `path`, in one write: the relay and the supervisor both write
 /// this log, and a line written in two parts can be merged with the other writer's.
-fn trace_to(path: &std::path::Path, line: &str) {
+pub(crate) fn trace_to(path: &std::path::Path, line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
         let _ = f.write_all(format!("{line}\n").as_bytes());
     }
@@ -246,6 +258,12 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
         }
         (fd >= 0).then_some(fd)
     };
+    if !wall::admit(pid, sig) {
+        if let Some(fd) = fd {
+            unsafe { libc::close(fd) };
+        }
+        return Sent::No;
+    }
     if let Some(fd) = fd {
         trace(format!("pidfd {pid} {sig}"));
         if !same(pid, id) {
@@ -302,6 +320,9 @@ fn send_checked(pid: i32, id: u64, sig: c_int) -> Sent {
         return Sent::No; // every door refuses a group or the broadcast (the rollback enters here)
     }
     if inert(pid, sig) {
+        return Sent::No;
+    }
+    if !wall::admit(pid, sig) {
         return Sent::No;
     }
     trace(format!("kill {pid} {sig}"));
@@ -474,9 +495,7 @@ pub fn kill_tree(
         Err(_) => {
             let known = known.borrow();
             for (&p, &id) in known.iter() {
-                if p > 1 && same(p, id) && !inert(p, libc::SIGKILL) {
-                    unsafe { libc::kill(p, libc::SIGKILL) };
-                }
+                let _ = send_checked(p, id, libc::SIGKILL); // the one door: pid <= 1, inert, wall, identity
             }
             say!("sheepdog: internal error while killing the tree; sent SIGKILL to the {} member(s) it knew. The tree may NOT be clean.", known.len());
             Err(KillError::Internal)
@@ -789,7 +808,7 @@ pub fn die_like(status: libc::c_int) -> i32 {
             libc::sigemptyset(&mut one);
             libc::sigaddset(&mut one, sig);
             libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
-            libc::raise(sig);
+            libc::raise(sig); // raw signal site: this process (PHASE2.md §0.3)
         }
     }
     code_of(status)
@@ -1003,7 +1022,7 @@ impl JobControl {
         if let Some(r) = self.relay.filter(|&r| r > 1) {
             if unsafe { libc::getppid() } == r && stopped(r) {
                 trace("relay-continued".into());
-                unsafe { libc::kill(r, libc::SIGCONT) };
+                unsafe { libc::kill(r, libc::SIGCONT) }; // raw signal site: this supervisor's parent, the relay (getppid checked) (PHASE2.md §0.3)
             }
         }
     }
@@ -1011,7 +1030,7 @@ impl JobControl {
     pub fn continue_relay(&self) {
         if let Some(r) = self.relay.filter(|&r| r > 1) {
             if unsafe { libc::getppid() } == r {
-                unsafe { libc::kill(r, libc::SIGCONT) };
+                unsafe { libc::kill(r, libc::SIGCONT) }; // raw signal site: this supervisor's parent, the relay (getppid checked) (PHASE2.md §0.3)
             }
         }
     }
@@ -1122,7 +1141,7 @@ pub fn release_relay(relay: Option<i32>, stopped: fn(i32) -> bool) {
     if let Some(r) = relay.filter(|&r| r > 1) {
         if unsafe { libc::getppid() } == r && stopped(r) {
             trace("relay-released".into());
-            unsafe { libc::kill(r, libc::SIGCONT) };
+            unsafe { libc::kill(r, libc::SIGCONT) }; // raw signal site: this supervisor's parent, the relay (getppid checked) (PHASE2.md §0.3)
         }
     }
 }
@@ -1163,7 +1182,7 @@ pub fn self_stop(sig: c_int) {
         let mut one: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut one);
         libc::sigaddset(&mut one, sig);
-        libc::raise(sig);
+        libc::raise(sig); // raw signal site: this process (PHASE2.md §0.3)
         libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
         libc::sigprocmask(libc::SIG_BLOCK, &one, std::ptr::null_mut());
     }
@@ -1217,7 +1236,7 @@ pub fn die_by_term(fallback: i32) -> i32 {
         libc::sigemptyset(&mut one);
         libc::sigaddset(&mut one, libc::SIGTERM);
         libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
-        libc::raise(libc::SIGTERM);
+        libc::raise(libc::SIGTERM); // raw signal site: this process (PHASE2.md §0.3)
     }
     fallback
 }
@@ -1261,6 +1280,13 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
     let argv: Vec<OsString> = (0..argc.max(0) as usize)
         .map(|i| OsString::from_vec(unsafe { std::ffi::CStr::from_ptr(*argv.add(i)) }.to_bytes().to_vec()))
         .collect();
+    // PHASE2.md §0.5: a release build has none of the test walls, so it refuses to run in a test
+    // environment rather than act on this machine's real state and processes
+    if !cfg!(debug_assertions) && (std::env::var_os("SHEEPDOG_TEST_TAG").is_some() || std::env::var_os("SHEEPDOG_TEST_STATE").is_some()) {
+        say!("sheepdog: a release build does not run in a test environment (SHEEPDOG_TEST_TAG or SHEEPDOG_TEST_STATE is set)");
+        return 125;
+    }
+    note(format!("start debug {}", std::process::id()));
     // a panic must not unwind out of an extern "C" fn (undefined behaviour before Rust 1.81)
     std::panic::catch_unwind(|| run(argv)).unwrap_or(125)
 }

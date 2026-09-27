@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The phase-1 platform matrix (PHASE1.md S8): one command, one exit code.
+# The platform matrix (PHASE1.md S8, PHASE2.md §0): one command, one exit code.
 #
 #   ./test-all              every automatic leg
 #   ./test-all LEG...       only these legs
@@ -19,6 +19,7 @@
 #                probe must fall back to kill
 #   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
 #                signal
+#   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
 #                operator's Developer ID and a click in System Settings; prints the steps
 #
@@ -27,7 +28,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
-ALL="macos alpine debian amd64 pid1 init enosys other-user"
+ALL="macos alpine debian amd64 pid1 init enosys other-user release"
 [ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
@@ -223,6 +224,11 @@ leg_other_user() {
     && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
 }
 
+leg_release() {
+  bg_wait timeout -k 30 1800 sh scripts/release-refusal.sh > "$LOGDIR/release.log" 2>&1 \
+    && record release PASS || record release "FAIL ($LOGDIR/release.log)"
+}
+
 leg_tcc() {
   cat <<'TXT'
 The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
@@ -238,7 +244,7 @@ for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; other-user) leg_other_user ;;
-    tcc) leg_tcc ;;
+    release) leg_release ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done
