@@ -257,6 +257,8 @@ Control cell: `sleep` under the fixture shell, ctrl-Z → "stopped", ctrl-C → 
 
 - **Review of the operator-decision commit (1f2b8fb):** 1 P2, 2 P3, fixed. P2: the new `deadline <pids>` trace made the inert-seam control vacuous (it accepted any log line naming the target); it now requires an `inert <target> <sig>` line (red with the inert trace removed and the deadline trace kept). P3: the polling traces prove the fallback was chosen, not that it ran (a mutant keeping the trace but never setting `polling` stayed green: the tick still sees the exit, and a TERM interrupts kevent anyway); a new macOS cell shows the exit fallback polls within a 900 ms tick (red under that mutant), and the TERM-seam cell says the fallback is not observable there. P3: four places still put the PATH-symlink grant in phase 1; each now says it moved to phase 3.
 
+- **Review of 5d65d2e:** clean (no P1/P2; the timing cell 4 of 4 green, its mutant red at the full tick, 930 ms; the inert control exact on both OSes; no place still puts the grant in phase 1). Declined P3: under a 0.3–0.65 s stall between the root's start and the loop's first wait, a build that does not poll could pass the timing cell (a false green for the mutant only, never a flake on the real code). **Phase 1 is closed.**
+
 ## 4. Risks and named residuals
 
 - **Signals that still end sheepdog without its kill** (phase-1 review): KILL; the faults sent with `kill` (SEGV, BUS, ILL, FPE, TRAP, SYS; a core dump where the limit allows); ABRT (kept as a watchdog's way to end a hung sheepdog); on Linux the C library's reserved signals (32 and 33 on glibc, 32 to 34 on musl). The job then runs on unsupervised. Every other signal is blocked for sheepdog or handled.
