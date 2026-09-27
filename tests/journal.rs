@@ -354,32 +354,36 @@ fn a_taken_job_id_is_never_overwritten() {
 }
 
 /// The state wall, live (PHASE2.md §0.2): a debug run whose environment names the operator's
-/// state (`SHEEPDOG_STATE`, with a sentinel even) writes nothing there, and notes that it has no
-/// state. The control is every cell above: with a test state it writes a journal.
+/// state (`SHEEPDOG_STATE`, `XDG_STATE_HOME` and `HOME` all pointing at a directory that even has
+/// a sentinel) writes nothing there and notes that it has no state: with the runner's canary as
+/// its test state (no sentinel), and with no test state at all. The control is every cell above:
+/// with a sentinelled test state it writes a journal.
 #[test]
 fn a_debug_run_never_writes_the_operators_state() {
-    let d = scratch("wall");
-    let real = d.join("real");
-    std::fs::create_dir_all(&real).unwrap();
-    std::fs::write(real.join(".sheepdog-test"), b"").unwrap();
-    let trace = d.join("trace");
-    let code = finish(
-        Command::new(sheepdog())
-            .args(["run", "--", "/bin/sh", "-c", "exit 0"])
+    for canary in [true, false] {
+        let d = scratch(if canary { "wall-canary" } else { "wall-none" });
+        let real = d.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(".sheepdog-test"), b"").unwrap();
+        let trace = d.join("trace");
+        let mut cmd = Command::new(sheepdog());
+        cmd.args(["run", "--", "/bin/sh", "-c", "exit 0"])
             .env("SHEEPDOG_STATE", &real)
             .env("XDG_STATE_HOME", &real)
             .env("HOME", &real)
             .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
-            .env("SHEEPDOG_TEST_TRACE", &trace)
-            .spawn()
-            .unwrap(),
-    );
-    assert_eq!(code, Some(0));
-    let written: Vec<_> = walk(&real).into_iter().filter(|p| !p.ends_with(".sheepdog-test")).collect();
-    assert!(written.is_empty(), "{written:?}");
-    let notes = std::fs::read_to_string(&trace).unwrap_or_default();
-    assert!(notes.lines().any(|l| l == "state-unset"), "{notes}");
-    let _ = std::fs::remove_dir_all(&d);
+            .env("SHEEPDOG_TEST_TRACE", &trace);
+        if !canary {
+            cmd.env_remove("SHEEPDOG_TEST_STATE");
+        }
+        let code = finish(cmd.spawn().unwrap());
+        assert_eq!(code, Some(0));
+        let written: Vec<_> = walk(&real).into_iter().filter(|p| !p.ends_with(".sheepdog-test")).collect();
+        assert!(written.is_empty(), "canary {canary}: {written:?}");
+        let notes = std::fs::read_to_string(&trace).unwrap_or_default();
+        assert!(notes.lines().any(|l| l == "state-unset"), "canary {canary}: {notes}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 fn walk(p: &Path) -> Vec<PathBuf> {
