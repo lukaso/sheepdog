@@ -293,11 +293,11 @@ fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool 
 /// with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked). PLAN.md §3.1, cell 23.
 /// Spawn the root with the caller's mask. `suspended`: it starts stopped before its first
 /// instruction, so its identity can be read before it can start or leave anything.
-fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &libc::sigset_t) -> pid_t {
-    let argv = cstrings(cmd).unwrap_or_else(|e| {
+fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &libc::sigset_t) -> Result<pid_t, i32> {
+    let argv = cstrings(cmd).map_err(|e| {
         say!("sheepdog: {e}");
-        std::process::exit(125)
-    });
+        125
+    })?;
     let mut ptrs: Vec<*mut c_char> = argv.iter().map(|c| c.as_ptr() as *mut c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: pid_t = 0;
@@ -321,9 +321,14 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &l
     };
     if rc != 0 {
         say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
-        std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
+        return Err(if rc == libc::ENOENT { 127 } else { 126 });
     }
-    pid
+    Ok(pid)
+}
+
+/// The macOS `puniq` of `pid` (its original parent's uniqueid), for the journal.
+pub fn puniq(pid: pid_t) -> Option<u64> {
+    uniq(pid).map(|u| u.1)
 }
 
 /// Env var that carries `<relay pid>:<supervisor pid>` across the supervisor's re-exec; removed
@@ -746,6 +751,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }
+            // after the SETEXEC (the lock is CLOEXEC and would not survive it), before the root
+            let journal = std::cell::RefCell::new(crate::journal::Journal::open(&a.owner, &a.argv));
             let tracker = std::cell::RefCell::new(crate::Tracker::default());
             tracker.borrow_mut().r.insert(me);
             tracker.borrow_mut().ever.insert(me);
@@ -775,10 +782,20 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     }
                 }
             }
-            let root = spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask);
+            let root = match spawn(&a.cmd, false, !cont_blocked, &sig.caller_mask) {
+                Ok(r) => r,
+                Err(code) => {
+                    unsafe { libc::sigprocmask(libc::SIG_SETMASK, &held, std::ptr::null_mut()) };
+                    journal.into_inner().finish(true);
+                    return code;
+                }
+            };
+            crate::status::set_root("signaled"); // until the root's own end is known
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS");
             if let Some((u, _)) = uniq(root) {
                 tracker.borrow_mut().ever.insert(u);
+                // before the resuming CONT below: the root is journaled before it runs
+                journal.borrow_mut().record_root(root, u, &a.cmd);
             }
             unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &stops, std::ptr::null_mut()) };
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS");
@@ -794,6 +811,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                         let mut st = 0;
                         libc::waitpid(root, &mut st, 0);
                     }
+                    crate::status::set_root("not-started");
                     ended = true;
                 } else {
                     if cfg!(debug_assertions) {
@@ -816,6 +834,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let mut current = || {
                 let mut t = tracker.borrow_mut();
                 let found = members(&mut t);
+                journal.borrow_mut().record(&found);
                 t.refresh(found);
                 t.known.iter().map(|(&p, &id)| (p, id)).collect()
             };
@@ -823,6 +842,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let mut ours = |pg: i32| crate::only_ours(&group_pids(pg), relay, &tracker.borrow().known);
             let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints) };
             if a.leave_strays && status.is_some() {
+                let mut j = journal.into_inner();
+                j.mark_leave_strays();
+                j.finish(false);
                 crate::release_relay(relay, stopped);
                 return crate::finish(status, Ok(()), &mut ints, sig);
             }
@@ -831,7 +853,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 &crate::KillOpts::from_env().with_grace(a.grace),
                 || {
                     let mut t = tracker.borrow_mut();
-                    members(&mut t)
+                    let found = members(&mut t);
+                    journal.borrow_mut().record(&found);
+                    found
                 },
                 || {},
                 || None,
@@ -841,6 +865,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if status.is_none() {
                 let _ = unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) };
             }
+            journal.into_inner().finish(result.is_ok());
             crate::release_relay(relay, stopped);
             crate::finish(status, result, &mut ints, sig)
         }
@@ -848,7 +873,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }
-            let root = spawn(&a.cmd, true, false, &sig.caller_mask);
+            let root = match spawn(&a.cmd, true, false, &sig.caller_mask) {
+                Ok(r) => r,
+                Err(code) => return code,
+            };
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let mut ints = crate::Interrupts::none();
             let status = wait(root, sig, None, &mut Vec::new, &mut |_| false, &mut ints);

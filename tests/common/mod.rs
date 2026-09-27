@@ -11,6 +11,8 @@
 
 #![allow(dead_code)] // each test file uses a different part
 
+pub mod json;
+
 use sheepdog::ident::{identity, same};
 use std::process::{Child, Command};
 

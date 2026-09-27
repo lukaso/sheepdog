@@ -198,11 +198,11 @@ extern "C" {
 /// changes none except SIGCHLD, set to default: `#![no_main]`, see main.rs), and its mask is
 /// set to the caller's with SETSIGMASK (sheepdog itself runs with TERM and SIGCHLD blocked).
 /// PLAN.md §3.1, cell 23. posix_spawn also avoids running Rust code in a forked child.
-fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> i32 {
-    let argv: Vec<CString> = cstrings(cmd).unwrap_or_else(|e| {
+fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<i32, i32> {
+    let argv: Vec<CString> = cstrings(cmd).map_err(|e| {
         say!("sheepdog: {e}");
-        std::process::exit(125)
-    });
+        125
+    })?;
     let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
     ptrs.push(std::ptr::null_mut());
     let mut pid: libc::pid_t = 0;
@@ -218,9 +218,9 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> i32 {
     };
     if rc != 0 {
         say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
-        std::process::exit(if rc == libc::ENOENT { 127 } else { 126 });
+        return Err(if rc == libc::ENOENT { 127 } else { 126 });
     }
-    pid
+    Ok(pid)
 }
 
 /// A signalfd for `set` (PHASE1.md §1.1): CLOEXEC, so it never leaks into the root, and
@@ -412,7 +412,24 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if let Some(code) = crate::term_before_spawn(sig) {
         return code;
     }
-    let root = spawn(&a.cmd, &sig.caller_mask);
+    let journal = std::cell::RefCell::new(crate::journal::Journal::open(&a.owner, &a.argv));
+    let root = match spawn(&a.cmd, &sig.caller_mask) {
+        Ok(r) => r,
+        Err(code) => {
+            journal.into_inner().finish(true);
+            return code;
+        }
+    };
+    crate::status::set_root("signaled"); // until the root's own end is known
+    // P1a: journaled right after the spawn (the root shim of P1b journals it before it runs)
+    if let Some(id) = sheepdog::ident::identity(root) {
+        journal.borrow_mut().record_root(root, id, &a.cmd);
+    }
+    let scan = || {
+        let found = descendants(me);
+        journal.borrow_mut().record(&found);
+        found
+    };
     // The event loop's wait (PHASE1.md §1): a signalfd on CHLD and the watched signals (all
     // blocked by setup_signals), drained on every wake so each signal is consumed exactly once;
     // the waitpid(-1, WNOHANG) loop reaps the root and adopted orphans. One fixed order when
@@ -428,7 +445,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let mut jobs = crate::JobControl::new(relay);
     let tick = crate::tick_ms() as i32;
     let status = loop {
-        tracker.refresh(descendants(me));
+        tracker.refresh(scan());
         let got: Vec<i32> = if fd >= 0 {
             drain(fd)
         } else {
@@ -471,7 +488,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         for s in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
             if got.contains(&s) {
                 ints.forward(s, root, &mut || {
-                    tracker.refresh(descendants(me));
+                    tracker.refresh(scan());
                     tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
                 });
             }
@@ -482,7 +499,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         // job control after INT/HUP (the fixed order); all stop signals of one wake are one stop
         if let Some(&s) = crate::STOPS.iter().find(|s| got.contains(s)) {
             jobs.stop(s, sig, root, &mut || {
-                tracker.refresh(descendants(me));
+                tracker.refresh(scan());
                 tracker.known.iter().map(|(&p, &id)| (p, id)).collect()
             }, stopped);
         }
@@ -499,6 +516,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         unsafe { libc::close(fd) };
     }
     if a.leave_strays && status.is_some() {
+        let mut j = journal.into_inner();
+        j.mark_leave_strays();
+        j.finish(false);
         crate::release_relay(relay, stopped);
         return crate::finish(status, Ok(()), &mut ints, sig);
     }
@@ -506,11 +526,12 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let opts = crate::KillOpts::from_env().with_grace(a.grace);
     let initial = tracker.known;
     let result = if is_subreaper {
-        kill_tree(&opts, || descendants(me), reap, tree_empty, crate::signal, initial)
+        kill_tree(&opts, scan, reap, tree_empty, crate::signal, initial)
     } else {
-        kill_tree(&opts, || descendants(me), reap, || None, crate::signal, initial)
+        kill_tree(&opts, scan, reap, || None, crate::signal, initial)
     };
     reap();
+    journal.into_inner().finish(result.is_ok());
     crate::release_relay(relay, stopped);
     crate::finish(status, result, &mut ints, sig)
 }

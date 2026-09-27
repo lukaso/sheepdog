@@ -18,8 +18,10 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
 
+mod journal;
 mod kill;
 mod state;
+mod status;
 mod wall;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -56,6 +58,10 @@ pub struct Args {
     pub quiet: bool,
     /// forward an INT to the root as well (callers that signal only the sheepdog pid)
     pub forward_int_to_root: bool,
+    /// the owner tag in the journal header (PLAN.md §3.5; default `default`)
+    pub owner: String,
+    /// `--status-fd N`: the status line goes to this fd at the end
+    pub status_fd: Option<i32>,
 }
 
 /// A duration: "0", "2" (seconds), "2s", "500ms".
@@ -85,7 +91,7 @@ pub fn cstrings(v: &[OsString]) -> Result<Vec<CString>, String> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
     125
 }
 
@@ -100,11 +106,22 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut leave_strays = false;
     let mut quiet = false;
     let mut forward_int_to_root = false;
+    let mut owner = "default".to_string();
+    let mut status_fd = None;
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
             b"--mode" if i + 1 < sep => {
                 mode = Some(args[i + 1].to_string_lossy().into_owned());
+                i += 2;
+            }
+            b"--owner" if i + 1 < sep => {
+                owner = args[i + 1].to_string_lossy().into_owned();
+                i += 2;
+            }
+            b"--status-fd" if i + 1 < sep => {
+                let fd: i32 = args[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n| n >= 0).ok_or_else(usage)?;
+                status_fd = Some(fd);
                 i += 2;
             }
             b"--grace" if i + 1 < sep => {
@@ -130,7 +147,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root })
+    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -799,6 +816,7 @@ pub fn has_children() -> bool {
 /// which shells rely on (for example to stop a loop on ctrl-C: review round 4, P2-1).
 pub fn die_like(status: libc::c_int) -> i32 {
     if libc::WIFSIGNALED(status) {
+        status::write(code_of(status)); // this process ends in the raise below
         let sig = libc::WTERMSIG(status);
         unsafe {
             let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
@@ -1194,6 +1212,9 @@ pub fn self_stop(sig: c_int) {
 /// root's exit code. `status` is the root's wait status, None when TERM ended the job.
 pub fn finish(status: Option<c_int>, result: Result<(), KillError>, ints: &mut Interrupts, sig: &Signals) -> i32 {
     ints.drain_pending(sig);
+    if let Some(st) = status {
+        status::set_root(if libc::WIFSIGNALED(st) { "signaled" } else { "exited" });
+    }
     match (status, result) {
         (_, Err(e)) => kill_failed(e),
         (None, Ok(())) => die_by_term(143),
@@ -1230,6 +1251,7 @@ pub fn term_pending() -> bool {
 
 /// After the tree was killed for a TERM: die of SIGTERM, so the caller sees death by signal.
 pub fn die_by_term(fallback: i32) -> i32 {
+    status::write(fallback); // this process ends in the raise below
     unsafe {
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
         let mut one: libc::sigset_t = std::mem::zeroed();
@@ -1265,12 +1287,15 @@ fn run(argv: Vec<OsString>) -> i32 {
         Ok(a) => a,
         Err(code) => return code,
     };
+    if let Some(fd) = args.status_fd {
+        status::set_fd(fd);
+    }
     let sig = setup_signals();
     #[cfg(target_os = "macos")]
     let code = macos::run(&args, &sig);
     #[cfg(target_os = "linux")]
     let code = linux::run(&args, &sig);
-    code
+    status::write(code)
 }
 
 #[cfg(not(test))]
