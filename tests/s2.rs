@@ -302,6 +302,11 @@ fn s2_a_self_disclaimed_child_is_caught_by_its_original_parent() {
 /// TERM still ends the job well under a tick (debug seam fails EVFILT_SIGNAL only).
 #[cfg(target_os = "macos")]
 #[test]
+// Note (review of the trace sweep): the `polling term` trace proves the fallback was chosen, not
+// that it ran. On macOS a TERM interrupts `kevent` (EINTR) and wakes the loop even without its
+// registration or the polling fallback, so no input found makes the fallback observable here; this
+// cell does not count as coverage of the polling itself (the exit fallback's is
+// `s1_the_exit_fallback_polls_within_the_tick`).
 fn s2_a_failed_term_registration_still_wakes_on_term() {
     let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up
     // The tick is widened to 900 ms (debug seam). Without the fallback, TERM waits for the next

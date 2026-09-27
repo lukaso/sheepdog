@@ -341,3 +341,28 @@ fn s1_a_term_pending_at_start_means_no_root_in_the_relay_shape() {
     assert!(!ran, "the root ran although a TERM was pending before sheepdog started");
     assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM));
 }
+
+/// Review of the trace sweep (P3, macOS): the fallback not only is chosen (the `polling exit`
+/// trace, cell above) but runs: with the root's exit unwatchable and the tick widened to 900 ms,
+/// a root that exits by itself after 0.3 s ends the job well within the tick, which only polling
+/// (every 50 ms) can do. Best of three runs after a warm-up (a first launch is slowed by the
+/// security scan); red when the fallback is chosen but `polling` is never set.
+#[cfg(target_os = "macos")]
+#[test]
+fn s1_the_exit_fallback_polls_within_the_tick() {
+    let _ = Command::new(sheepdog()).args(["run", "--", "true"]).status(); // warm-up
+    let mut best = Duration::from_secs(60);
+    for _ in 0..3 {
+        let t = Instant::now();
+        let st = Command::new(sheepdog())
+            .args(["run", "--", "/bin/sleep", "0.3"])
+            .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
+            .env("SHEEPDOG_TEST_TICK_MS", "900")
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(0));
+        best = best.min(t.elapsed());
+    }
+    assert!(best < Duration::from_millis(650), "the root's exit was seen only at the tick ({best:?}): the fallback did not poll");
+}

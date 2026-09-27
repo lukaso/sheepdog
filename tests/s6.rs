@@ -379,7 +379,13 @@ fn s6_control_the_inert_seam_logs_the_signals_it_withholds() {
     let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(alive, 3, "the inert seam let a signal through");
     let target = c.id().to_string();
-    assert!(log.iter().any(|l| l.split_whitespace().any(|w| w == target)), "the inert seam logged no signal to the target: {log:?}");
+    // a withheld signal's own line (`inert <pid> <sig>`); other lines name the target too (the
+    // deadline report), so a pid anywhere in the log proves nothing
+    let inert = log.iter().any(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() == 3 && w[0] == "inert" && w[1] == target
+    });
+    assert!(inert, "the inert seam logged no signal to the target: {log:?}");
     assert_eq!(k.code, Some(125), "stderr: {}", k.err);
 }
 
