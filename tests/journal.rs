@@ -378,7 +378,15 @@ fn a_debug_run_never_writes_the_operators_state() {
         }
         let code = finish(cmd.spawn().unwrap());
         assert_eq!(code, Some(0));
-        let written: Vec<_> = walk(&real).into_iter().filter(|p| !p.ends_with(".sheepdog-test")).collect();
+        // sheepdog's state only: another program may use the fake HOME (Rosetta keeps a cache in
+        // $HOME/.cache/rosetta on the emulated leg)
+        let written: Vec<_> = walk(&real)
+            .into_iter()
+            .filter(|p| {
+                let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                n == "jobs" || n.ends_with(".journal") || n.starts_with(".tmp-j-")
+            })
+            .collect();
         assert!(written.is_empty(), "canary {canary}: {written:?}");
         let notes = std::fs::read_to_string(&trace).unwrap_or_default();
         assert!(notes.lines().any(|l| l == "state-unset"), "canary {canary}: {notes}");

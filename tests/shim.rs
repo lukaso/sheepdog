@@ -199,33 +199,39 @@ fn the_path_search_matches_phase_one() {
 }
 
 /// The command holds no fd of sheepdog's (the shim's go and error pipes are closed at its exec):
-/// a command that lists its own open fds (`exec ls /proc/self/fd`) finds 0, 1, 2 and the one fd
-/// `ls` opens on that directory, nothing else.
+/// a command that lists its own open fds (`exec ls /proc/self/fd`) finds exactly as many as the
+/// same command run without sheepdog (the control: `ls`'s own directory fd, and under an
+/// emulator the translator's fds, are in both).
 #[test]
 fn the_command_holds_no_shim_fd() {
     let d = scratch("fds");
-    let out = d.join("fds");
-    let code = finish(
-        Command::new(sheepdog())
-            .args(["run", "--", "/bin/sh", "-c", &format!(r#"exec ls /proc/self/fd > "{}""#, out.display())])
-            .spawn()
-            .unwrap(),
-    );
-    assert_eq!(code, Some(0));
-    let fds: Vec<i32> = std::fs::read_to_string(&out).unwrap().split_whitespace().filter_map(|x| x.parse().ok()).collect();
-    assert_eq!(fds.iter().filter(|&&f| f >= 3).count(), 1, "fds {fds:?} (ls's own directory fd is the one)");
+    let count = |under: bool| -> usize {
+        let out = d.join(if under { "under" } else { "plain" });
+        let script = format!(r#"exec ls /proc/self/fd > "{}""#, out.display());
+        let code = if under {
+            finish(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).spawn().unwrap())
+        } else {
+            finish(Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap())
+        };
+        assert_eq!(code, Some(0));
+        std::fs::read_to_string(&out).unwrap().split_whitespace().filter(|x| x.parse::<i32>().is_ok()).count()
+    };
+    let (plain, under) = (count(false), count(true));
+    assert_eq!(under, plain, "fds under sheepdog {under}, without it {plain}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
 /// An inner `sheepdog run` replaces the PDEATHSIG(SIGKILL) it inherits from the outer's shim
 /// with SIGTERM: when the outer is SIGKILLed, the inner gets TERM and kills its own job (its
-/// escapee dies although the inner's root would run for 30 s more).
+/// escapee dies although the inner's root would run for 30 s more). The inner is the outer's
+/// command itself (`exec`): a forked child inherits no PDEATHSIG (stated, PHASE2.md decision 7),
+/// and whether a shell execs its last command differs (BusyBox does, dash does not).
 #[test]
 fn an_inner_run_kills_its_job_when_the_outer_is_sigkilled() {
     let d = scratch("nested");
     let r = d.join("rec");
     let m = format!("29.{:09}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
-    let inner = format!(r#"sheepdog run -- /bin/sh -c '"$FX" escape {m} "$R"; sleep 30'"#);
+    let inner = format!(r#"exec sheepdog run -- /bin/sh -c '"$FX" escape {m} "$R"; sleep 30'"#);
     let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &inner]).env("FX", fixture()).env("R", &r).spawn().unwrap();
     let end = Instant::now() + Duration::from_secs(20);
     let mut g = None;
