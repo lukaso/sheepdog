@@ -209,7 +209,7 @@ This runs on **every** job end. With `--leave-strays` it is skipped when the com
 ### 3.4 Caps
 
 The supervisor polls every 250 ms:
-- `--max-mem`: sum over members of `phys_footprint` (macOS) or RSS from `statm` (Linux).
+- `--max-mem`: sum over members of `phys_footprint` (macOS) or Pss from `smaps_rollup` (Linux; shared and copy-on-write pages counted once; `statm` RSS with a note where it is missing). **Amended in PHASE2.md.**
 - `--max-procs`
 - `--timeout`
 
