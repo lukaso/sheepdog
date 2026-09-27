@@ -538,10 +538,10 @@ fn s6_a_supervisor_that_ignores_term_is_not_claimed_clean() {
 }
 
 /// The root of a running job is a target like any other, but its supervisor then ends the
-/// whole job (PLAN.md §3.0): the job is gone, and stderr does not give the member advice
-/// ("this kills only ...; to end the whole job: sheepdog kill <supervisor>").
+/// whole job (PLAN.md §3.0): the job is gone, and stderr names the supervisor, as for any
+/// member of a running job.
 #[test]
-fn s6_kill_of_a_jobs_root_ends_the_job_without_the_member_advice() {
+fn s6_kill_of_a_jobs_root_ends_the_job_and_names_the_supervisor() {
     let j = Job::new();
     let mut sup = ticker_job(&j);
     let root = read_pairs(&j.file(".root"))[0];
@@ -550,7 +550,8 @@ fn s6_kill_of_a_jobs_root_ends_the_job_without_the_member_advice() {
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert!(st.is_some(), "the supervisor did not end");
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
-    assert!(!k.err_numbers().contains(&(sup.id() as i32)), "stderr gives the member advice for a root: {}", k.err);
+    // one line for every member of a running job, the root too: it names the supervisor
+    assert!(k.err_numbers().contains(&(sup.id() as i32)), "stderr does not name the supervisor {}: {}", sup.id(), k.err);
 }
 
 /// While `kill` waits for an inner supervisor, the rest of the tree runs: a sibling that starts
@@ -667,11 +668,10 @@ fn ps_stat(pid: i32) -> String {
 }
 
 /// The relay path (`job & exec sheepdog run -- cmd`): the relay's older child, the background
-/// job, is not the root of the running job: it gets the member line, which names the relay (a
-/// `sheepdog` whose kill ends the job), and only it dies. The real root (the supervisor's
-/// child) then gets the root line, which names no supervisor, and the job ends.
+/// job, is not part of the running job: stderr names the relay (a `sheepdog` whose kill ends
+/// the job), and only the background job dies. Killing the real root then ends the job.
 #[test]
-fn s6_on_the_relay_path_only_the_real_root_is_called_the_root() {
+fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     let j = Job::new();
     let mut relay = Command::new(fixture())
         .args(["bg-then-exec", &j.marker, sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()])
@@ -696,6 +696,5 @@ fn s6_on_the_relay_path_only_the_real_root_is_called_the_root() {
     assert!(k.err_numbers().contains(&(relay.id() as i32)), "the background job did not get the member line naming the relay {}: {}", relay.id(), k.err);
     assert_eq!(k2.code, Some(0), "stderr: {}", k2.err);
     assert!(st.is_some(), "the job did not end with its root");
-    assert!(!k2.err_numbers().contains(&(relay.id() as i32)), "the real root got the member line: {}", k2.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }

@@ -112,19 +112,6 @@ fn job_of(t: i32) -> Option<i32> {
     os::responsible_pid(t).filter(|&r| r > 1 && r != t && is_sheepdog(r))
 }
 
-/// Is `t` (identity `tid`) the root of supervisor `s`'s job? It is a child of `s`, and every
-/// other child of `s` started later: on Linux the supervisor also adopts escapees (subreaper),
-/// but those descend from the root, so they are younger. The identity grows with age (Linux:
-/// start time; macOS: uniqueid). Linux start times are 10 ms ticks, and a root that forks at
-/// once shares its tick with its child, so a tie goes to the lower pid (forked first; only a pid
-/// wrap within one tick reverses that). A relay (a `sheepdog` with a `sheepdog` child, the
-/// supervisor) is not the job's supervisor: its other children were started before sheepdog.
-fn is_root(t: i32, tid: u64, s: i32) -> bool {
-    let procs = os::procs();
-    let children: Vec<&Proc> = procs.iter().filter(|p| p.ppid == s && p.pid != t).collect();
-    parent(t) == Some(s) && !children.iter().any(|p| is_sheepdog(p.pid)) && children.iter().all(|p| (p.id, p.pid) > (tid, t))
-}
-
 /// The proved set, sticky across scans: a member stays known until it is gone, and (macOS) the
 /// uniqueid of every member ever seen stays a `puniq` link after the member has exited.
 struct Proved {
@@ -212,7 +199,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read the parent of pid {link}, one of the processes that started it (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read pid {link} in its own chain of parent processes (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
             return 1;
         }
     };
@@ -225,10 +212,9 @@ pub fn main(args: &[OsString]) -> i32 {
     let set = proved.scan();
     let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
     if !is_sheepdog(t) {
-        if job_of(t).is_some_and(|s| is_root(t, tid, s)) {
-            say!("sheepdog: pid {t} is the root of a running job; its supervisor ends the whole job when it exits.");
-        } else if let Some(s) = job_of(t) {
-            say!("sheepdog: pid {t} belongs to a running job (supervisor pid {s}); this kills only {t} and the processes it started. To end the whole job: sheepdog kill {s}");
+        if let Some(s) = job_of(t) {
+            // one line, true for the root too: which member is the root is not needed here
+            say!("sheepdog: pid {t} belongs to a running job (supervisor pid {s}); this kills {t} and the processes it started, and if {t} is the job's root, the supervisor then ends the whole job. To end the whole job: sheepdog kill {s}");
         }
     }
     if a.dry_run {
