@@ -618,6 +618,11 @@ fn s6_an_unreadable_ancestor_chain_refuses_the_kill() {
     let me = std::process::id().to_string();
     let grandparent = ps_parent(std::process::id() as i32).expect("no parent");
     assert!(grandparent > 1, "control: the test process needs a parent above pid 1");
+    // the target must be this user's, or `kill` refuses it as another user's before it reads
+    // the chain (then this cell would not reach the fail-closed refusal)
+    let uid = Command::new("ps").args(["-o", "uid=", "-p", &grandparent.to_string()]).output().unwrap();
+    let uid: u32 = String::from_utf8_lossy(&uid.stdout).trim().parse().expect("the parent's uid");
+    assert_eq!(uid, unsafe { libc::geteuid() }, "control: the test process's parent must be this user's");
     let k = refused_with(&j, grandparent, &[("SHEEPDOG_TEST_PARENT_UNREADABLE", &me)]);
     // the refusal names the process whose parent could not be read (the operator's lead)
     assert!(k.err_numbers().contains(&(std::process::id() as i32)), "the refusal does not name the unreadable link: {}", k.err);
@@ -705,3 +710,18 @@ fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     assert!(!k2.err_numbers().contains(&(relay.id() as i32)), "stderr names the relay for the root: {}", k2.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }
+
+/// A supervisor is recognised by its executable's name, `sheepdog`, which `--dry-run` lists
+/// next to each pid. Under an emulator (Rosetta runs amd64 containers on Apple silicon) the
+/// kernel's executable link names the translator, not the program.
+#[test]
+fn s6_dry_run_names_a_supervisor_by_its_program() {
+    let j = Job::new();
+    let mut sup = ticker_job(&j);
+    let k = kill(&j, &["--dry-run", &sup.id().to_string()], &[]);
+    send_child(&mut sup, libc::SIGTERM);
+    let _ = wait_bounded(&mut sup, Duration::from_secs(10));
+    let line = k.out.lines().find(|l| l.split_whitespace().next() == Some(&sup.id().to_string())).map(String::from);
+    assert_eq!(line.as_deref().and_then(|l| l.split('\t').nth(1)), Some("sheepdog"), "the supervisor's row: {line:?}");
+}
+

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# The phase-1 platform matrix (PHASE1.md S8): one command, one exit code.
+#
+#   ./test-all              every automatic leg
+#   ./test-all LEG...       only these legs
+#   ./test-all --list       list the legs
+#
+# Legs:
+#   macos        the suite on this Mac (macOS only)
+#   alpine       the suite in rust:1-alpine (arm64 on this host), privileged, plus the pid-reuse
+#                race cell; the pidfd probe must use pidfds
+#   debian       the suite in rust:1-slim, privileged, plus the pid-reuse race cell
+#   amd64        the suite in an emulated amd64 Alpine (image tag sd-amd64-alpine; user space
+#                only, the same arm64 kernel: it does NOT test another kernel)
+#   pid1         sheepdog as PID 1 of a container: TERM exits 143 (the kernel ignores raise for
+#                an init); a TSTP stops the job and then counts as discarded (the job runs on)
+#   init         sheepdog under `docker run --init`: TERM exits 143 (it dies of TERM)
+#   enosys       the suite under a seccomp profile where pidfd_open fails with ENOSYS; the pidfd
+#                probe must fall back to kill
+#   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
+#                signal
+#   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
+#                operator's Developer ID and a click in System Settings; prints the steps
+#
+# Needs docker for the Linux legs. Every container is started with --rm or removed by the id this
+# script recorded; nothing else is ever signalled or removed.
+set -uo pipefail
+cd "$(dirname "$0")"
+ROOT=$PWD
+ALL="macos alpine debian amd64 pid1 init enosys other-user"
+[ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
+LEGS="${*:-$ALL}"
+LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
+mkdir -p "$LOGDIR"
+declare -a RESULTS=()
+CONTAINERS=()
+cleanup() {
+  for c in "${CONTAINERS[@]:-}"; do [ -n "$c" ] && docker rm -f "$c" >/dev/null 2>&1; done
+}
+trap cleanup EXIT
+
+record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
+
+suite_in() { # image target-dir leg-name [docker args...]
+  local img=$1 tgt=$2 name=$3; shift 3
+  timeout 3600 docker run --rm "$@" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh > "$LOGDIR/$name.log" 2>&1
+}
+
+leg_macos() {
+  [ "$(uname)" = Darwin ] || { record macos "skipped (not macOS)"; return 0; }
+  timeout 3600 cargo test > "$LOGDIR/macos.log" 2>&1
+  local rc=$?
+  local left
+  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|/bin/sleep 2[0-9]\.)")
+  [ $rc -eq 0 ] && [ "$left" -eq 0 ] && record macos PASS || record macos "FAIL (rc $rc, leftovers $left; $LOGDIR/macos.log)"
+}
+
+leg_alpine() {
+  suite_in rust:1-alpine target-linux alpine --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+    && record alpine PASS || record alpine "FAIL ($LOGDIR/alpine.log)"
+}
+
+leg_debian() {
+  suite_in rust:1-slim target-linux-gnu debian --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+    && record debian PASS || record debian "FAIL ($LOGDIR/debian.log)"
+}
+
+leg_amd64() {
+  if ! docker image inspect sd-amd64-alpine >/dev/null 2>&1; then
+    printf 'FROM --platform=linux/amd64 rust:1-alpine\nRUN apk add -q procps bash util-linux-misc\n' \
+      | timeout 1800 docker build --platform linux/amd64 -t sd-amd64-alpine - > "$LOGDIR/amd64-image.log" 2>&1 \
+      || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
+  fi
+  suite_in sd-amd64-alpine target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
+    && record amd64 PASS || record amd64 "FAIL ($LOGDIR/amd64.log)"
+}
+
+# Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
+build_alpine() {
+  timeout 1800 docker run --rm -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh -c \
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xf -) && cd /w && CARGO_TARGET_DIR=/tgt cargo build -q --bins' \
+    > "$LOGDIR/build-alpine.log" 2>&1
+}
+
+# Start `sheepdog run -- sd-fixture ticker` as the container's main process; prints the id.
+start_job() { # extra docker args...
+  docker run -d "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro rust:1-alpine \
+    /tgt/debug/sheepdog run --quiet -- /tgt/debug/sd-fixture ticker 29.1 /tmp/r
+}
+
+job_ready() { # id
+  local i=0
+  while [ $i -lt 1500 ]; do
+    docker exec "$1" sh -c 'test -e /tmp/r.root && [ "$(wc -l < /tmp/r)" -ge 7 ]' 2>/dev/null && return 0
+    sleep 0.02; i=$((i+1))
+  done
+  return 1
+}
+
+ticks() { docker exec "$1" sh -c 'wc -l < /tmp/r.tick' 2>/dev/null | tr -d ' '; }
+
+wait_exit() { # id -> exit code (bounded)
+  timeout 60 docker wait "$1" 2>/dev/null
+}
+
+leg_pid1() {
+  build_alpine || { record pid1 "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
+  local c why=""
+  c=$(start_job) || { record pid1 "FAIL (start)"; return; }
+  CONTAINERS+=("$c")
+  job_ready "$c" || why="job not ready"
+  local pid1
+  pid1=$(docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
+  case "${pid1%% *}" in */sheepdog) ;; *) why="${why:+$why; }PID 1 is not sheepdog: $pid1" ;; esac
+  # TSTP: sheepdog stops the job, then its own stop is ignored (an init): the job runs on
+  docker kill -s TSTP "$c" >/dev/null
+  local i=0
+  while [ $i -lt 500 ] && ! docker exec "$c" grep -q '^stop-wait$' /tmp/log 2>/dev/null; do sleep 0.02; i=$((i+1)); done
+  docker exec "$c" grep -q '^stop-wait$' /tmp/log 2>/dev/null || why="${why:+$why; }no stop after TSTP"
+  sleep 2 # the member wait (1 s) and the discarded self-stop
+  local t1 t2
+  t1=$(ticks "$c"); sleep 1; t2=$(ticks "$c")
+  [ -n "$t1" ] && [ -n "$t2" ] && [ "$t2" -gt "$t1" ] || why="${why:+$why; }the job does not run after TSTP ($t1 -> $t2)"
+  docker kill -s TERM "$c" >/dev/null
+  local code
+  code=$(wait_exit "$c")
+  [ "$code" = 143 ] || why="${why:+$why; }TERM exit $code, want 143"
+  docker logs "$c" > "$LOGDIR/pid1.log" 2>&1
+  [ -z "$why" ] && record pid1 PASS || record pid1 "FAIL ($why)"
+}
+
+leg_init() {
+  build_alpine || { record init "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
+  local c why=""
+  c=$(start_job --init) || { record init "FAIL (start)"; return; }
+  CONTAINERS+=("$c")
+  job_ready "$c" || why="job not ready"
+  local pid1
+  pid1=$(docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
+  case "${pid1%% *}" in */sheepdog) why="${why:+$why; }PID 1 is sheepdog (no --init?)" ;; esac
+  docker kill -s TERM "$c" >/dev/null
+  local code
+  code=$(wait_exit "$c")
+  [ "$code" = 143 ] || why="${why:+$why; }TERM exit $code, want 143"
+  [ -z "$why" ] && record init PASS || record init "FAIL ($why)"
+}
+
+leg_enosys() {
+  local prof="$LOGDIR/seccomp-enosys.json"
+  echo '{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["pidfd_open"],"action":"SCMP_ACT_ERRNO","errnoRet":38}]}' > "$prof"
+  suite_in rust:1-alpine target-linux enosys --security-opt "seccomp=$prof" -e SD_LEG_PROBE=kill \
+    && record enosys PASS || record enosys "FAIL ($LOGDIR/enosys.log)"
+}
+
+leg_other_user() {
+  # --init: the script's shell must not be PID 1 (BusyBox `timeout` execs the command, so a test
+  # binary would be a child of PID 1, which a cell that needs an ancestor above it refuses)
+  timeout 3600 docker run --rm --init -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh /src/scripts/linux-other-user.sh \
+    > "$LOGDIR/other-user.log" 2>&1 && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
+}
+
+leg_tcc() {
+  cat <<'TXT'
+The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
+  1. Build the dev bundle (bundle ID com.lukaso.sheepdog.dev) signed with your Developer ID.
+  2. Link its CLI into PATH with a symlink.
+  3. Grant it Full Disk Access in System Settings.
+  4. Run through the symlink: sheepdog run -- ls ~/Library/Mail   (must exit 0)
+TXT
+  record tcc "manual (steps printed)"
+}
+
+for leg in $LEGS; do
+  case $leg in
+    macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
+    pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; other-user) leg_other_user ;;
+    tcc) leg_tcc ;;
+    *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
+  esac
+done
+
+echo
+echo "== summary (logs: $LOGDIR)"
+fail=0
+for r in "${RESULTS[@]}"; do echo "  $r"; case $r in *FAIL*) fail=1 ;; esac; done
+[ $fail -eq 0 ] && echo GREEN || echo RED
+exit $fail

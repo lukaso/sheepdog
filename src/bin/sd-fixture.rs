@@ -75,6 +75,8 @@
 //!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
+//! - `decoy R`: S8 (another-user leg). Records itself, then counts every catchable signal as a
+//!   line `SIG <n>` in `R.sig` and keeps running (SIGALRM ends it after 1800 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
 //!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
@@ -360,6 +362,22 @@ extern "C" fn slow_tstp(_: libc::c_int) {
     }
 }
 
+static mut DECOY_LOG: [u8; 512] = [0; 512];
+
+/// decoy: append `SIG <n>` to its log (open, write, close: async-signal-safe).
+extern "C" fn decoy_sig(s: libc::c_int) {
+    unsafe {
+        let f = libc::open(std::ptr::addr_of!(DECOY_LOG) as *const libc::c_char, libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o644);
+        if f >= 0 {
+            let mut line = *b"SIG 00\n";
+            line[4] = b'0' + (s / 10) as u8;
+            line[5] = b'0' + (s % 10) as u8;
+            libc::write(f, line.as_ptr() as *const libc::c_void, line.len());
+            libc::close(f);
+        }
+    }
+}
+
 static mut TERM_REC: [u8; 512] = [0; 512];
 
 /// fork-on-term: on TERM, fork G (a new session, TERM ignored, recorded, then waiting, 60 s at
@@ -444,8 +462,17 @@ unsafe fn tick_forever(tick: &CString) -> ! {
 /// Is this process's parent a sheepdog (its executable's file name)?
 fn parent_is_sheepdog() -> bool {
     let ppid = unsafe { libc::getppid() };
+    // under a binary translator (Rosetta, qemu-user) the exe link names the translator: argv[0]
     #[cfg(target_os = "linux")]
-    let path = std::fs::read_link(format!("/proc/{ppid}/exe")).map(|p| p.display().to_string()).unwrap_or_default();
+    let path = {
+        let exe = std::fs::read_link(format!("/proc/{ppid}/exe")).map(|p| p.display().to_string()).unwrap_or_default();
+        let name = exe.rsplit('/').next().unwrap_or("");
+        if name == "rosetta" || name.starts_with("qemu-") {
+            std::fs::read(format!("/proc/{ppid}/cmdline")).ok().and_then(|b| b.split(|&c| c == 0).next().map(|a| String::from_utf8_lossy(a).into_owned())).unwrap_or_default()
+        } else {
+            exe
+        }
+    };
     #[cfg(target_os = "macos")]
     let path = {
         let mut buf = vec![0u8; 4096];
@@ -890,6 +917,28 @@ fn main() {
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
+    }
+    if mode == "decoy" && a.len() == 3 {
+        // S8 (another-user leg): record itself, then count every catchable signal (a line
+        // `SIG <n>` in R.sig) and keep running; SIGALRM keeps its default action and ends it
+        // after 1800 s at most
+        let r = a[2].clone();
+        let sig = format!("{r}.sig");
+        let b = sig.as_bytes();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b.as_ptr(), std::ptr::addr_of_mut!(DECOY_LOG) as *mut u8, b.len().min(511));
+            for s in 1..32 {
+                if s != libc::SIGKILL && s != libc::SIGSTOP && s != libc::SIGALRM {
+                    on(s, decoy_sig as *const () as usize, true);
+                }
+            }
+            unblock_all();
+            record(&r, libc::getpid());
+            libc::alarm(1800);
+            loop {
+                libc::pause();
+            }
+        }
     }
     if mode == "storm" && a.len() == 4 {
         // cell 7 (zombies): C (a new session) forks G every 5 ms for SECS seconds; each G forks

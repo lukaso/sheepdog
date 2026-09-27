@@ -35,6 +35,20 @@ fn log_path(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_file(&p);
     p
 }
+/// Does `pidfd_open` work here? Not on macOS, and not in ./test-all's enosys leg (a seccomp
+/// profile makes it fail with ENOSYS): there sheepdog takes the kill fallback on every leg.
+fn pidfd_works() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
+        if fd >= 0 {
+            unsafe { libc::close(fd as i32) };
+            return true;
+        }
+    }
+    false
+}
+
 /// The forced-ENOSYS leg exists only where pidfd does.
 fn enosys_legs() -> &'static [bool] {
     if cfg!(target_os = "linux") {
@@ -172,7 +186,7 @@ fn s3_a_reused_pid_gets_no_signal() {
         // control: the member was never signalled either, so the kill cannot end clean
         assert_eq!(st.code(), Some(125), "enosys={enosys}: the seam did not redirect the signals");
         // control: the path the cell claims to cover was the one taken
-        let path = if cfg!(target_os = "linux") && !enosys { "pidfd " } else { "kill " };
+        let path = if pidfd_works() && !enosys { "pidfd " } else { "kill " };
         assert!(log.iter().any(|l| l.starts_with(path)), "enosys={enosys}: the {path}path was never taken: {log:?}");
     }
 }
@@ -284,7 +298,7 @@ fn s3_frozen_members_are_not_rolled_back() {
         let rec = j.recorded();
         assert_eq!(st.code(), Some(0), "enosys={enosys}");
         assert_eq!(rec.len(), 1, "enosys={enosys}: the escapee was not created");
-        let unpinned = cfg!(target_os = "macos") || enosys;
+        let unpinned = !pidfd_works() || enosys;
         let path = if unpinned { "kill" } else { "pidfd" };
         let stop = format!("{path} {} {}", rec[0].0, libc::SIGSTOP);
         assert!(log.iter().any(|l| l == &stop), "enosys={enosys}: control: the escapee's STOP did not go by {path}: {log:?}");
@@ -302,6 +316,10 @@ fn s3_frozen_members_are_not_rolled_back() {
 #[cfg(target_os = "linux")]
 #[test]
 fn s3_a_failed_pidfd_send_falls_back() {
+    if !pidfd_works() {
+        eprintln!("skipped: pidfd_open does not work here, so no pidfd send can fail");
+        return;
+    }
     let j = Job::new();
     let siglog = log_path("send");
     // --grace 0: a TERM in the grace would end the escapee before any STOP or KILL is needed

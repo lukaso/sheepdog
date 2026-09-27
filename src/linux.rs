@@ -81,12 +81,18 @@ pub fn parent(pid: i32) -> Option<i32> {
     stat(pid).map(|(ppid, _)| ppid)
 }
 
-/// The file name of `pid`'s executable (` (deleted)` stripped: the binary was replaced).
+/// The file name of `pid`'s executable (` (deleted)` stripped: the binary was replaced). Under
+/// a binary translator (Rosetta runs amd64 containers on Apple silicon; qemu-user) the link names
+/// the translator, so the program's own name is argv[0]'s file name.
 pub fn exe_name(pid: i32) -> Option<String> {
     let p = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let s = p.to_string_lossy();
     let s = s.strip_suffix(" (deleted)").unwrap_or(&s);
-    Some(s.rsplit('/').next()?.to_string())
+    let name = s.rsplit('/').next()?.to_string();
+    if name == "rosetta" || name.starts_with("qemu-") {
+        return cmdline(pid).first().and_then(|a| a.rsplit('/').next()).map(String::from);
+    }
+    Some(name)
 }
 
 /// `pid`'s argv (empty if unreadable).
