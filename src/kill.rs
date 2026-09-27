@@ -82,19 +82,19 @@ fn parent(pid: i32) -> Option<i32> {
 }
 
 /// This process and all its ancestors up to pid 1, with their identities: never part of a
-/// kill. None if the chain cannot be read to its end: then any process may be an ancestor, and
-/// every target is refused (fail closed).
-fn protected() -> Option<Vec<(i32, u64)>> {
+/// kill. Err(pid) if the chain cannot be read to its end (`pid` is the link that could not be
+/// read): then any process may be an ancestor, and every target is refused (fail closed).
+fn protected() -> Result<Vec<(i32, u64)>, i32> {
     let mut v = Vec::new();
     let mut p = unsafe { libc::getpid() };
     while p > 1 {
         if v.len() >= 4096 {
-            return None;
+            return Err(p);
         }
-        v.push((p, identity(p)?));
-        p = parent(p)?;
+        v.push((p, identity(p).ok_or(p)?));
+        p = parent(p).ok_or(p)?;
     }
-    Some(v)
+    Ok(v)
 }
 
 /// The supervisor of the running job that `t` belongs to, if any: the nearest `sheepdog`
@@ -117,9 +117,12 @@ fn job_of(t: i32) -> Option<i32> {
 /// but those descend from the root, so they are younger. The identity grows with age (Linux:
 /// start time; macOS: uniqueid). Linux start times are 10 ms ticks, and a root that forks at
 /// once shares its tick with its child, so a tie goes to the lower pid (forked first; only a pid
-/// wrap within one tick reverses that).
+/// wrap within one tick reverses that). A relay (a `sheepdog` with a `sheepdog` child, the
+/// supervisor) is not the job's supervisor: its other children were started before sheepdog.
 fn is_root(t: i32, tid: u64, s: i32) -> bool {
-    parent(t) == Some(s) && os::procs().iter().filter(|p| p.ppid == s && p.pid != t).all(|p| (p.id, p.pid) > (tid, t))
+    let procs = os::procs();
+    let children: Vec<&Proc> = procs.iter().filter(|p| p.ppid == s && p.pid != t).collect();
+    parent(t) == Some(s) && !children.iter().any(|p| is_sheepdog(p.pid)) && children.iter().all(|p| (p.id, p.pid) > (tid, t))
 }
 
 /// The proved set, sticky across scans: a member stays known until it is gone, and (macOS) the
@@ -206,9 +209,12 @@ pub fn main(args: &[OsString]) -> i32 {
         say!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
         return 1;
     }
-    let Some(protected) = protected() else {
-        say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read its own chain of parent processes, so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
-        return 1;
+    let protected = match protected() {
+        Ok(v) => v,
+        Err(link) => {
+            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot read the parent of pid {link}, one of the processes that started it (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+            return 1;
+        }
     };
     if protected.iter().any(|&(p, id)| p == t && id == tid) {
         let what = if t == unsafe { libc::getpid() } { "it is this sheepdog" } else { "it is an ancestor of this sheepdog (the shell or program that started it)" };

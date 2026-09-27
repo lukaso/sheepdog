@@ -306,10 +306,10 @@ fn s6_control_the_inert_seam_logs_the_signals_it_withholds() {
 
 /// A refused target: exit 1, and no signal attempted (the inert seam's log is empty).
 fn refused(j: &Job, pid: i32) {
-    refused_with(j, pid, &[]);
+    let _ = refused_with(j, pid, &[]);
 }
 
-fn refused_with(j: &Job, pid: i32, env: &[(&str, &str)]) {
+fn refused_with(j: &Job, pid: i32, env: &[(&str, &str)]) -> Kill {
     assert_inert_seam_is_live();
     let _ = std::fs::remove_file(j.file(".log"));
     let mut e = vec![INERT, ("SHEEPDOG_TEST_DEADLINE_MS", "300")];
@@ -317,6 +317,7 @@ fn refused_with(j: &Job, pid: i32, env: &[(&str, &str)]) {
     let k = kill(j, &["--grace", "0", &pid.to_string()], &e);
     assert_eq!(k.code, Some(1), "pid {pid} was not refused: stderr {}", k.err);
     assert_eq!(j.log(), Vec::<String>::new(), "signals were attempted for the refused pid {pid}");
+    k
 }
 
 #[test]
@@ -616,7 +617,9 @@ fn s6_an_unreadable_ancestor_chain_refuses_the_kill() {
     let me = std::process::id().to_string();
     let grandparent = ps_parent(std::process::id() as i32).expect("no parent");
     assert!(grandparent > 1, "control: the test process needs a parent above pid 1");
-    refused_with(&j, grandparent, &[("SHEEPDOG_TEST_PARENT_UNREADABLE", &me)]);
+    let k = refused_with(&j, grandparent, &[("SHEEPDOG_TEST_PARENT_UNREADABLE", &me)]);
+    // the refusal names the process whose parent could not be read (the operator's lead)
+    assert!(k.err_numbers().contains(&(std::process::id() as i32)), "the refusal does not name the unreadable link: {}", k.err);
 }
 
 /// A TERM or INT during the TERM grace (nothing is frozen yet) ends `kill` at once, and leaves
@@ -663,3 +666,36 @@ fn ps_stat(pid: i32) -> String {
     Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
+/// The relay path (`job & exec sheepdog run -- cmd`): the relay's older child, the background
+/// job, is not the root of the running job: it gets the member line, which names the relay (a
+/// `sheepdog` whose kill ends the job), and only it dies. The real root (the supervisor's
+/// child) then gets the root line, which names no supervisor, and the job ends.
+#[test]
+fn s6_on_the_relay_path_only_the_real_root_is_called_the_root() {
+    let j = Job::new();
+    let mut relay = Command::new(fixture())
+        .args(["bg-then-exec", &j.marker, sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
+    j.wait_recorded(7);
+    let bg = scan(&j.marker, |w| w.len() >= 2 && w[1] == "/bin/sleep").expect("ps failed");
+    assert_eq!(bg.len(), 1, "control: one background job: {bg:?}");
+    let (bgp, bgid) = bg[0];
+    let root = read_pairs(&j.file(".root"))[0];
+    let k = kill(&j, &["--grace", "0", &bgp.to_string()], &[]);
+    let (bg_alive, root_alive) = (same(bgp, bgid), same(root.0, root.1));
+    let k2 = kill(&j, &["--grace", "0", &root.0.to_string()], &[]);
+    let st = wait_bounded(&mut relay, Duration::from_secs(10));
+    assert_eq!(k.code, Some(0), "stderr: {}", k.err);
+    assert!(!bg_alive, "the background job survived");
+    assert!(root_alive, "the job's root was killed with the background job");
+    assert!(k.err_numbers().contains(&(relay.id() as i32)), "the background job did not get the member line naming the relay {}: {}", relay.id(), k.err);
+    assert_eq!(k2.code, Some(0), "stderr: {}", k2.err);
+    assert!(st.is_some(), "the job did not end with its root");
+    assert!(!k2.err_numbers().contains(&(relay.id() as i32)), "the real root got the member line: {}", k2.err);
+    assert_eq!(job_gone(&j), vec![], "survivors of the job");
+}

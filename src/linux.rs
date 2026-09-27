@@ -44,8 +44,8 @@ pub const ADOPTS_ESCAPEES: bool = true;
 
 /// Every live (not zombie) process, for `sheepdog kill` (S6). The parent, state and start time
 /// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
-/// were reused in between); the uid is the real uid from `/proc/<pid>/status` (the directory's
-/// owner is root for a non-dumpable process of ours).
+/// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
+/// (`pbi_uid`): a setuid program the user runs is not the user's.
 pub fn procs() -> Vec<crate::kill::Proc> {
     let mut v = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
@@ -61,7 +61,7 @@ pub fn procs() -> Vec<crate::kill::Proc> {
             }
             let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
                 .ok()
-                .and_then(|t| t.lines().find_map(|l| l.strip_prefix("Uid:").and_then(|u| u.split_whitespace().next()?.parse::<u32>().ok())));
+                .and_then(|t| t.lines().find_map(|l| l.strip_prefix("Uid:").and_then(|u| u.split_whitespace().nth(1)?.parse::<u32>().ok())));
             // a process that ended between the two reads, or whose pid was reused, is left out
             if let (Some(uid), true) = (uid, identity(pid) == Some(id)) {
                 v.push(crate::kill::Proc { pid, ppid, uid, id, puniq: None });
