@@ -58,6 +58,8 @@ trap 'exit 143' TERM
 
 # Run "$@" in the background and wait for it (see the traps above); its exit code. Its pid is
 # recorded while it runs, so an interrupt's cleanup can end it (it is in a group of its own).
+# Never a pipeline element or inside $(...) (the pid would stay in a subshell), and the command
+# gets /dev/null as stdin: nothing run through it may read stdin.
 bg_wait() {
   "$@" &
   BGPID=$!
@@ -106,8 +108,13 @@ leg_debian() {
 
 leg_amd64() {
   if ! timeout 60 docker image inspect sd-amd64-alpine >/dev/null 2>&1; then
-    printf 'FROM --platform=linux/amd64 rust:1-alpine\nRUN apk add -q procps bash util-linux-misc\n' \
-      | bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t sd-amd64-alpine - > "$LOGDIR/amd64-image.log" 2>&1 \
+    # the Dockerfile goes in a file, never through stdin: bg_wait runs its command in the
+    # background, where a non-interactive bash gives it /dev/null as stdin (and a pipe into
+    # bg_wait would run it in a subshell, out of cleanup's reach)
+    mkdir -p "$LOGDIR/amd64-context"
+    printf 'FROM --platform=linux/amd64 rust:1-alpine\nRUN apk add -q procps bash util-linux-misc\n' > "$LOGDIR/amd64.Dockerfile"
+    bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t sd-amd64-alpine -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
+      > "$LOGDIR/amd64-image.log" 2>&1 \
       || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
   fi
   suite_in sd-amd64-alpine target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \

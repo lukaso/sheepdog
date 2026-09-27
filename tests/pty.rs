@@ -2316,7 +2316,7 @@ fn signals_that_end_by_default() -> Vec<libc::c_int> {
     #[cfg(target_os = "macos")]
     let rt = 1..=0;
     // measured, not assumed: keep a signal only if it ends a throwaway child at its default
-    // action (SIGIO, for one, is discarded on macOS); each kept signal is its own control
+    // action; each kept signal is its own control (the cell checks the result against the rule)
     (1..=31)
         .chain(rt)
         .filter(|s| !not.contains(s))
@@ -2342,7 +2342,25 @@ fn signals_that_end_by_default() -> Vec<libc::c_int> {
 fn no_signal_that_ends_by_default_ends_sheepdog_without_its_kill() {
     let mut ended = Vec::new();
     let set = signals_that_end_by_default();
-    assert!(set.contains(&libc::SIGUSR1) && set.contains(&libc::SIGPIPE), "control: the measured set misses USR1 or PIPE: {set:?}");
+    // the measured set is exactly the rule minus the signals this OS discards by default; a signal
+    // dropped for another reason (inherited as ignored, e.g. HUP under nohup) is red, never a
+    // quietly smaller cell
+    #[cfg(target_os = "macos")]
+    let discarded = [libc::SIGIO];
+    #[cfg(target_os = "linux")]
+    let discarded: [libc::c_int; 0] = [];
+    let not = [
+        libc::SIGKILL, libc::SIGSTOP, libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGTRAP, libc::SIGSYS, libc::SIGABRT,
+        libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCONT, libc::SIGCHLD, libc::SIGURG, libc::SIGWINCH,
+        #[cfg(target_os = "macos")]
+        libc::SIGINFO,
+    ];
+    #[cfg(target_os = "linux")]
+    let rt = unsafe { libc::SIGRTMIN()..=libc::SIGRTMAX() };
+    #[cfg(target_os = "macos")]
+    let rt = 1..=0;
+    let rule: Vec<libc::c_int> = (1..=31).chain(rt).filter(|s| !not.contains(s) && !discarded.contains(s)).collect();
+    assert_eq!(set, rule, "control: the measured set is not the rule minus this OS's default-discarded signals");
     for sig in set {
         if [libc::SIGTERM].contains(&sig) {
             continue; // TERM ends the job by design (with its kill)
