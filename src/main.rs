@@ -21,6 +21,7 @@
 mod caps;
 mod journal;
 mod kill;
+mod strays;
 #[cfg(target_os = "macos")]
 mod register;
 mod state;
@@ -1451,6 +1452,9 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 fn run(argv: Vec<OsString>) -> i32 {
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
         return kill::main(&argv[2..]);
+    }
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"strays") {
+        return strays::main(&argv[2..]);
     }
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"ps") {
         return kill::ps(&argv[2..]);

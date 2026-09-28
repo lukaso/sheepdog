@@ -891,6 +891,89 @@ fn main() {
         let untagged = a.get(3).map(String::as_str) == Some("untagged");
         unsafe { suspect_tree(&dir, untagged) };
     }
+    // P7 (strays). `stray DIR NAME [bare]`: the 2026-09-25 shape: an orphan `sigcount DIR/NAME`
+    // (its parent exited after the orphan's exec; `bare`: without any environment, so untagged).
+    if mode == "stray" && (a.len() == 4 || a.len() == 5) {
+        let bare = a.get(4).map(String::as_str) == Some("bare");
+        unsafe { orphan(&a[2], &a[3], false, || sigcount_as(&a[2], &a[3], bare)) };
+        std::process::exit(0);
+    }
+    // `late-exec DIR NAME`: an orphan that execs only after it was reparented, so its `puniq`
+    // resets to 1 (a launchd-started look, PLAN §3.0): `sigcount DIR/NAME`.
+    if mode == "late-exec" && a.len() == 4 {
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    if libc::fork() == 0 {
+                        let mut n = 0;
+                        while libc::getppid() != 1 && n < 5000 {
+                            libc::usleep(1000);
+                            n += 1;
+                        }
+                        sigcount_as(&a[2], &a[3], false);
+                    }
+                    libc::_exit(0);
+                }
+                c if c > 0 => {
+                    libc::waitpid(c, std::ptr::null_mut(), 0);
+                }
+                _ => std::process::exit(1),
+            }
+        }
+        wait_record(&a[2], &a[3]);
+        std::process::exit(0);
+    }
+    // `stray-run DIR NAME PROG ARGS...`: an orphan (recorded in DIR/NAME.d) that runs PROG ARGS as
+    // its child, writes the exit code to DIR/NAME.code, then becomes `sigcount DIR/NAME`.
+    if mode == "stray-run" && a.len() >= 5 {
+        let me = std::env::current_exe().unwrap();
+        let mut args: Vec<String> = vec!["run-then-count".into(), a[2].clone(), a[3].clone()];
+        args.extend(a[4..].iter().cloned());
+        unsafe {
+            orphan(&a[2], &format!("{}.d", a[3]), false, || {
+                let c: Vec<CString> = std::iter::once(CString::new(me.as_os_str().as_encoded_bytes()).unwrap()).chain(args.iter().map(|s| CString::new(s.as_str()).unwrap())).collect();
+                let mut p: Vec<*const libc::c_char> = c.iter().map(|x| x.as_ptr()).collect();
+                p.push(std::ptr::null());
+                libc::execv(c[0].as_ptr(), p.as_ptr());
+            })
+        };
+        std::process::exit(0);
+    }
+    if mode == "run-then-count" && a.len() >= 5 {
+        record(&format!("{}/{}.d", a[2], a[3]), std::process::id() as i32);
+        // an orphan first (bounded, 10 s): its parent exits once the record above exists
+        let mut n = 0;
+        while unsafe { libc::getppid() } != 1 && n < 1000 {
+            unsafe { libc::usleep(10_000) };
+            n += 1;
+        }
+        let code = std::process::Command::new(&a[4]).args(&a[5..]).status().ok().and_then(|s| s.code()).map_or("none".to_string(), |c| c.to_string());
+        let _ = std::fs::write(format!("{}/{}.code", a[2], a[3]), code);
+        unsafe { sigcount_as(&a[2], &a[3], false) };
+    }
+    // `app DIR HELPER` (macOS; run from an executable inside an `.app` bundle): become
+    // responsible for itself (as an app launched by launchd is), start a double-forked helper
+    // `HELPER sigcount DIR/helper` (an executable inside the same bundle), then become
+    // `sigcount DIR/app`.
+    #[cfg(target_os = "macos")]
+    if mode == "app" && a.len() == 4 {
+        unsafe { disclaim_reexec_args(&["app-d", &a[2], &a[3]]) };
+    }
+    #[cfg(target_os = "macos")]
+    if mode == "app-d" && a.len() == 4 {
+        if !self_responsible() {
+            std::process::exit(4);
+        }
+        let helper = CString::new(a[3].as_str()).unwrap();
+        let (sc, rec) = (CString::new("sigcount").unwrap(), CString::new(format!("{}/helper", a[2])).unwrap());
+        unsafe {
+            orphan(&a[2], "helper", true, || {
+                let argv = [helper.as_ptr(), sc.as_ptr(), rec.as_ptr(), std::ptr::null()];
+                libc::execv(helper.as_ptr(), argv.as_ptr());
+            });
+            sigcount_as(&a[2], "app", false);
+        }
+    }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
     if mode == "after" && a.len() >= 4 {
         let mut n = 0;

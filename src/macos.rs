@@ -33,6 +33,14 @@ struct UniqInfo {
 
 extern "C" {
     fn _NSGetEnviron() -> *mut *const *const c_char;
+    fn mach_timebase_info(info: *mut Timebase) -> c_int;
+}
+
+/// The mach time base (libc's own binding is deprecated).
+#[repr(C)]
+struct Timebase {
+    numer: u32,
+    denom: u32,
 }
 
 /// Returns the responsible process's uniqueid, or u64::MAX (-1) when there is no answer
@@ -164,6 +172,50 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
 /// `kill` does not use as proof: if it does not end on the TERM (its caller ignores TERM), they
 /// can survive, so `kill` reports that supervisor and exits 125.
 pub const ADOPTS_ESCAPEES: bool = false;
+
+/// The full path of `pid`'s executable.
+pub fn exe_path(pid: pid_t) -> Option<String> {
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr() as *mut c_void, path.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&path[..n as usize]).into_owned())
+}
+
+/// `pid`'s CPU time (user plus system), in seconds.
+pub fn cpu_secs(pid: pid_t) -> Option<f64> {
+    let mut ri: libc::rusage_info_v4 = unsafe { zeroed() };
+    if unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, &mut ri as *mut _ as *mut libc::rusage_info_t) } != 0 {
+        return None;
+    }
+    // in mach time units
+    let mut tb = Timebase { numer: 0, denom: 0 };
+    unsafe { mach_timebase_info(&mut tb) };
+    let ns = (ri.ri_user_time + ri.ri_system_time) as f64 * tb.numer as f64 / tb.denom.max(1) as f64;
+    Some(ns / 1e9)
+}
+
+/// `pid`'s controlling terminal, by its device name.
+pub fn tty(pid: pid_t) -> Option<String> {
+    let dev = bsd(pid)?.e_tdev;
+    if dev == u32::MAX || dev == 0 {
+        return None;
+    }
+    let n = unsafe { libc::devname(dev as libc::dev_t, libc::S_IFCHR) };
+    if n.is_null() {
+        return Some(format!("dev {dev}"));
+    }
+    Some(unsafe { std::ffi::CStr::from_ptr(n) }.to_string_lossy().into_owned())
+}
+
+/// `pid`'s working directory.
+pub fn cwd(pid: pid_t) -> Option<String> {
+    let mut v: libc::proc_vnodepathinfo = unsafe { zeroed() };
+    let n = size_of::<libc::proc_vnodepathinfo>() as c_int;
+    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDVNODEPATHINFO, 0, &mut v as *mut _ as *mut c_void, n) } != n {
+        return None;
+    }
+    let p = unsafe { std::ffi::CStr::from_ptr(v.pvi_cdir.vip_path.as_ptr() as *const c_char) };
+    Some(p.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
+}
 
 /// When `pid` started, in seconds since the epoch.
 pub fn start_secs(pid: pid_t) -> Option<u64> {

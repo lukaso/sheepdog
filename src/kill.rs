@@ -133,7 +133,7 @@ pub(crate) fn protected() -> Result<Vec<(i32, u64)>, i32> {
 
 /// The supervisor of the running job that `t` belongs to, if any: the nearest `sheepdog`
 /// ancestor, or (macOS) a `sheepdog` responsible for it.
-fn job_of(t: i32) -> Option<i32> {
+pub(crate) fn job_of(t: i32) -> Option<i32> {
     let mut p = parent(t);
     let mut n = 0;
     while let Some(q) = p.filter(|&q| q > 1 && n < 4096) {
@@ -461,7 +461,7 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
     0
 }
 
-fn human(b: u64) -> String {
+pub(crate) fn human(b: u64) -> String {
     match b {
         b if b >= 1 << 30 => format!("{:.1}G", b as f64 / (1u64 << 30) as f64),
         b if b >= 1 << 20 => format!("{}M", b >> 20),

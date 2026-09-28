@@ -52,6 +52,43 @@ pub const ADOPTS_ESCAPEES: bool = true;
 /// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
 /// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
 /// (`pbi_uid`): a setuid program the user runs is not the user's.
+/// The full path of `pid`'s executable.
+pub fn exe_path(pid: i32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Fields of /proc/<pid>/stat after "comm)" (field 3 is index 0).
+fn stat_fields(pid: i32) -> Option<Vec<String>> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    Some(s.get(s.rfind(')')? + 2..)?.split_whitespace().map(String::from).collect())
+}
+
+/// `pid`'s CPU time (user plus system), in seconds.
+pub fn cpu_secs(pid: i32) -> Option<f64> {
+    let f = stat_fields(pid)?;
+    let (u, s): (u64, u64) = (f.get(14 - 3)?.parse().ok()?, f.get(15 - 3)?.parse().ok()?);
+    Some((u + s) as f64 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64)
+}
+
+/// `pid`'s controlling terminal (field 7), as `pts/N`, `ttyN` or `major:minor`.
+pub fn tty(pid: i32) -> Option<String> {
+    let nr: u64 = stat_fields(pid)?.get(7 - 3)?.parse().ok()?;
+    if nr == 0 {
+        return None;
+    }
+    let (major, minor) = ((nr >> 8) & 0xfff, (nr & 0xff) | ((nr >> 12) & 0xfff00));
+    Some(match major {
+        136..=143 => format!("pts/{}", minor + (major - 136) * 256),
+        4 => format!("tty{minor}"),
+        _ => format!("{major}:{minor}"),
+    })
+}
+
+/// `pid`'s working directory.
+pub fn cwd(pid: i32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
 /// When `pid` started, in seconds since the epoch (its start tick over the clock rate, plus the
 /// boot time).
 pub fn start_secs(pid: i32) -> Option<u64> {
