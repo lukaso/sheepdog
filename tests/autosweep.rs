@@ -194,6 +194,55 @@ fn a_partial_pass_leaves_nothing_stopped() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The auto-sweep journals every candidate before its first signal, also one born during its
+/// kill: a child born after the pass's first freeze (its parent, a member the test resumes while
+/// the pass holds) has its journal line before any signal to it.
+#[test]
+fn the_auto_sweep_journals_a_member_born_during_its_kill() {
+    let d = scratch("autojournal");
+    let s = state(&d);
+    let (go, r, rr, log, ready, release) = (d.join("go"), d.join("rec"), d.join("root"), d.join("log"), d.join("ready"), d.join("release"));
+    let _left = Leftovers(vec![r.clone(), rr.clone()], vec![]);
+    let script = format!(r#""$FX" spawn-on "{}" "{}" & exec "$FX" sigcount "{}""#, go.display(), r.display(), rr.display());
+    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
+    assert!(wait_until(15, || !records(&r).is_empty() && !records(&rr).is_empty()), "the job did not start");
+    let parent = records(&r)[0];
+    assert!(wait_until(10, || journaled(&s).contains(&parent.0) && journaled(&s).contains(&records(&rr)[0].0)), "the job did not journal its members");
+    common::send_child(&mut c.0, libc::SIGKILL);
+    let _ = c.0.wait();
+    let (d2, s2, l2, rd2, rl2) = (d.clone(), s.clone(), log.clone(), ready.clone(), release.clone());
+    let t = std::thread::spawn(move || {
+        let env = [
+            ("SHEEPDOG_TEST_SIGNAL_LOG", l2.to_str().unwrap()),
+            ("SHEEPDOG_TEST_DEADLINE_MS", "5000"),
+            ("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", rl2.to_str().unwrap()),
+            ("SHEEPDOG_TEST_READY_FILE", rd2.to_str().unwrap()),
+        ];
+        run(&d2, &s2, "new", "", "/bin/sh -c 'exit 0'", &env)
+    });
+    // the auto pass has frozen the dead job and holds: resume the parent, which spawns now
+    let held = wait_until(15, || ready.exists());
+    common::send(parent.0, parent.1, libc::SIGCONT);
+    std::fs::write(&go, b"").unwrap();
+    let born = wait_until(10, || records(&r).len() >= 2);
+    std::fs::write(&release, b"").unwrap();
+    let (code, _) = t.join().unwrap();
+    let child = records(&r).get(1).copied();
+    assert!(held, "the auto pass never reached its hold");
+    assert!(born, "the child was not born during the hold");
+    assert_eq!(code, Some(0));
+    let cp = child.unwrap().0.to_string();
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let j = text.lines().position(|l| l.split_whitespace().collect::<Vec<_>>() == ["journal", cp.as_str()]);
+    let first = text.lines().position(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && (w[0] == "kill" || w[0] == "pidfd") && w[1] == cp
+    });
+    assert!(first.is_some(), "the auto-sweep never signalled the child:\n{text}");
+    assert!(j.is_some() && j < first, "journal at {j:?}, first signal at {first:?}:\n{text}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// The timeout counts the command's time, not the auto-sweep's: a pass held for 2 s (one
 /// member cannot be killed, and the pass deadline is 2 s: seams) before `run --timeout 1.5s` of
 /// a command that needs 0.5 s leaves it its whole 1.5 s (it finishes, exit 0, no trigger).
