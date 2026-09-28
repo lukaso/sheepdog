@@ -129,6 +129,18 @@ fn trial(d: &Path, esc: &Path, sups: &[PathBuf], launch: &[String]) -> Result<bo
     Ok(gone)
 }
 
+/// The outer run of a cell, SIGKILLed when the cell ends (a panic too): a live outer holds the
+/// test's output pipe, and cargo would wait for it.
+struct Outer(Child);
+impl Drop for Outer {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            common::send_child(&mut self.0, libc::SIGKILL);
+            let _ = self.0.wait();
+        }
+    }
+}
+
 fn fx() -> String {
     fixture().to_string()
 }
@@ -423,19 +435,21 @@ fn registration_turns_the_latch_on() {
 fn an_inner_run_whose_responsible_process_died_still_disclaims() {
     let d = scratch("orphaned");
     let (go, rec, itrace) = (d.join("go"), d.join("esc"), d.join("itrace"));
-    let mut o = Command::new(sheepdog())
-        .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepdog(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
-        .env("SHEEPDOG_TEST_TRACE", &itrace)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut o = Outer(
+        Command::new(sheepdog())
+            .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepdog(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
+            .env("SHEEPDOG_TEST_TRACE", &itrace)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     // the outer's root is waiting for GO (the only process whose argv starts `sd-fixture after`);
     // end the outer, then let the inner start
     let go_word = go.to_str().unwrap().to_string();
     let waiting = |w: &[&str]| w.get(2) == Some(&"after");
     assert!(wait_until(10, || common::scan(&go_word, waiting).is_ok_and(|v| v.len() == 1)), "the outer's root is not waiting");
-    common::send_child(&mut o, libc::SIGKILL);
-    let _ = o.wait();
+    common::send_child(&mut o.0, libc::SIGKILL);
+    let _ = o.0.wait();
     std::fs::write(&go, b"").unwrap();
     assert!(wait_until(15, || records(&rec).len() == 1 && !records(&PathBuf::from(format!("{}.root", rec.display()))).is_empty()), "the inner job did not start; trace:\n{}", read(&itrace));
     let g = records(&rec)[0];
@@ -448,3 +462,4 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
     assert!(gone, "the inner job's escapee survived its job; trace:\n{}", read(&itrace));
     let _ = std::fs::remove_dir_all(&d);
 }
+
