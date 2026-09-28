@@ -1001,6 +1001,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if !a.no_sweep {
                 crate::sweep::auto(&a.owner, a.quiet);
             }
+            crate::caps::start();
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }

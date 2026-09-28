@@ -792,6 +792,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if !a.no_sweep {
         crate::sweep::auto(&a.owner, a.quiet);
     }
+    crate::caps::start();
     let relay = match relay_if_needed(sig) {
         Ok(r) => r,
         Err(code) => return code,

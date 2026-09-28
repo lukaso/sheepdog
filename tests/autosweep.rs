@@ -194,6 +194,33 @@ fn a_partial_pass_leaves_nothing_stopped() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The timeout counts the command's time, not the auto-sweep's: a pass held for 2 s (one
+/// member cannot be killed, and the pass deadline is 2 s: seams) before `run --timeout 1.5s` of
+/// a command that needs 0.5 s leaves it its whole 1.5 s (it finishes, exit 0, no trigger).
+#[test]
+fn the_timeout_starts_after_the_auto_sweep() {
+    let d = scratch("clock");
+    let s = state(&d);
+    let (g, r) = dead_job(&d, &s, "a", &[]);
+    let ran = d.join("ran");
+    let t0 = std::time::Instant::now();
+    let (code, st) = run(
+        &d,
+        &s,
+        "c",
+        "--timeout 1.5s",
+        &format!(r#"/bin/sh -c '"$FX" sleep-ms 500 && touch "{}"'"#, ran.display()),
+        &[("SHEEPDOG_TEST_UNKILLABLE", &g.0.to_string()), ("SHEEPDOG_TEST_DEADLINE_MS", "2000")],
+    );
+    let took = t0.elapsed();
+    cleanup(&[&r]);
+    assert!(notes(&st).iter().any(|n| n.starts_with("partial: job")), "control: the pass ran to its deadline; notes {:?}", notes(&st));
+    assert!(took >= std::time::Duration::from_millis(2000), "control: the pass took {took:?}");
+    assert!(ran.exists(), "the timeout fired before the command had its 1.5 s (code {code:?}, {st:?})");
+    assert_eq!(code, Some(0));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A live inner supervisor in a dead outer job, and its set, are left for an explicit `sweep`:
 /// the auto-sweep sends them nothing (the inner job's escapee counts no signal), a note names
 /// the deferral, and the new command runs. The control: an explicit `sweep` ends them.

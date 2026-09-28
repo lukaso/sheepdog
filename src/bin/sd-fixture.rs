@@ -1653,6 +1653,12 @@ fn main() {
             }
         }
     }
+    // sleep-ms N: sleep N ms and exit 0 (a sleep the wall can see: /bin/sleep is a platform
+    // binary whose environment is unreadable, so a latched wall withholds its signals)
+    if mode == "sleep-ms" && a.len() == 3 {
+        std::thread::sleep(std::time::Duration::from_millis(a[2].parse().unwrap_or_else(|_| usage())));
+        return;
+    }
     if mode == "forker" && a.len() == 5 {
         let n: u32 = a[2].parse().unwrap_or_else(|_| usage());
         let every: u32 = a[3].parse().unwrap_or_else(|_| usage());

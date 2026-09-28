@@ -35,6 +35,12 @@ pub fn set(timeout: Option<Duration>, max_mem: Option<u64>, max_procs: Option<us
     }
 }
 
+/// The job starts now (after the auto-sweep, right before the root is spawned): the timeout
+/// counts the command's time only.
+pub fn start() {
+    with(|c| c.start = Instant::now());
+}
+
 /// Sheepdog was stopped by its own job control for `d`: that time does not run the job.
 pub fn exclude(d: Duration) {
     with(|c| c.stopped_for += d);
