@@ -62,7 +62,7 @@ pub(crate) const USAGE_KILL: &str = "sheepdog kill [--dry-run] [--json] [--inclu
 pub(crate) const USAGE_PS: &str = "sheepdog ps [--json] PID | PID:ID | j-JOBID";
 
 fn usage() -> i32 {
-    say!("usage: {USAGE_KILL}");
+    crate::fail!("usage: {USAGE_KILL}");
     say!("       {USAGE_PS}");
     2
 }
@@ -249,7 +249,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let Some(a) = parse(args) else { return usage() };
     #[cfg(target_os = "linux")]
     if let Some(why) = os::proc_problem() {
-        say!("sheepdog: {why}, so sheepdog cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");
+        crate::fail!("sheepdog: {why}, so sheepdog cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");
         return 1;
     }
     let by_job = matches!(a.target, Target::Job(_));
@@ -262,7 +262,7 @@ pub fn main(args: &[OsString]) -> i32 {
             // a PID:ID target is a fact from outside: a phase-2 source (the wall's token)
             let Some(_token) = crate::wall::gate() else { return 1 };
             if identity(*p) != Some(*id) {
-                say!("sheepdog: refusing to kill pid {p}: it is not the process {p}:{id} any more. Nothing was signalled.");
+                crate::fail!("sheepdog: refusing to kill pid {p}: it is not the process {p}:{id} any more. Nothing was signalled.");
                 return 1;
             }
             (*p, Some(*id))
@@ -278,7 +278,7 @@ pub fn main(args: &[OsString]) -> i32 {
         },
     };
     if t == 1 {
-        say!("sheepdog: refusing to kill pid 1: it is the system's init process. Nothing was signalled.");
+        crate::fail!("sheepdog: refusing to kill pid 1: it is the system's init process. Nothing was signalled.");
         return 1;
     }
     let Some(tid) = identity(t) else {
@@ -286,23 +286,23 @@ pub fn main(args: &[OsString]) -> i32 {
         return 0;
     };
     if expected.is_some_and(|e| e != tid) {
-        say!("sheepdog: refusing to kill pid {t}: it is another process now. Nothing was signalled.");
+        crate::fail!("sheepdog: refusing to kill pid {t}: it is another process now. Nothing was signalled.");
         return 1;
     }
     if os::procs().iter().find(|p| p.pid == t && p.id == tid).map(|p| p.uid) != Some(unsafe { libc::getuid() }) {
-        say!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
+        crate::fail!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
         return 1;
     }
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            say!("sheepdog: refusing to kill pid {t}: sheepdog cannot follow its own chain of parent processes at pid {link} (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+            crate::fail!("sheepdog: refusing to kill pid {t}: sheepdog cannot follow its own chain of parent processes at pid {link} (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
             return 1;
         }
     };
     if protected.iter().any(|&(p, id)| p == t && id == tid) {
         let what = if t == unsafe { libc::getpid() } { "it is this sheepdog" } else { "it is an ancestor of this sheepdog (the shell or program that started it)" };
-        say!("sheepdog: refusing to kill pid {t}: {what}. Nothing was signalled.");
+        crate::fail!("sheepdog: refusing to kill pid {t}: {what}. Nothing was signalled.");
         return 1;
     }
     let mut proved = Proved { known: HashMap::from([(t, tid)]), ever: HashSet::new(), protected };
@@ -311,7 +311,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let _held = match journal_subtree(t, tid, &mut proved) {
         Ok(j) => j,
         Err(p) => {
-            say!("sheepdog: refusing to kill pid {t}: its journaled subtree holds pid {p}, this sheepdog or one of its ancestors (the shell that runs it). Nothing was signalled.");
+            crate::fail!("sheepdog: refusing to kill pid {t}: its journaled subtree holds pid {p}, this sheepdog or one of its ancestors (the shell that runs it). Nothing was signalled.");
             return 1;
         }
     };
@@ -410,7 +410,7 @@ pub fn main(args: &[OsString]) -> i32 {
     // `kill j-`: a job's supervisor that does not end on TERM is left alone (no escalation): its
     // own kill at the job's end still guards what this kill cannot prove
     if by_job && unended.contains(&t) {
-        say!("sheepdog: the job's supervisor pid {t} did not end on TERM (its caller may ignore TERM); it was left running. The job is NOT ended.");
+        crate::fail!("sheepdog: the job's supervisor pid {t} did not end on TERM (its caller may ignore TERM); it was left running. The job is NOT ended.");
         return 125;
     }
     let initial: HashMap<i32, u64> = proved.known.clone();
@@ -423,7 +423,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let code = match kill_tree(&opts, || proved.scan(), || {}, || None, signal, initial) {
         Ok(()) if !unended.is_empty() && !os::ADOPTS_ESCAPEES => {
             // its escapees are members of its job only, which `kill` cannot prove on macOS
-            say!("sheepdog: supervisor pid(s) {unended:?} did not end on TERM (its caller may ignore TERM), so the escapees of its job may still be alive. The tree is NOT clean.");
+            crate::fail!("sheepdog: supervisor pid(s) {unended:?} did not end on TERM (its caller may ignore TERM), so the escapees of its job may still be alive. The tree is NOT clean.");
             125
         }
         Ok(()) => 0,
@@ -658,23 +658,23 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
     let found: Vec<_> = journal_files().into_iter().filter(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().starts_with(prefix))).collect();
     let path = match found.as_slice() {
         [] => {
-            say!("sheepdog: no job {prefix} in this boot's journals. Nothing was signalled.");
+            crate::fail!("sheepdog: no job {prefix} in this boot's journals. Nothing was signalled.");
             return Err(1);
         }
         [one] => one.clone(),
         many => {
             let names: Vec<String> = many.iter().filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
-            say!("sheepdog: {prefix} matches several jobs ({}); give more of the id. Nothing was signalled.", names.join(", "));
+            crate::fail!("sheepdog: {prefix} matches several jobs ({}); give more of the id. Nothing was signalled.", names.join(", "));
             return Err(2);
         }
     };
     let Some(sup) = journal_sup(&path) else {
-        say!("sheepdog: job {prefix}'s journal is not this user's, not of this boot, or unreadable. Nothing was signalled.");
+        crate::fail!("sheepdog: job {prefix}'s journal is not this user's, not of this boot, or unreadable. Nothing was signalled.");
         return Err(1);
     };
     if sup.0 > 1 && same(sup.0, sup.1) {
         if !is_sheepdog(sup.0) {
-            say!("sheepdog: job {prefix}'s journal names pid {} as its supervisor, but that process is not a sheepdog. Nothing was signalled.", sup.0);
+            crate::fail!("sheepdog: job {prefix}'s journal names pid {} as its supervisor, but that process is not a sheepdog. Nothing was signalled.", sup.0);
             return Err(1);
         }
         return Ok(JobTarget::Live(sup.0, sup.1, path));
@@ -697,24 +697,24 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
     }
     // a dead job: the sweep of this one journal
     let Ok(protected) = protected() else {
-        say!("sheepdog: refusing to sweep {prefix}: sheepdog cannot follow its own chain of parent processes. Nothing was signalled.");
+        crate::fail!("sheepdog: refusing to sweep {prefix}: sheepdog cannot follow its own chain of parent processes. Nothing was signalled.");
         return Err(1);
     };
     match crate::sweep::open_fenced(&path) {
         Ok(j) => match crate::sweep::sweep_job_as(j, &protected, crate::sweep::Mode::Explicit) {
             crate::sweep::Outcome::Swept(_) => Ok(JobTarget::Done(0)),
             crate::sweep::Outcome::Skipped(why) => {
-                say!("sheepdog: refusing to sweep {prefix}: {why}. Nothing was signalled.");
+                crate::fail!("sheepdog: refusing to sweep {prefix}: {why}. Nothing was signalled.");
                 Err(1)
             }
             crate::sweep::Outcome::Deadline(c) => Ok(JobTarget::Done(c)),
         },
         Err(crate::sweep::Skip::Live) => {
-            say!("sheepdog: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
+            crate::fail!("sheepdog: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
             Err(1)
         }
         Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) => {
-            say!("sheepdog: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
+            crate::fail!("sheepdog: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
             Err(1)
         }
     }

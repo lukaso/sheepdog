@@ -53,16 +53,39 @@ macro_rules! say {
 }
 pub(crate) use say;
 
-/// The last message `say!` wrote (for a JSON error, PLAN.md §10.5).
-fn last_say() -> &'static std::sync::Mutex<String> {
-    static L: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
-    L.get_or_init(|| std::sync::Mutex::new(String::new()))
+/// `say!` a failure and record it as the command's error (the first one wins): a `--json`
+/// error names it (PLAN.md §10.5). Every line said before a non-zero exit that states why is
+/// a `fail!`; context said after it stays a `say!`.
+macro_rules! fail {
+    ($($t:tt)*) => {{
+        let __m = format!($($t)*);
+        crate::record_failure(&__m);
+        let _ = writeln!(std::io::stderr(), "{}", __m);
+    }};
+}
+pub(crate) use fail;
+
+/// The last line `say!` wrote, and the first failure `fail!` recorded.
+fn said() -> &'static std::sync::Mutex<(String, Option<String>)> {
+    static L: std::sync::OnceLock<std::sync::Mutex<(String, Option<String>)>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new((String::new(), None)))
 }
 
 pub(crate) fn remember_say(m: &str) {
-    if let Ok(mut l) = last_say().lock() {
-        *l = m.to_string();
+    if let Ok(mut l) = said().lock() {
+        l.0 = m.to_string();
     }
+}
+
+pub(crate) fn record_failure(m: &str) {
+    if let Ok(mut l) = said().lock() {
+        l.1.get_or_insert_with(|| m.to_string());
+    }
+}
+
+/// The command's error message: its first recorded failure (else the last line said).
+fn error_message() -> String {
+    said().lock().map(|l| l.1.clone().unwrap_or_else(|| l.0.clone())).unwrap_or_default()
 }
 
 /// The help screen (PLAN.md §10.5): examples first.
@@ -114,7 +137,7 @@ fn json_error(sub: &str, args: &[OsString], code: i32) -> i32 {
         125 => ("deadline", "sheepdog ps to see what is left; sheepdog sweep to end a dead job's processes".to_string()),
         _ => ("failed", String::new()),
     };
-    let message = last_say().lock().map(|m| m.clone()).unwrap_or_default();
+    let message = error_message();
     let j = journal::json_str;
     let _ = writeln!(std::io::stdout(), "{{\"v\":1,\"error\":{{\"code\":{},\"message\":{},\"fix\":{}}}}}", j(name), j(&message), j(&fix));
     code
@@ -761,7 +784,7 @@ fn kill_tree_inner(
             for (&p, &id) in known.iter() {
                 let _ = send_checked(p, id, libc::SIGKILL); // the one door: pid <= 1, inert, wall, identity
             }
-            say!("sheepdog: internal error while killing the tree; sent SIGKILL to the {} member(s) it knew. The tree may NOT be clean.", known.len());
+            fail!("sheepdog: internal error while killing the tree; sent SIGKILL to the {} member(s) it knew. The tree may NOT be clean.", known.len());
             Err(KillError::Internal)
         }
     }
@@ -1530,9 +1553,9 @@ pub fn die_by_term(fallback: i32) -> i32 {
 pub fn deadline_missed(alive: &[i32]) -> i32 {
     trace(std::iter::once("deadline".to_string()).chain(alive.iter().map(|p| p.to_string())).collect::<Vec<_>>().join(" "));
     if alive.is_empty() {
-        say!("sheepdog: members are still alive at the kill deadline, but none could be listed. The tree is NOT clean.");
+        fail!("sheepdog: members are still alive at the kill deadline, but none could be listed. The tree is NOT clean.");
     } else {
-        say!(
+        fail!(
             "sheepdog: {} process(es) still alive at the kill deadline: pids {:?}. The tree is NOT clean.",
             alive.len(),
             alive
@@ -1627,6 +1650,16 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first failure a command reports is its JSON error message; lines said after it
+    /// (context, a second usage line) do not replace it.
+    #[test]
+    fn the_first_failure_is_the_error_message() {
+        fail!("sheepdog: the first failure");
+        say!("sheepdog: a later line");
+        fail!("sheepdog: a later failure");
+        assert_eq!(error_message(), "sheepdog: the first failure");
+    }
 
     /// Durations take `ms`, `s`, `m`, `h` and `d` (a bare number is seconds), as the help screen
     /// and PLAN's examples use them (`--timeout 5m`, `--older-than 10m`); anything else, a

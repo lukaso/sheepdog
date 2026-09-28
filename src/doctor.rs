@@ -8,7 +8,7 @@
 use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
-use crate::say;
+use crate::fail;
 use sheepdog::ident::same;
 use std::ffi::OsString;
 use std::io::Write;
@@ -29,7 +29,7 @@ pub fn main(args: &[OsString]) -> i32 {
             b"--json" => json = true,
             b"--grants" => grants = true,
             _ => {
-                say!("usage: {USAGE}");
+                fail!("usage: {USAGE}");
                 return 2;
             }
         }

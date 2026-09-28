@@ -455,14 +455,14 @@ pub fn main(args: &[OsString]) -> i32 {
                 i += 2;
             }
             _ => {
-                say!("usage: {USAGE}");
+                crate::fail!("usage: {USAGE}");
                 return 2;
             }
         }
     }
     #[cfg(target_os = "linux")]
     if let Some(why) = crate::linux::proc_problem() {
-        say!("sheepdog: {why}, so sweep cannot tell which processes are which. Nothing was signalled.");
+        crate::fail!("sheepdog: {why}, so sweep cannot tell which processes are which. Nothing was signalled.");
         return 1;
     }
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else {
@@ -475,7 +475,7 @@ pub fn main(args: &[OsString]) -> i32 {
     }
     for p in [state.clone(), state.join("jobs"), dir.clone()] {
         if let Err(why) = safe_dir(&p) {
-            say!("sheepdog: refusing to sweep: {why}. Nothing was signalled.");
+            crate::fail!("sheepdog: refusing to sweep: {why}. Nothing was signalled.");
             return 1;
         }
     }
@@ -483,7 +483,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            say!("sheepdog: refusing to sweep: sheepdog cannot follow its own chain of parent processes at pid {link}, so it cannot rule out a job that holds one of them. Nothing was signalled.");
+            crate::fail!("sheepdog: refusing to sweep: sheepdog cannot follow its own chain of parent processes at pid {link}, so it cannot rule out a job that holds one of them. Nothing was signalled.");
             return 1;
         }
     };

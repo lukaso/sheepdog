@@ -131,3 +131,14 @@ fn the_help_durations_parse() {
     assert_eq!(strays("2d"), Some(0));
     assert_eq!(strays("5x"), Some(2));
 }
+
+/// The JSON error message is the error itself, recorded where it happens, not the last line
+/// said: `kill --json` with no target prints kill's usage and then ps's; the message is kill's.
+#[test]
+fn the_json_error_message_is_the_error_line() {
+    let o = sd(&["kill", "--json"]);
+    assert_eq!(o.code, Some(2));
+    let j = json::parse(o.out.lines().last().unwrap_or("")).unwrap_or_else(|e| panic!("not JSON ({e:?}): {}", o.out));
+    let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
+    assert!(m.starts_with("usage: sheepdog kill"), "message: {m:?}");
+}

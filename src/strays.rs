@@ -82,7 +82,7 @@ struct Args {
 pub(crate) const USAGE: &str = "sheepdog strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]";
 
 fn usage() -> i32 {
-    say!("usage: {USAGE}");
+    crate::fail!("usage: {USAGE}");
     2
 }
 
@@ -293,19 +293,19 @@ pub fn main(args: &[OsString]) -> i32 {
         Some(pat) => match Regex::new(pat) {
             Some(r) => Some(r),
             None => {
-                say!("sheepdog: --cmd {pat:?} is not a valid regular expression");
+                crate::fail!("sheepdog: --cmd {pat:?} is not a valid regular expression");
                 return 2;
             }
         },
         None => None,
     };
     if a.cmd.as_deref() == Some("") {
-        say!("sheepdog: an empty --cmd matches every command; give a pattern.");
+        crate::fail!("sheepdog: an empty --cmd matches every command; give a pattern.");
         return 2;
     }
     let filtered = a.min_mem > 0 || !a.older_than.is_zero() || re.is_some() || !a.pids.is_empty();
     if a.kill && !filtered {
-        say!("sheepdog: --kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.");
+        crate::fail!("sheepdog: --kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.");
         return 2;
     }
     // a phase-2 source: disabled outright under the phase-1 opt-out
@@ -339,14 +339,14 @@ pub fn main(args: &[OsString]) -> i32 {
     }
     if !a.yes {
         if unsafe { libc::isatty(0) } != 1 {
-            say!("sheepdog: --kill without --yes asks first, and stdin is not a terminal. Add --yes to kill these {} process(es). Nothing was signalled.", rows.len());
+            crate::fail!("sheepdog: --kill without --yes asks first, and stdin is not a terminal. Add --yes to kill these {} process(es). Nothing was signalled.", rows.len());
             return 1;
         }
         say!("Kill these {} process(es)? [y/N] ", rows.len());
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
         if !matches!(line.trim(), "y" | "Y" | "yes") {
-            say!("sheepdog: nothing was signalled.");
+            crate::fail!("sheepdog: nothing was signalled.");
             return 1;
         }
     }
