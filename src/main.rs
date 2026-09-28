@@ -125,10 +125,17 @@ fn help(cmd: Option<&OsString>) -> i32 {
     0
 }
 
-/// `--json` errors (PLAN.md §10.5): a command given `--json` that ends with a non-zero code
-/// writes one line `{"v":1,"error":{"code","message","fix"}}` to stdout.
-fn json_error(sub: &str, args: &[OsString], code: i32) -> i32 {
-    if code == 0 || !args.iter().any(|a| a.as_bytes() == b"--json") {
+/// Set by a subcommand's parser when it takes `--json` as a flag (not as another option's value).
+static JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn json_on() {
+    JSON.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// `--json` errors (PLAN.md §10.5): a command whose parser took `--json` and that ends with a
+/// non-zero code writes one line `{"v":1,"error":{"code","message","fix"}}` to stdout.
+fn json_error(sub: &str, code: i32) -> i32 {
+    if code == 0 || !JSON.load(std::sync::atomic::Ordering::SeqCst) {
         return code;
     }
     let (name, fix) = match code {
@@ -1581,11 +1588,11 @@ fn run(argv: Vec<OsString>) -> i32 {
             let _ = writeln!(std::io::stdout(), "sheepdog {} ({}, {}{api})", env!("CARGO_PKG_VERSION"), env!("SHEEPDOG_COMMIT"), std::env::consts::OS);
             return 0;
         }
-        Some(b"doctor") => return json_error("doctor", rest, doctor::main(rest)),
-        Some(b"kill") => return json_error("kill", rest, kill::main(rest)),
-        Some(b"strays") => return json_error("strays", rest, strays::main(rest)),
-        Some(b"ps") => return json_error("ps", rest, kill::ps(rest)),
-        Some(b"sweep") => return json_error("sweep", rest, sweep::main(rest)),
+        Some(b"doctor") => return json_error("doctor", doctor::main(rest)),
+        Some(b"kill") => return json_error("kill", kill::main(rest)),
+        Some(b"strays") => return json_error("strays", strays::main(rest)),
+        Some(b"ps") => return json_error("ps", kill::ps(rest)),
+        Some(b"sweep") => return json_error("sweep", sweep::main(rest)),
         Some(b"run") => {}
         Some(_) => {
             let typed: Vec<String> = argv[1..].iter().map(|a| kill::clean(&a.to_string_lossy())).collect();

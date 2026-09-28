@@ -160,3 +160,16 @@ fn a_flag_first_call_suggests_a_fix_that_runs() {
         assert_eq!(sd(&args).code, Some(0), "the suggested fix does not run: {fix}");
     }
 }
+
+/// JSON mode is the parsed `--json` flag, not the word anywhere in the arguments: in
+/// `strays --cmd --json --bogus` it is `--cmd`'s pattern, so the usage error is text only
+/// (stdout empty); the control, `strays --json --bogus`, writes the JSON error.
+#[test]
+fn json_mode_is_the_parsed_flag() {
+    let o = sd(&["strays", "--cmd", "--json", "--bogus"]);
+    assert_eq!(o.code, Some(2));
+    assert!(o.out.trim().is_empty(), "a JSON error in text mode: {}", o.out);
+    let c = sd(&["strays", "--json", "--bogus"]);
+    assert_eq!(c.code, Some(2));
+    assert!(json::parse(c.out.trim()).is_ok_and(|j| j.get("error").is_some()), "control: no JSON error: {}", c.out);
+}

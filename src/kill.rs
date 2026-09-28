@@ -90,7 +90,10 @@ fn parse(args: &[OsString]) -> Option<Args> {
         match args[i].as_bytes() {
             b"--dry-run" => dry_run = true,
             b"--include-suspects" => include_suspects = true,
-            b"--json" => json = true,
+            b"--json" => {
+                json = true;
+                crate::json_on();
+            }
             b"--grace" => {
                 i += 1;
                 grace = parse_duration(&args.get(i)?.to_string_lossy())?;
