@@ -146,16 +146,17 @@ fn cell2_inherit_a_setsid_grandchild_leaves_no_survivor() {
 #[test]
 fn cell3_inherit_an_escapee_seen_by_a_scan_leaves_no_survivor() {
     let d = scratch("c3");
-    let (m, r, go) = (marker(), d.join("r"), d.join("go"));
-    let mut g = Guard { recs: vec![r.clone()], markers: vec![m.clone()], children: vec![] };
-    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", &m, r.to_str().unwrap(), go.to_str().unwrap()]);
+    let (r, go) = (d.join("r"), d.join("go"));
+    let mut g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
+    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", r.to_str().unwrap(), go.to_str().unwrap()]);
     assert!(wait_until(15, || !records(&r).is_empty()), "C did not start");
     let sup = supervisor_under_t(t, records(&r)[0]);
     // the readiness handshake: C escapes only after the supervisor's scans have seen it
     std::thread::sleep(Duration::from_millis(800));
     std::fs::write(&go, b"").unwrap();
-    assert!(wait_until(15, || records(&r).len() >= 2), "G did not start");
-    let esc = records(&r)[1];
+    let rg = PathBuf::from(format!("{}.g", r.display()));
+    assert!(wait_until(15, || !records(&rg).is_empty()), "G did not start");
+    let esc = records(&rg)[0];
     common::send(sup.0, sup.1, libc::SIGTERM);
     let gone = wait_until(20, || !common::alive(esc));
     assert!(gone, "the escapee survived");
@@ -327,4 +328,96 @@ fn inherit_is_accepted_on_linux() {
     common::kill_marked(&[&m]);
     assert_eq!(st.code(), Some(0));
     assert!(left.is_empty(), "survivors: {left:?}");
+}
+
+fn state(d: &Path) -> PathBuf {
+    let s = d.join("state");
+    std::fs::create_dir_all(&s).unwrap();
+    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    s
+}
+
+/// The auto-sweep's deferral in inherit mode (under T): an outer job holds a live inner job
+/// (both `--inherit-terminal-permissions`, each with its own state); the outer supervisor is
+/// SIGKILLed, and the next run's auto-sweep of the outer's journal sends the inner job's escapee
+/// nothing: in this mode the escapee is not responsible to the inner supervisor, so only the live
+/// journal and the lineage hold it. The control: an explicit `sweep` ends it.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
+    let d = scratch("defer");
+    let s = state(&d);
+    let inner_state = state(&d.join("inner"));
+    let (r, rr, ip, go) = (d.join("rec"), d.join("root"), d.join("innerpid"), d.join("go"));
+    let mut g = Guard { recs: vec![r.clone(), rr.clone()], markers: vec![], children: vec![] };
+    // the inner job's escapee escapes only after scans saw its parent (the handshake), so both
+    // supervisors hold it by `puniq` (in this mode it is not responsible to them)
+    let script = format!(
+        r#"SHEEPDOG_TEST_STATE="{}" "$0" run --quiet --inherit-terminal-permissions -- "$1" escape-after "{}" "{}" & echo $! > "{}"; exec "$1" sigcount "{}""#,
+        inner_state.display(),
+        r.display(),
+        go.display(),
+        ip.display(),
+        rr.display()
+    );
+    let tr = d.join("T");
+    let t_child = Command::new(fixture())
+        .arg("t")
+        .arg(&tr)
+        .args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script, sheepdog(), fixture()])
+        .env("SHEEPDOG_TEST_STATE", &s)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    g.children.push(t_child);
+    assert!(wait_until(15, || !records(&tr).is_empty() && !records(&r).is_empty() && !records(&rr).is_empty()), "the jobs did not start");
+    let t = records(&tr)[0];
+    assert_eq!(resp_of(t.0), Some(t.1), "precondition: T is responsible for itself");
+    std::thread::sleep(Duration::from_millis(800));
+    std::fs::write(&go, b"").unwrap();
+    let rg = PathBuf::from(format!("{}.g", r.display()));
+    assert!(wait_until(15, || !records(&rg).is_empty()), "the inner job's escapee did not start");
+    let esc = records(&rg)[0];
+    let inner: i32 = std::fs::read_to_string(&ip).unwrap_or_default().trim().parse().unwrap_or(0);
+    assert!(inner > 1, "no inner supervisor");
+    let outer = common::found(parent(records(&rr)[0].0)).expect("the outer supervisor");
+    assert_eq!(resp_of(outer.0), Some(t.1), "precondition: the outer supervisor is responsible to T");
+    assert_eq!(resp_of(esc.0), Some(t.1), "precondition: the inner job's escapee is responsible to T, not to its supervisor");
+    // the outer has journaled the inner supervisor and the escapee (its scans, over a few ticks)
+    let jr = |st: &Path| -> Vec<i32> {
+        let mut v = Vec::new();
+        for b in std::fs::read_dir(st.join("jobs")).into_iter().flatten().flatten() {
+            for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
+                for l in std::fs::read_to_string(f.path()).unwrap_or_default().lines() {
+                    if let Some(j) = json::parse(l).ok() {
+                        if let Some(p) = j.get("pid").and_then(Json::num) {
+                            v.push(p as i32);
+                        }
+                    }
+                }
+            }
+        }
+        v
+    };
+    assert!(wait_until(10, || jr(&s).contains(&esc.0) && jr(&s).contains(&inner)), "the outer did not journal the inner job's escapee {esc:?} (inner {inner}, root {:?}): {:?}; recs {:?}", records(&rr), jr(&s), records(&r));
+    common::send(outer.0, outer.1, libc::SIGKILL);
+    assert!(wait_until(5, || !common::alive(outer)));
+    let ran = d.join("ran");
+    let st = Command::new(sheepdog())
+        .args(["run", "--quiet", "--", "/usr/bin/touch", ran.to_str().unwrap()])
+        .env("SHEEPDOG_TEST_STATE", &s)
+        .env("SHEEPDOG_TEST_DEADLINE_MS", "500")
+        .stdin(Stdio::null())
+        .status()
+        .unwrap();
+    let sigs = std::fs::read_to_string(format!("{}.g.sig", r.display())).unwrap_or_default().lines().count();
+    let kept = common::alive(esc) && sigs == 0;
+    let _ = Command::new(sheepdog()).arg("sweep").env("SHEEPDOG_TEST_STATE", &s).status();
+    let gone = wait_until(10, || !common::alive(esc));
+    assert_eq!(st.code(), Some(0));
+    assert!(ran.exists(), "the new command ran");
+    assert!(kept, "the auto-sweep reached the live inner job's escapee: {sigs} signal(s), alive {}", common::alive(esc));
+    assert!(gone, "control: the explicit sweep ended the inner job");
+    drop(g);
+    let _ = std::fs::remove_dir_all(&d);
 }

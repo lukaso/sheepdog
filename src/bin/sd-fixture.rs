@@ -1028,13 +1028,13 @@ fn main() {
         let code = std::process::Command::new(&a[3]).args(&a[4..]).status().ok().and_then(|s| s.code()).unwrap_or(1);
         std::process::exit(code);
     }
-    // `escape-after M R GO`: the root forks C (recorded); C waits for the file GO (bounded, 20 s:
-    // the cell writes it after the supervisor's first scans saw C), then starts a new session,
-    // forks G (`/bin/sleep M`, recorded through a pipe to C, which records it) and exits; the
+    // `escape-after R GO`: the root forks C (recorded in R); C waits for the file GO (bounded,
+    // 20 s: the cell writes it after the supervisor's first scans saw C), then starts a new
+    // session, forks G (`sigcount R.g`, which records itself after its exec) and exits only once
+    // G has recorded itself (so G never execs after it is reparented: its `puniq` stays C); the
     // root waits.
-    if mode == "escape-after" && a.len() == 5 {
-        let m = CString::new(a[2].as_str()).unwrap();
-        let (r, go) = (a[3].clone(), a[4].clone());
+    if mode == "escape-after" && a.len() == 4 {
+        let (r, go) = (a[2].clone(), a[3].clone());
         unsafe {
             match libc::fork() {
                 0 => {
@@ -1044,13 +1044,12 @@ fn main() {
                         n += 1;
                     }
                     libc::setsid();
-                    match libc::fork() {
-                        0 => exec_sleep(&m),
-                        g => {
-                            record(&r, g);
-                            libc::_exit(0);
-                        }
+                    if libc::fork() == 0 {
+                        let (dir, name) = r.rsplit_once('/').unwrap_or((".", &r));
+                        sigcount_as(dir, &format!("{name}.g"), false);
                     }
+                    wait_record(&r.rsplit_once('/').map_or(".".to_string(), |x| x.0.to_string()), &format!("{}.g", r.rsplit_once('/').map_or(r.as_str(), |x| x.1)));
+                    libc::_exit(0);
                 }
                 c if c > 0 => {
                     record(&r, c);
