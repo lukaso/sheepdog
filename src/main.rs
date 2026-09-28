@@ -23,6 +23,7 @@ mod journal;
 mod kill;
 mod state;
 mod status;
+mod sweep;
 mod wall;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -1425,6 +1426,9 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 fn run(argv: Vec<OsString>) -> i32 {
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
         return kill::main(&argv[2..]);
+    }
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"sweep") {
+        return sweep::main(&argv[2..]);
     }
     status::start();
     // read --status-fd before the rest, so a usage error elsewhere still gets its status line

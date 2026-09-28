@@ -1,5 +1,5 @@
-//! A small JSON reader for the cells (journal lines, `--status-fd`, `--json`): enough to check
-//! that a line parses and to read its fields. Strict: one value, then only whitespace.
+//! A small JSON reader: the journal's lines (read back by `sweep` and `kill`), and the cells'
+//! checks of `--status-fd` and `--json` output. Strict: one value, then only whitespace.
 
 use std::collections::BTreeMap;
 

@@ -97,6 +97,11 @@
 //!   once (pages touched), writes MB to PROGRESS, and keeps running (60 s at most).
 //! - `forker N INTERVAL_MS R`: P3 (`--max-procs`). Forks N children, one every INTERVAL_MS, each
 //!   recording itself and waiting (60 s at most); then waits itself.
+//! - `escapee-and-wait R`: P4 (sweep). Starts a setsid escapee G (C: setsid, fork G, exit) that
+//!   records itself in R and becomes `sigcount R.g` (the same pid); once R has G, this process
+//!   becomes `sigcount R.root`. Every process is this fixture, so its environment can be read.
+//! - `spawn-on GO R`: P4 (the closure). Records itself in R, waits for the file GO, then forks a
+//!   child that records itself in R and waits; both wait (60 s at most).
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
 //!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
 //!   and exits. G escaped by reparenting only.
@@ -1119,6 +1124,63 @@ fn main() {
                     _ => {
                         libc::usleep(every * 1000);
                     }
+                }
+            }
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if mode == "escapee-and-wait" && a.len() == 3 {
+        let me = std::env::current_exe().unwrap();
+        let exe = CString::new(me.as_os_str().as_encoded_bytes()).unwrap();
+        let r = a[2].clone();
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    libc::setsid();
+                    if libc::fork() == 0 {
+                        record(&r, libc::getpid());
+                        let args = [exe.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{r}.g")).unwrap()];
+                        let mut p: Vec<*const libc::c_char> = args.iter().map(|c| c.as_ptr()).collect();
+                        p.push(std::ptr::null());
+                        libc::execv(exe.as_ptr(), p.as_ptr());
+                        libc::_exit(127);
+                    }
+                    libc::_exit(0);
+                }
+                -1 => std::process::exit(1),
+                c => {
+                    let mut st = 0;
+                    libc::waitpid(c, &mut st, 0);
+                }
+            }
+            let mut n = 0;
+            while std::fs::metadata(&r).map_or(true, |m| m.len() == 0) && n < 1000 {
+                libc::usleep(10_000);
+                n += 1;
+            }
+            let args = [exe.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{r}.root")).unwrap()];
+            let mut p: Vec<*const libc::c_char> = args.iter().map(|c| c.as_ptr()).collect();
+            p.push(std::ptr::null());
+            libc::execv(exe.as_ptr(), p.as_ptr());
+            std::process::exit(127);
+        }
+    }
+    if mode == "spawn-on" && a.len() == 4 {
+        unsafe {
+            libc::alarm(60);
+            record(&a[3], libc::getpid());
+            let mut n = 0;
+            while !std::path::Path::new(&a[2]).exists() && n < 6000 {
+                libc::usleep(10_000);
+                n += 1;
+            }
+            if libc::fork() == 0 {
+                record(&a[3], libc::getpid());
+                libc::alarm(60);
+                loop {
+                    libc::pause();
                 }
             }
             loop {

@@ -70,13 +70,13 @@ fn parse(args: &[OsString]) -> Option<Args> {
 /// Is `pid` a sheepdog (its executable's file name)?
 /// A sheepdog supervisor (a Linux root shim before its exec runs the same binary, but is the
 /// job's root, not a supervisor).
-fn is_sheepdog(pid: i32) -> bool {
+pub(crate) fn is_sheepdog(pid: i32) -> bool {
     os::exe_name(pid).as_deref() == Some("sheepdog") && os::cmdline(pid).get(1).map(String::as_str) != Some("__root")
 }
 
 /// The parent of `pid`. Debug seam SHEEPDOG_TEST_PARENT_UNREADABLE=<pid>: that pid's parent
 /// cannot be read (as under a `/proc` mounted with `hidepid`).
-fn parent(pid: i32) -> Option<i32> {
+pub(crate) fn parent(pid: i32) -> Option<i32> {
     if crate::seam_ms("SHEEPDOG_TEST_PARENT_UNREADABLE") == Some(pid as u64) {
         return None;
     }
@@ -86,7 +86,7 @@ fn parent(pid: i32) -> Option<i32> {
 /// This process and all its ancestors up to pid 1, with their identities: never part of a
 /// kill. Err(pid) if the chain cannot be read to its end (`pid` is the link that could not be
 /// read): then any process may be an ancestor, and every target is refused (fail closed).
-fn protected() -> Result<Vec<(i32, u64)>, i32> {
+pub(crate) fn protected() -> Result<Vec<(i32, u64)>, i32> {
     let mut v = Vec::new();
     let mut p = unsafe { libc::getpid() };
     while p > 1 {
@@ -116,14 +116,14 @@ fn job_of(t: i32) -> Option<i32> {
 
 /// The proved set, sticky across scans: a member stays known until it is gone, and (macOS) the
 /// uniqueid of every member ever seen stays a `puniq` link after the member has exited.
-struct Proved {
-    known: HashMap<i32, u64>,
-    ever: HashSet<u64>,
-    protected: Vec<(i32, u64)>,
+pub(crate) struct Proved {
+    pub(crate) known: HashMap<i32, u64>,
+    pub(crate) ever: HashSet<u64>,
+    pub(crate) protected: Vec<(i32, u64)>,
 }
 
 impl Proved {
-    fn scan(&mut self) -> Vec<(i32, u64)> {
+    pub(crate) fn scan(&mut self) -> Vec<(i32, u64)> {
         let uid = unsafe { libc::getuid() };
         let procs: Vec<Proc> = os::procs()
             .into_iter()
@@ -158,7 +158,7 @@ impl Proved {
 /// their grace (read from their argv; 2 s if unreadable) plus the kill deadline. The rest of the
 /// tree runs meanwhile, so it is scanned all the while (a child seen while its parent lives stays
 /// proved after the parent exits). Returns the supervisors still alive at the end.
-fn end_supervisors(sups: &[(i32, u64)], deadline: Duration, proved: &mut Proved) -> Vec<i32> {
+pub(crate) fn end_supervisors(sups: &[(i32, u64)], deadline: Duration, proved: &mut Proved) -> Vec<i32> {
     let mut bound = Duration::ZERO;
     for &(p, id) in sups {
         trace(format!("supervisor {p}"));
