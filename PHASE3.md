@@ -172,6 +172,10 @@ Cells: the helper refuses each forbidden form (a cell per form, a mutant per ref
 - **The shipped build's smoke:** `v0.1.0` is a new binary and a new notarization. Before `publish`, it gets `install.sh` from the output dir, the granted read through the symlink with its control, and `scripts/smoke.sh`.
 - **The agent first-use eval** (PLAN §10.9): `eval/hang.sh` starts an escapee (perl: fork, then a checked `setsid`) and writes its identity to a file; `eval/check.sh` passes if that identity is gone. **Control:** `./hang.sh` run alone, then `eval/check.sh`: FAIL. The operator judges the other two rules (the final message states what was killed; wall time under 2 min) and runs it with a bounded token budget.
 
+**S0 as built (2026-09-29):** the exec door (`scripts/lib/exec-guard.sh`, 14 fixtures, 7 mutants: 6 red), `scripts/bundle.sh` (5 mutants red), `build.rs`'s `SHEEPDOG_COMMIT_OVERRIDE` (3 mutants red), the `sh` launcher (4 mutants red, the node launcher included), the `bundle` leg (red on a failing cell and on no cells). Two items moved:
+- **§1.2–§1.5's cells are written at the start of S2**, red first, with the scripts they test (`release.sh`, `release-plan.sh`, `sign.sh`); in S0 there was nothing for them to drive yet.
+- **The door's bundle-level check** (a file that meets the requirement inside a bundle that does not) has no fixture before a real Developer ID file exists; its mutant stayed green. Its cell goes in the `rc` leg: rc.1's bundle with a changed `Info.plist` byte (the executable still meets the requirement; the bundle's seal does not) is refused.
+
 ## 3. The full-matrix legs
 
 The ten legs of `./test-all` stay (on the pinned toolchain from S1). Phase 3 adds:
