@@ -118,3 +118,16 @@ fn version_names_version_commit_and_platform() {
     assert!(line.starts_with(&format!("sheepdog {} ", env!("CARGO_PKG_VERSION"))), "{line}");
     assert!(line.contains(std::env::consts::OS), "no platform: {line}");
 }
+
+/// The durations the help screen shows parse: `run --timeout 5m` runs its command (exit 0, not
+/// the usage error 125); `strays --older-than 1h` and `2d` list (exit 0). The controls: an
+/// unknown unit is `run`'s usage error (125) and `strays`' (2).
+#[test]
+fn the_help_durations_parse() {
+    assert_eq!(sd(&["run", "--timeout", "5m", "--", "/usr/bin/true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "5x", "--", "/usr/bin/true"]).code, Some(125));
+    let strays = |v: &str| Command::new(sheepdog()).args(["strays", "--older-than", v]).env("SHEEPDOG_TEST_INERT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code();
+    assert_eq!(strays("1h"), Some(0));
+    assert_eq!(strays("2d"), Some(0));
+    assert_eq!(strays("5x"), Some(2));
+}
