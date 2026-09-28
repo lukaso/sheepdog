@@ -369,7 +369,10 @@ fn sweep_never_touches_its_own_ancestors() {
     // after it, W stays alive (a marked sleep), so the checks below see W itself
     let m = format!("29.{}", std::process::id());
     let w = format!(r#"echo $$ > "{}"; while [ ! -e "{}" ]; do sleep 0.02; done; sheepdog sweep; echo $? > "{}"; sleep {m}"#, me.display(), go.display(), rc.display());
-    let script = format!(r#"/bin/sh -c '{}' & exec "$FX" sigcount "{}""#, w.replace('\'', r#"'\''"#), rr.display());
+    // a witness member, also a background child (the root dies with its supervisor on Linux):
+    // skipped whole, the job's witness is untouched
+    let wit = d.join("witness");
+    let script = format!(r#"/bin/sh -c '{}' & "$FX" sigcount "{}" & exec "$FX" sigcount "{}""#, w.replace('\'', r#"'\''"#), wit.display(), rr.display());
     let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
     let wpid: Option<i32> = wait_until(15, || std::fs::read_to_string(&me).is_ok_and(|t| !t.trim().is_empty())).then(|| std::fs::read_to_string(&me).unwrap().trim().parse().unwrap());
     let wid = wpid.and_then(sheepdog::ident::identity);
@@ -384,12 +387,13 @@ fn sweep_never_touches_its_own_ancestors() {
     let w_alive = wpid.zip(wid).is_some_and(common::alive);
     // the job is skipped WHOLE: its other member (the root, a counting fixture) is untouched too
     let root = records(&rr);
-    let root_untouched = root.iter().all(|p| common::alive(*p)) && counted(&rr) == 0 && !root.is_empty();
+    let witness = records(&wit);
+    let root_untouched = !witness.is_empty() && witness.iter().all(|p| common::alive(*p)) && counted(&wit) == 0;
     let kept = !journals(&s).is_empty();
     if let Some(p) = wpid.zip(wid) {
         common::send(p.0, p.1, libc::SIGKILL);
     }
-    for p in root {
+    for p in root.into_iter().chain(witness) {
         common::send(p.0, p.1, libc::SIGKILL);
     }
     common::kill_marked(&[&m]);
