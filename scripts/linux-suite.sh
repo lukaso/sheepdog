@@ -48,8 +48,8 @@ while :; do
   sleep 0.1; i=$((i+1))
 done
 if [ "$left" -gt 0 ] || [ "$tagged" -gt 0 ]; then
-  ps -eo pid,ppid,stat,args | grep -E "$PAT" | grep -v grep | cut -c1-200
-  for p in $(tagged_pids); do echo "tagged $p: $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-200)"; done
+  ps -eo pid=,args= | while read -r p a; do echo "$a" | grep -qE "$PAT" && ps -o pid,ppid,stat,etime,args -p "$p" | tail -n +2 | cut -c1-200; done
+  for p in $(tagged_pids); do echo "tagged: $(ps -o pid,ppid,stat,etime,args -p "$p" | tail -n +2 | cut -c1-200)"; done
 fi
 echo "leftovers: $left, tagged: $tagged"
 left=$((left+tagged))
