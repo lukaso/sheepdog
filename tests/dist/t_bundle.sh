@@ -1,0 +1,41 @@
+#!/bin/sh
+# PHASE3.md S0: scripts/bundle.sh makes Sheepdog.app. The ID is .dev unless --release-id (then
+# the bundle is built only in the fixture dir and never run); the versions are dotted integers
+# (D4); the Info.plist keys of S0; a universal input stays universal; the binary is copied as is.
+set -u
+. "$(dirname "$0")/lib.sh"
+[ "$(uname -s)" = Darwin ] || { echo "SKIP (macOS only)"; exit 0; }
+fx_dir
+B="$SD_ROOT/scripts/bundle.sh"
+printf 'int main(){return 0;}\n' > "$FX/m.c"
+cc -arch arm64 -arch x86_64 -o "$FX/bin" "$FX/m.c" || exit 3
+key() { /usr/bin/plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null; }
+
+"$B" "$FX/bin" "$FX/dev" 0.1.0 7 >/dev/null 2>&1 || fail "bundle.sh failed"
+A="$FX/dev/Sheepdog.app"
+/usr/bin/plutil -lint "$A/Contents/Info.plist" >/dev/null 2>&1 && pass "plist lints" || fail "plist does not lint"
+[ "$(key "$A" CFBundleIdentifier)" = com.lukaso.sheepdog.dev ] && pass ".dev ID without the flag" || fail "ID is $(key "$A" CFBundleIdentifier)"
+for kv in CFBundleName=Sheepdog CFBundleExecutable=sheepdog CFBundlePackageType=APPL CFBundleInfoDictionaryVersion=6.0 \
+          LSMinimumSystemVersion=12.0 LSUIElement=true CFBundleShortVersionString=0.1.0 CFBundleVersion=7; do
+  k=${kv%%=*} v=${kv#*=}
+  [ "$(key "$A" "$k")" = "$v" ] && pass "$k=$v" || fail "$k is '$(key "$A" "$k")', want '$v'"
+done
+cmp -s "$FX/bin" "$A/Contents/MacOS/sheepdog" && pass "binary copied as is" || fail "binary differs or missing"
+case $(lipo -archs "$A/Contents/MacOS/sheepdog" 2>/dev/null) in *x86_64*arm64*|*arm64*x86_64*) pass "universal kept" ;; *) fail "not universal" ;; esac
+
+"$B" "$FX/bin" "$FX/rel" 0.1.0 7 --release-id >/dev/null 2>&1 || fail "bundle.sh --release-id failed"
+[ "$(key "$FX/rel/Sheepdog.app" CFBundleIdentifier)" = com.lukaso.sheepdog ] && pass "release ID with the flag" || fail "no release ID with the flag"
+
+for bad in 0.1.0-rc.1 v0.1.0 1.2.3.4 ""; do
+  rm -rf "$FX/bad"
+  if "$B" "$FX/bin" "$FX/bad" "$bad" 7 >/dev/null 2>&1 || [ -e "$FX/bad/Sheepdog.app" ]; then fail "version '$bad' accepted"; else pass "version '$bad' refused"; fi
+done
+for bad in 0 07 x 1.0; do
+  rm -rf "$FX/bad"
+  if "$B" "$FX/bin" "$FX/bad" 0.1.0 "$bad" >/dev/null 2>&1 || [ -e "$FX/bad/Sheepdog.app" ]; then fail "build number '$bad' accepted"; else pass "build number '$bad' refused"; fi
+done
+# the door lets the .dev bundle run (recorded, not run)
+rec="$FX/rec"; : > "$rec"
+SD_EXEC_RECORD="$rec" "$SD_ROOT/scripts/lib/exec-guard.sh" exec "$A/Contents/MacOS/sheepdog" 2>/dev/null
+[ "$(grep -c . "$rec")" = 1 ] && pass "the door allows the .dev bundle" || fail "the door refused the .dev bundle"
+finish
