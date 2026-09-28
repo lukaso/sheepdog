@@ -182,15 +182,18 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
     let (r, rr) = (d.join("rec"), d.join("root"));
     let inner_state = state(&d.join("inner"));
     let script = format!(
-        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" & exec "$FX" sigcount "{}""#,
+        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" & echo $! > "{}"; exec "$FX" sigcount "{}""#,
         inner_state.display(),
         r.display(),
+        d.join("innerpid").display(),
         rr.display()
     );
     let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
     assert!(wait_until(15, || !records(&r).is_empty()));
     let g = records(&r)[0];
-    std::thread::sleep(Duration::from_millis(800));
+    // the outer supervisor has journaled the inner one (readiness, not a fixed wait)
+    let inner: i32 = { assert!(wait_until(10, || std::fs::read_to_string(d.join("innerpid")).is_ok_and(|t| !t.trim().is_empty()))); std::fs::read_to_string(d.join("innerpid")).unwrap().trim().parse().unwrap() };
+    assert!(wait_until(10, || journaled(&s).contains(&inner)), "the inner supervisor was journaled");
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
     let gr = PathBuf::from(format!("{}.g", r.display()));
@@ -207,5 +210,74 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
     assert!(alive && n == 0, "the auto-sweep reached the live inner job: {n} signal(s)");
     assert!(deferred, "notes {:?}", notes(&st));
     assert!(gone, "control: the explicit sweep ended the inner job");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-3: the auto-sweep's kill is not the new run's: a dead job with several escapees
+/// swept before `run --max-procs 1 -- true` leaves the new run's record clean (exit 0, trigger
+/// null, killed []), and its own cap still works on its own job (a control that forks past it
+/// gives 124).
+#[test]
+fn the_auto_sweep_is_not_the_new_runs_kill() {
+    let d = scratch("pollute");
+    let s = state(&d);
+    let (g1, r1) = dead_job(&d, &s, "a", &[]);
+    let (g2, r2) = dead_job(&d, &s, "b", &[]);
+    let (code, st) = run(&d, &s, "clean", "--max-procs 1", "/bin/sh -c 'exit 0'", &[]);
+    let swept = !common::alive(g1) && !common::alive(g2);
+    let rf = d.join("forker");
+    let (capped, cst) = run(&d, &s, "capped", "--max-procs 1", &format!(r#""$FX" forker 5 50 "{}""#, rf.display()), &[]);
+    for p in records(&rf) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    cleanup(&[&r1, &r2]);
+    let field = |st: &Option<Json>, k: &str| st.as_ref().and_then(|s| s.get(k)).cloned();
+    assert!(swept, "control: the auto-sweep ended the dead jobs");
+    assert_eq!(code, Some(0));
+    assert_eq!(field(&st, "trigger"), Some(Json::Null));
+    assert_eq!(field(&st, "killed").and_then(|k| k.arr().map(|a| a.len())), Some(0), "the dead jobs' processes are in the new run's killed[]");
+    assert_eq!(capped, Some(124), "the new run's own cap");
+    assert_eq!(field(&cst, "trigger").and_then(|t| t.str().map(String::from)), Some("cap".to_string()));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-7: the auto-sweep of a `sheepdog run` started inside a dead job (from its member W)
+/// skips that job whole: W and the job's witness live, the inner run's command runs, and a note
+/// names the skipped job.
+#[test]
+fn the_auto_sweep_skips_a_job_that_holds_the_run() {
+    let d = scratch("autoanc");
+    let s = state(&d);
+    let (go, ran, out, me, wit, rr) = (d.join("go"), d.join("ran"), d.join("inner.status"), d.join("me"), d.join("witness"), d.join("root"));
+    let m = format!("29.{}", std::process::id());
+    let w = format!(
+        r#"echo $$ > "{}"; while [ ! -e "{}" ]; do sleep 0.02; done; sheepdog run --status-fd 9 -- /bin/sh -c 'touch "{}"' 9>"{}"; sleep {m}"#,
+        me.display(),
+        go.display(),
+        ran.display(),
+        out.display()
+    );
+    let script = format!(r#"/bin/sh -c '{}' & "$FX" sigcount "{}" & exec "$FX" sigcount "{}""#, w.replace('\'', r#"'\''"#), wit.display(), rr.display());
+    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let wpid: Option<i32> = wait_until(15, || std::fs::read_to_string(&me).is_ok_and(|t| !t.trim().is_empty())).then(|| std::fs::read_to_string(&me).unwrap().trim().parse().unwrap());
+    assert!(wpid.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p))) && wait_until(10, || !records(&wit).is_empty()));
+    let witness = records(&wit)[0];
+    assert!(wait_until(10, || journaled(&s).contains(&witness.0)));
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    std::fs::write(&go, b"").unwrap();
+    let done = wait_until(20, || ran.exists() && std::fs::read_to_string(&out).is_ok_and(|t| !t.is_empty()));
+    let st = std::fs::read_to_string(&out).ok().and_then(|t| json::parse(t.trim_end()).ok());
+    let (wit_alive, n) = (common::alive(witness), counted(&wit));
+    let noted = notes(&st).iter().any(|n| n.starts_with("auto-sweep skipped"));
+    let wid = wpid.and_then(sheepdog::ident::identity);
+    if let Some(p) = wpid.zip(wid) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    cleanup(&[&wit, &rr]);
+    common::kill_marked(&[&m]);
+    assert!(done, "the inner run's command ran");
+    assert!(wit_alive && n == 0, "the job holding the run was swept ({n})");
+    assert!(noted, "notes {:?}", notes(&st));
     let _ = std::fs::remove_dir_all(&d);
 }

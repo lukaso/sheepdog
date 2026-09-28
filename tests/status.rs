@@ -265,3 +265,17 @@ fn quiet_suppresses_the_report() {
     assert!(stderr[1].trim().is_empty(), "--quiet printed: {}", stderr[1]);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Review P2-5: `--status-fd` 0, 1 or 2 would take the command's own stream (it is set
+/// close-on-exec): a usage error (125), and the command does not run.
+#[test]
+fn the_status_fd_is_never_a_standard_stream() {
+    let d = scratch("stdfd");
+    for fd in ["0", "1", "2"] {
+        let ran = d.join(format!("ran{fd}"));
+        let st = Command::new(sheepdog()).args(["run", "--status-fd", fd, "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())]).stderr(std::process::Stdio::null()).status().unwrap();
+        assert_eq!(st.code(), Some(125), "--status-fd {fd}");
+        assert!(!ran.exists(), "--status-fd {fd}: the command ran");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

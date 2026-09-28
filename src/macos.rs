@@ -672,7 +672,11 @@ fn wait(
             }
             // the fixed order: TERM (or a cap that fired on the last scan), then the root's exit,
             // then INT/HUP
-            if term || crate::caps::triggered() {
+            if term {
+                crate::status::set_trigger("term"); // the trigger from the moment it is taken
+                break None;
+            }
+            if crate::caps::triggered() {
                 break None;
             }
             if let Some(status) = exited {
@@ -864,6 +868,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 return crate::finish(status, Ok(()), &mut ints, sig);
             }
             let initial = tracker.borrow().known.clone();
+            crate::JOB_KILL.store(true, std::sync::atomic::Ordering::SeqCst);
             let result = kill_tree(
                 &crate::KillOpts::from_env().with_grace(a.grace).with_deadline(a.kill_deadline),
                 || {

@@ -105,7 +105,8 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         Ok(m) if m.ino() == meta.ino() && m.dev() == meta.dev() => {}
         _ => return Err(Skip::Live),
     }
-    let text = std::fs::read(path).map_err(|e| Skip::Unreadable(format!("{e}")))?;
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(&mut &file, &mut text).map_err(|e| Skip::Unreadable(format!("{e}")))?;
     let torn = !text.is_empty() && text.last() != Some(&b'\n');
     let body = &text[..text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1)];
     let mut lines = String::from_utf8_lossy(body).lines().filter_map(|l| json::parse(l).ok()).collect::<Vec<_>>().into_iter();
@@ -137,6 +138,39 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         }
     }
     Ok(j)
+}
+
+/// `open`, then the fences every reader keeps (PHASE2.md §3.1): the header's boot id and pid
+/// namespace are this ones, and the journal has no leave-strays mark.
+pub fn open_fenced(path: &Path) -> Result<Journal, Skip> {
+    let j = open(path)?;
+    if Some(j.boot.as_str()) != crate::journal::boot_id().as_deref() || j.pidns != crate::journal::pidns() {
+        return Err(Skip::Unsafe("another boot or pid namespace".into()));
+    }
+    if j.leave_strays {
+        return Err(Skip::Unsafe("its job left its strays on purpose (--leave-strays)".into()));
+    }
+    Ok(j)
+}
+
+/// A journal's header (job, owner, supervisor), read without its lock: never through a symlink,
+/// only this user's file, and only with this boot's and pid namespace's header.
+pub fn read_header(path: &Path) -> Option<(String, (i32, u64))> {
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path).ok()?;
+    if f.metadata().ok()?.uid() != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut &f, &mut text).ok()?;
+    let h = json::parse(text.lines().next()?).ok()?;
+    if h.get("kind").and_then(Json::str) != Some("header")
+        || h.get("boot").and_then(Json::str) != crate::journal::boot_id().as_deref()
+        || h.get("pidns").and_then(Json::str) != Some(crate::journal::pidns().as_str())
+    {
+        return None;
+    }
+    let s = h.get("sup")?;
+    Some((h.get("job").and_then(Json::str)?.to_string(), (num(s, "pid")? as i32, num(s, "id")? as u64)))
 }
 
 impl Journal {
@@ -204,16 +238,18 @@ pub enum Mode<'a> {
     Auto { live_named: &'a HashSet<(i32, u64)> },
 }
 
-/// Is `c` deferred by the auto-sweep: a live supervisor, in one's set (a ppid descendant, or on
-/// macOS responsible to it), or named by a live job's journal?
-fn deferred(c: (i32, u64), sups: &[i32], live_named: &HashSet<(i32, u64)>) -> bool {
-    if live_named.contains(&c) || sups.contains(&c.0) {
+/// Is `c` deferred by the auto-sweep: in `held` (a live supervisor, anything a live job's journal
+/// names, and everything this journal's lineage puts under one of those), or with a live parent
+/// chain that reaches one, or (macOS) responsible to a live supervisor?
+fn deferred(c: (i32, u64), sups: &[i32], held: &HashSet<(i32, u64)>) -> bool {
+    if held.contains(&c) || sups.contains(&c.0) {
         return true;
     }
+    let held_pids: HashSet<i32> = held.iter().map(|&(p, _)| p).collect();
     let mut p = parent(c.0);
     let mut n = 0;
     while let Some(q) = p.filter(|&q| q > 1 && n < 4096) {
-        if sups.contains(&q) {
+        if sups.contains(&q) || held_pids.contains(&q) {
             return true;
         }
         p = parent(q);
@@ -224,6 +260,28 @@ fn deferred(c: (i32, u64), sups: &[i32], live_named: &HashSet<(i32, u64)>) -> bo
         return true;
     }
     false
+}
+
+/// The auto-sweep's held set: the live supervisors among `set`, what live jobs' journals name,
+/// and every line of this journal whose lineage (parent pid and identity, or macOS `puniq`)
+/// leads to one of those.
+fn held_set(j: &Journal, set: &[(i32, u64)], live_named: &HashSet<(i32, u64)>) -> HashSet<(i32, u64)> {
+    let mut held: HashSet<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
+    held.extend(live_named.iter().copied());
+    loop {
+        let ids: HashSet<u64> = held.iter().map(|&(_, id)| id).collect();
+        let more: Vec<(i32, u64)> = j
+            .members
+            .iter()
+            .filter(|m| !held.contains(&(m.pid, m.id)))
+            .filter(|m| m.ppid.zip(m.pid_id).is_some_and(|pp| held.contains(&pp)) || m.puniq.is_some_and(|u| ids.contains(&u)))
+            .map(|m| (m.pid, m.id))
+            .collect();
+        if more.is_empty() {
+            return held;
+        }
+        held.extend(more);
+    }
 }
 
 /// Sweep one open journal in `mode`. `protected`: this process and its ancestors.
@@ -251,9 +309,10 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
             opts.deadline = std::time::Duration::from_millis(500);
         }
         let sups: Vec<i32> = set.iter().filter(|&&(p, _)| is_sheepdog(p)).map(|&(p, _)| p).collect();
-        let held: Vec<(i32, u64)> = set.iter().copied().filter(|&c| deferred(c, &sups, live_named)).collect();
+        let held_by = held_set(&j, &set, live_named);
+        let held: Vec<(i32, u64)> = set.iter().copied().filter(|&c| deferred(c, &sups, &held_by)).collect();
         let n = set.len() - held.len();
-        let mut scan = || proved.scan().into_iter().filter(|&c| !deferred(c, &sups, live_named)).collect::<Vec<_>>();
+        let mut scan = || proved.scan().into_iter().filter(|&c| !deferred(c, &sups, &held_by)).collect::<Vec<_>>();
         let initial: HashMap<i32, u64> = scan().into_iter().collect();
         let r = kill_tree(&opts, &mut scan, || {}, || None, signal, initial);
         return match r {
@@ -326,7 +385,7 @@ pub fn auto(owner: &str, quiet: bool) {
     let mut opened = Vec::new();
     let mut live_named: HashSet<(i32, u64)> = HashSet::new();
     for f in files {
-        match open(&f) {
+        match open_fenced(&f) {
             Ok(j) => opened.push(j),
             Err(Skip::Live) => live_named.extend(peek(&f)),
             Err(_) => {}
@@ -338,12 +397,17 @@ pub fn auto(owner: &str, quiet: bool) {
             crate::status::add_note("partial: the auto-sweep's 200 ms budget ran out; the rest waits for the next run");
             break;
         }
-        if Some(j.boot.as_str()) != crate::journal::boot_id().as_deref() || j.pidns != crate::journal::pidns() || j.owner != owner || j.leave_strays {
+        if j.owner != owner {
             continue;
         }
-        if let Outcome::Swept(n) = sweep_job_as(j, &protected, Mode::Auto { live_named: &live_named }) {
-            swept += 1;
-            killed += n;
+        let job = j.job.clone();
+        match sweep_job_as(j, &protected, Mode::Auto { live_named: &live_named }) {
+            Outcome::Swept(n) => {
+                swept += 1;
+                killed += n;
+            }
+            Outcome::Skipped(why) => crate::status::add_note(&format!("auto-sweep skipped job {job}: {why}")),
+            Outcome::Deadline(_) => {}
         }
     }
     if swept > 0 && killed > 0 && !quiet {
@@ -410,7 +474,7 @@ pub fn main(args: &[OsString]) -> i32 {
     files.sort();
     let (mut swept, mut killed, mut code) = (0usize, 0usize, 0);
     for f in files {
-        let j = match open(&f) {
+        let j = match open_fenced(&f) {
             Ok(j) => j,
             Err(Skip::Live) => continue,
             Err(Skip::Unsafe(why)) | Err(Skip::Unreadable(why)) => {
@@ -418,11 +482,7 @@ pub fn main(args: &[OsString]) -> i32 {
                 continue;
             }
         };
-        if Some(j.boot.as_str()) != crate::journal::boot_id().as_deref() || j.pidns != crate::journal::pidns() {
-            crate::note(format!("sweep skipped {}: another boot or pid namespace", f.display()));
-            continue;
-        }
-        if j.owner != owner || j.leave_strays {
+        if j.owner != owner {
             continue;
         }
         let job = j.job.clone();

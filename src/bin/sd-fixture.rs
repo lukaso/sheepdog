@@ -105,6 +105,11 @@
 //! - `worker R GO`: P4 (the journal in `kill <pid>`). Records itself (W) in R, forks C; C forks E
 //!   and waits for the file GO before it exits; E records itself in R and waits. W waits. Every
 //!   process is this fixture (60 s at most). R's lines: W, then E, then C.
+//! - `lineage-kill R GO1 GO2 RC`: P4 review (P1-B). W records itself and forks C; C forks E and
+//!   records itself once E has; C exits on GO1 (E is reparented, but the journal saw E under C
+//!   under W); on GO2, E runs `sheepdog kill <W>` (by name, the test PATH), waits for it, writes
+//!   its code to RC and waits. So the kill's own parent, E, is in W's journaled subtree although
+//!   W is no ancestor of it. R's lines: W, E, C.
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
 //!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
 //!   and exits. G escaped by reparenting only.
@@ -1192,6 +1197,45 @@ fn main() {
                 loop {
                     libc::pause();
                 }
+            }
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if mode == "lineage-kill" && a.len() == 6 {
+        let (r, go1, go2, rc) = (a[2].clone(), a[3].clone(), a[4].clone(), a[5].clone());
+        let wait_file = |p: &str| {
+            let mut n = 0;
+            while !std::path::Path::new(p).exists() && n < 6000 {
+                unsafe { libc::usleep(10_000) };
+                n += 1;
+            }
+        };
+        unsafe {
+            libc::alarm(60);
+            let w = libc::getpid();
+            record(&r, w);
+            if libc::fork() == 0 {
+                if libc::fork() == 0 {
+                    record(&r, libc::getpid()); // E
+                    wait_file(&go2);
+                    let st = std::process::Command::new("sheepdog").args(["kill", &w.to_string()]).status();
+                    let code = st.ok().and_then(|s| s.code()).map_or("none".to_string(), |c| c.to_string());
+                    let _ = std::fs::write(&rc, format!("{code}\n"));
+                    libc::alarm(60);
+                    loop {
+                        libc::pause();
+                    }
+                }
+                let mut n = 0;
+                while std::fs::read_to_string(&r).map_or(0, |t| t.lines().count()) < 2 && n < 2000 {
+                    libc::usleep(5_000);
+                    n += 1;
+                }
+                record(&r, libc::getpid()); // C
+                wait_file(&go1);
+                libc::_exit(0);
             }
             loop {
                 libc::pause();

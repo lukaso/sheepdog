@@ -53,6 +53,11 @@ fn journaled(s: &Path) -> Vec<i32> {
         .collect()
 }
 
+/// An identity no process has: added to a real one to forge a mismatch. Never `+ 1`: on macOS
+/// the identity is the uniqueid, which is system-wide and sequential, so `+ 1` is the NEXT process
+/// created anywhere (another cell's), and a journaled id is a `puniq` link to its children.
+const WRONG: u64 = 1 << 40;
+
 fn records(r: &Path) -> Vec<(i32, u64)> {
     std::fs::read_to_string(r)
         .unwrap_or_default()
@@ -262,7 +267,7 @@ fn a_wrong_identity_entry_is_never_signalled() {
     assert!(wait_until(10, || records(&r).len() == 1), "the child started");
     let parent = (c.id() as i32, sheepdog::ident::identity(c.id() as i32).unwrap());
     let child = records(&r)[0];
-    forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[(parent.0, parent.1 + 1)], false);
+    forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[(parent.0, parent.1 + WRONG)], false);
     let (code, _) = sweep(&s, &d, &[], &[]);
     let (pa, ca) = (common::alive(parent), common::alive(child));
     common::send(child.0, child.1, libc::SIGKILL);
@@ -418,15 +423,17 @@ fn sweep_ends_an_inner_supervisor_first() {
     // the inner run is a background child (so it inherits no PDEATHSIG on Linux) with a state of
     // its own; the outer root becomes a counting fixture
     let script = format!(
-        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" "{}" & exec "$FX" sigcount "{}""#,
+        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" "{}" & echo $! > "{}"; exec "$FX" sigcount "{}""#,
         inner_state.display(),
         r.display(),
         go.display(),
+        d.join("innerpid").display(),
         rr.display()
     );
     let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
-    // the inner supervisor is journaled by the outer (a few scans), then the outer is SIGKILLed
-    std::thread::sleep(Duration::from_millis(800));
+    // the inner supervisor is journaled by the outer (readiness), then the outer is SIGKILLed
+    let inner: i32 = { assert!(wait_until(15, || std::fs::read_to_string(d.join("innerpid")).is_ok_and(|t| !t.trim().is_empty()))); std::fs::read_to_string(d.join("innerpid")).unwrap().trim().parse().unwrap() };
+    assert!(wait_until(10, || journaled(&s).contains(&inner)), "the inner supervisor was journaled");
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
     std::fs::write(&go, b"").unwrap();
@@ -440,5 +447,75 @@ fn sweep_ends_an_inner_supervisor_first() {
     assert!(g_before, "control: the inner escapee was born and lives");
     assert_eq!(code, Some(0));
     assert!(!g_after, "the inner job's escapee survived the sweep");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-9: the header is a fence of its own: a journal in THIS folder whose header names
+/// another boot (or pid namespace) is not swept.
+#[test]
+fn a_header_from_another_boot_is_not_swept_from_this_folder() {
+    let d = scratch("header");
+    let (here, boot, pidns) = folder(&d);
+    for (name, hb, hp) in [("boot", "00000000-0000-0000-0000-000000000000".to_string(), pidns.clone()), ("pidns", boot.clone(), "12345.678".to_string())] {
+        let s = state(&d.join(name));
+        let (mut c, p, r) = decoy(&d, &format!("decoy-{name}"));
+        let j = forge(&s, &here, "j-0badf00d", "default", &hb, &hp, &[p], false);
+        let (code, _) = sweep(&s, &d, &[], &[]);
+        let (alive, n) = (common::alive(p), counted(&r));
+        end_decoy(&mut c);
+        assert_eq!(code, Some(0), "{name}");
+        assert!(alive && n == 0, "{name}: swept ({n})");
+        assert!(j.exists(), "{name}: deleted");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The second wall control (PHASE2.md §4a, round 2): a journaled pid now held by an untagged
+/// process under another identity is refused as `gone`: no signal, no `withheld` line.
+#[test]
+fn a_reused_journaled_pid_is_gone_not_withheld() {
+    let d = scratch("reusedwall");
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let r = d.join("untagged");
+    let mut c = Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&r).spawn().unwrap();
+    assert!(wait_until(10, || !records(&r).is_empty()));
+    let p = records(&r)[0];
+    forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[(p.0, p.1 + WRONG)], false);
+    let sink = d.join("sink");
+    let mut cmd = Command::new(sheepdog());
+    cmd.arg("sweep").env("SHEEPDOG_TEST_STATE", &s);
+    common::cell_sink(&mut cmd, &sink);
+    let code = cmd.status().unwrap().code();
+    let (alive, n) = (common::alive(p), counted(&r));
+    let lines = std::fs::read_to_string(&sink).unwrap_or_default();
+    end_decoy(&mut c);
+    assert_eq!(code, Some(0));
+    assert!(alive && n == 0, "{n}");
+    assert!(lines.is_empty(), "a reused pid is gone, not withheld: {lines:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-9 (other-user leg only): a journal the leg planted as root, owned by another user,
+/// naming this user's decoy with its correct identity, is not swept; the same journal owned by
+/// this user is (the control). The leg passes the directories and the decoy in SD_PLANTED.
+#[test]
+fn another_users_journal_is_never_swept() {
+    let Ok(planted) = std::env::var("SD_PLANTED") else {
+        eprintln!("skipped: only the other-user leg plants a journal as root");
+        return;
+    };
+    // "<state owned>|<state control>|<decoy pid>|<decoy id>|<decoy record>"
+    let v: Vec<&str> = planted.split('|').collect();
+    let (foreign, own, p, rec) = (PathBuf::from(v[0]), PathBuf::from(v[1]), (v[2].parse::<i32>().unwrap(), v[3].parse::<u64>().unwrap()), PathBuf::from(v[4]));
+    let d = scratch("planted");
+    let (code, _) = sweep(&foreign, &d, &[], &[]);
+    let (alive, n) = (common::alive(p), counted(&rec));
+    let (code2, _) = sweep(&own, &d, &[], &[]);
+    let gone = !common::alive(p);
+    assert_eq!(code, Some(0));
+    assert!(alive && n == 0, "another user's journal was swept ({n})");
+    assert_eq!(code2, Some(0));
+    assert!(gone, "control: the same journal owned by this user is swept");
     let _ = std::fs::remove_dir_all(&d);
 }

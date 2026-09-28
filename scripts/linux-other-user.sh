@@ -25,12 +25,32 @@ i=0; while [ "$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)" -lt 1 ] && [ $i -lt
 before=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
 echo "decoy control: $before signal(s) counted (a CONT from sd)"
 [ "$before" -eq 1 ] || { echo "the decoy does not count signals"; exit 3; }
+# P4 review: a journal planted as root (owned by root, 0644, in a folder `sd` owns) and the same
+# journal owned by `sd` (the control), both naming a decoy of `sd` with its correct identity. The
+# leg tag is shared (the runner adopts SHEEPDOG_LEG_TAG), so the decoy carries the test's tag.
+LEGTAG=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+boot=$(cat /proc/sys/kernel/random/boot_id)
+pidns=$(stat -L -c '%d.%i' /proc/self/ns/pid)
+mkdir -p /tmp/planted && chown sd:sd /tmp/planted
+/bin/setpriv --reuid=sd --regid=sd --clear-groups env SHEEPDOG_TEST_TAG="$LEGTAG" /tgt/debug/sd-fixture sigcount /tmp/planted/decoy &
+i=0; while [ ! -s /tmp/planted/decoy ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
+dpid=$(cut -d' ' -f1 /tmp/planted/decoy); did=$(cut -d' ' -f2 /tmp/planted/decoy)
+sduid=$(id -u sd)
+for which in foreign own; do
+  st=/tmp/planted/$which
+  mkdir -p "$st/jobs/$boot-$pidns" && : > "$st/.sheepdog-test"
+  chown -R sd:sd "$st" && chmod 700 "$st/jobs" "$st/jobs/$boot-$pidns"
+  j="$st/jobs/$boot-$pidns/j-0badf00d.journal"
+  printf '{"v":1,"kind":"header","job":"j-0badf00d","boot":"%s","pidns":"%s","owner":"default","uid":%s,"sup":{"pid":999999,"id":1},"argv":"sheepdog run"}\n{"v":1,"pid":%s,"id":%s,"ppid":1,"pid_id":null,"puniq":null,"cmd":"decoy"}\n' "$boot" "$pidns" "$sduid" "$dpid" "$did" > "$j"
+  if [ $which = foreign ]; then chown root:root "$j" && chmod 644 "$j"; else chown sd:sd "$j" && chmod 600 "$j"; fi
+done
+PLANTED="/tmp/planted/foreign|/tmp/planted/own|$dpid|$did|/tmp/planted/decoy"
 rc=0
 for b in $bins; do
   # a shell of `sd` stays as the test binary's parent (it does not exec it): a cell that walks
   # its own ancestors needs one of its own user above it
   # through the cargo runner, as cargo test would (PHASE2.md §0.4: the test environment)
-  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp /bin/sh -c '/w/scripts/test-env "$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
+  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp SD_PLANTED="$PLANTED" SHEEPDOG_LEG_TAG="$LEGTAG" /bin/sh -c '/w/scripts/test-env "$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
   echo "$(basename "$b"): $(grep -E '^test result' /tmp/b.log | cut -c1-80)"
   grep -E '^thread|FAILED' /tmp/b.log | cut -c1-200
 done
@@ -38,6 +58,8 @@ st=$(ps -o stat= -p "$decoy" | tr -d ' ')
 sigs=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
 echo "decoy: state=${st:-gone} signals=$sigs (1 is the control)"
 kill -KILL "$decoy" 2>/dev/null
+kill -KILL "$dpid" 2>/dev/null
+grep -q . /tmp/planted/decoy.sig 2>/dev/null && echo "planted decoy signals: $(wc -l < /tmp/planted/decoy.sig)"
 sleep 0.2
 left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
 echo "leftovers: $left"

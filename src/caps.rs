@@ -74,6 +74,9 @@ pub fn check(members: &[(i32, u64)]) -> bool {
             c.fired.push(n);
             if c.root_ended {
                 crate::status::add_note(&format!("{n} after the command ended"));
+            } else if !c.triggered && crate::status::has_trigger() {
+                // a TERM from outside came first: it stays the trigger, this is a note
+                crate::status::set_trigger(n);
             } else if !c.triggered {
                 c.triggered = true;
                 crate::status::set_trigger(n);

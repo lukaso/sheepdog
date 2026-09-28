@@ -221,8 +221,10 @@ pub fn main(args: &[OsString]) -> i32 {
         return 1;
     }
     let by_job = matches!(a.target, Target::Job(_));
-    let t = match &a.target {
-        Target::Pid(p) => *p,
+    // the identity the target must still have (PID:ID, or a job's supervisor from its journal):
+    // checked again below, so a pid reused in between is refused
+    let (t, expected) = match &a.target {
+        Target::Pid(p) => (*p, None),
         Target::PidId(p, id) => {
             // a PID:ID target is a fact from outside: a phase-2 source (the wall's token)
             let Some(_token) = crate::wall::gate() else { return 1 };
@@ -230,10 +232,10 @@ pub fn main(args: &[OsString]) -> i32 {
                 say!("sheepdog: refusing to kill pid {p}: it is not the process {p}:{id} any more. Nothing was signalled.");
                 return 1;
             }
-            *p
+            (*p, Some(*id))
         }
-        Target::Job(prefix) => match job_target(prefix) {
-            Ok(JobTarget::Live(sup)) => sup,
+        Target::Job(prefix) => match job_target(prefix, a.dry_run) {
+            Ok(JobTarget::Live(sup, id)) => (sup, Some(id)),
             Ok(JobTarget::Done(code)) => return code,
             Err(code) => return code,
         },
@@ -246,6 +248,10 @@ pub fn main(args: &[OsString]) -> i32 {
         say!("sheepdog: pid {t} is already gone; nothing to kill.");
         return 0;
     };
+    if expected.is_some_and(|e| e != tid) {
+        say!("sheepdog: refusing to kill pid {t}: it is another process now. Nothing was signalled.");
+        return 1;
+    }
     if os::procs().iter().find(|p| p.pid == t && p.id == tid).map(|p| p.uid) != Some(unsafe { libc::getuid() }) {
         say!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
         return 1;
@@ -265,7 +271,13 @@ pub fn main(args: &[OsString]) -> i32 {
     let mut proved = Proved { known: HashMap::from([(t, tid)]), ever: HashSet::new(), protected };
     // the journal as a membership fact (PHASE2.md §1 decision 12): a target that a dead job's
     // journal names brings its own subtree by the journal's lineage (never the rest of the job)
-    let _held = journal_subtree(t, tid, &mut proved);
+    let _held = match journal_subtree(t, tid, &mut proved) {
+        Ok(j) => j,
+        Err(p) => {
+            say!("sheepdog: refusing to kill pid {t}: its journaled subtree holds pid {p}, this sheepdog or one of its ancestors (the shell that runs it). Nothing was signalled.");
+            return 1;
+        }
+    };
     let set = proved.scan();
     let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
     if !is_sheepdog(t) {
@@ -334,12 +346,10 @@ fn journal_files() -> Vec<std::path::PathBuf> {
     v
 }
 
-/// The header's supervisor (pid, identity) of a journal, read without its lock.
+/// The header's supervisor (pid, identity) of a journal, read without its lock (fenced: never
+/// through a symlink, only this user's file, this boot's and pid namespace's header).
 fn journal_sup(path: &std::path::Path) -> Option<(i32, u64)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let h = sheepdog::json::parse(text.lines().next()?).ok()?;
-    let s = h.get("sup")?;
-    Some((s.get("pid")?.num()? as i32, s.get("id")?.num()? as u64))
+    crate::sweep::read_header(path).map(|(_, sup)| sup)
 }
 
 /// The job id of the live job whose supervisor is `sup` (by its journal's header).
@@ -349,8 +359,8 @@ fn live_job_of(sup: i32) -> Option<String> {
 }
 
 enum JobTarget {
-    /// the job's supervisor lives: kill it (the normal path, with its target checks)
-    Live(i32),
+    /// the job's supervisor lives (pid, identity): kill it (the normal path, with its checks)
+    Live(i32, u64),
     /// the job was handled here (a dead job swept): this exit code
     Done(i32),
 }
@@ -358,7 +368,9 @@ enum JobTarget {
 /// `kill j-XXXX` (PHASE2.md §1 decision 11): exactly one journal must match the prefix (none: 1,
 /// several: 2, with the candidates listed). A live supervisor (pid and identity as in the header)
 /// is the target; a dead one (gone, or its pid reused) means the job is swept.
-fn job_target(prefix: &str) -> Result<JobTarget, i32> {
+fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
+    // a job id resolves through a journal: a phase-2 source (the wall's token) before any fact
+    let Some(_token) = crate::wall::gate() else { return Err(1) };
     let found: Vec<_> = journal_files().into_iter().filter(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().starts_with(prefix))).collect();
     let path = match found.as_slice() {
         [] => {
@@ -372,17 +384,30 @@ fn job_target(prefix: &str) -> Result<JobTarget, i32> {
             return Err(2);
         }
     };
-    if let Some((p, id)) = journal_sup(&path).filter(|&(p, id)| p > 1 && same(p, id)) {
-        let _ = id;
-        return Ok(JobTarget::Live(p));
+    let Some(sup) = journal_sup(&path) else {
+        say!("sheepdog: job {prefix}'s journal is not this user's, not of this boot, or unreadable. Nothing was signalled.");
+        return Err(1);
+    };
+    if sup.0 > 1 && same(sup.0, sup.1) {
+        return Ok(JobTarget::Live(sup.0, sup.1));
     }
-    // a dead job: the sweep of this one journal (a phase-2 source)
-    let Some(_token) = crate::wall::gate() else { return Err(1) };
+    if dry_run {
+        // what a sweep of this dead job would start from: its journaled members still alive
+        if let Ok(j) = crate::sweep::open_fenced(&path) {
+            for m in j.members.iter().filter(|m| same(m.pid, m.id)) {
+                if writeln!(std::io::stdout(), "{}\t{}", m.pid, os::exe_name(m.pid).unwrap_or_else(|| "?".into())).is_err() {
+                    break;
+                }
+            }
+        }
+        return Ok(JobTarget::Done(0));
+    }
+    // a dead job: the sweep of this one journal
     let Ok(protected) = protected() else {
         say!("sheepdog: refusing to sweep {prefix}: sheepdog cannot follow its own chain of parent processes. Nothing was signalled.");
         return Err(1);
     };
-    match crate::sweep::open(&path) {
+    match crate::sweep::open_fenced(&path) {
         Ok(j) => match crate::sweep::sweep_job_as(j, &protected, crate::sweep::Mode::Explicit) {
             crate::sweep::Outcome::Swept(_) => Ok(JobTarget::Done(0)),
             crate::sweep::Outcome::Skipped(why) => {
@@ -402,14 +427,16 @@ fn job_target(prefix: &str) -> Result<JobTarget, i32> {
 /// the journal's lineage: lines whose parent (pid and identity) is in the subtree, and on macOS
 /// lines whose `puniq` is the identity of one in it. Returns the journal, open and locked, so no
 /// sweep takes it meanwhile.
-fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Option<crate::sweep::Journal> {
+/// Err(pid): the subtree holds `pid`, this process or one of its ancestors: the kill is refused
+/// whole, as the sweep skips such a job whole (never a signal to the caller).
+fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Result<Option<crate::sweep::Journal>, i32> {
     let files = journal_files();
     for f in files {
-        let Ok(j) = crate::sweep::open(&f) else { continue }; // a live job's is locked: not a dead job
+        let Ok(j) = crate::sweep::open_fenced(&f) else { continue }; // a live job's is locked
         if !j.members.iter().any(|m| m.pid == t && m.id == tid) {
             continue;
         }
-        let _token = crate::wall::gate()?; // the journal is a phase-2 fact
+        let Some(_token) = crate::wall::gate() else { return Ok(None) }; // a phase-2 fact
         let mut sub: HashSet<(i32, u64)> = HashSet::from([(t, tid)]);
         loop {
             let ids: HashSet<u64> = sub.iter().map(|&(_, id)| id).collect();
@@ -425,13 +452,16 @@ fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Option<crate::sweep
             }
             sub.extend(more);
         }
+        if let Some(&(p, _)) = proved.protected.iter().find(|pr| sub.contains(pr)) {
+            return Err(p);
+        }
         for (p, id) in sub {
             proved.ever.insert(id);
             if same(p, id) {
                 proved.known.insert(p, id);
             }
         }
-        return Some(j);
+        return Ok(Some(j));
     }
-    None
+    Ok(None)
 }

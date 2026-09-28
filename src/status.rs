@@ -106,6 +106,10 @@ pub fn set_trigger(t: &'static str) {
         }
     });
 }
+/// Whether a trigger is already recorded (a TERM from outside, taken before a cap fired).
+pub fn has_trigger() -> bool {
+    with(|s| s.trigger.is_some())
+}
 pub fn set_deadline(alive: &[i32]) {
     with(|s| {
         s.deadline_missed = true;

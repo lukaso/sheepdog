@@ -816,6 +816,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
         }
         if got.contains(&libc::SIGTERM) {
+            crate::status::set_trigger("term"); // the trigger from the moment it is taken
             break None;
         }
         if let Some(st) = exited {
@@ -870,6 +871,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
     let opts = crate::KillOpts::from_env().with_grace(a.grace).with_deadline(a.kill_deadline);
     let initial = tracker.known;
+    crate::JOB_KILL.store(true, std::sync::atomic::Ordering::SeqCst);
     let result = if is_subreaper {
         kill_tree(&opts, scan, reap, tree_empty, crate::signal, initial)
     } else {

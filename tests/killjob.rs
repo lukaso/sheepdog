@@ -287,7 +287,7 @@ fn kill_pid_id_checks_the_identity() {
     let mut c = Command::new(fixture()).arg("sigcount").arg(&r).spawn().unwrap();
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
-    let wrong = kill(&s, &[&format!("{}:{}", p.0, p.1 + 1)], &[]);
+    let wrong = kill(&s, &[&format!("{}:{}", p.0, p.1 + (1 << 40))], &[]);
     let (alive, n) = (common::alive(p), counted(&r));
     let right = kill(&s, &[&format!("{}:{}", p.0, p.1)], &[]);
     let gone = finished(&mut c, 10).is_some();
@@ -388,7 +388,7 @@ fn a_reused_supervisor_pid_is_a_dead_job() {
         field("pidns"),
         unsafe { libc::getuid() },
         p.0,
-        p.1 + 1
+        p.1 + (1 << 40)
     );
     let path = probe.parent().unwrap().join("j-5eed0001.journal");
     std::fs::write(&path, forged).unwrap();
@@ -403,3 +403,145 @@ fn a_reused_supervisor_pid_is_a_dead_job() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+
+/// Review P1-A: `kill --dry-run j-` of a dead job signals nothing and removes nothing (the
+/// escapee's counter stays 0, the journal stays); the control without `--dry-run` kills it.
+#[test]
+fn dry_run_of_a_dead_job_touches_nothing() {
+    let d = scratch("dryrun");
+    let s = state(&d);
+    let (mut c, g, r) = live_job(&d, &s, "a", |_| {});
+    let id = job_id(&s);
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    let gr = PathBuf::from(format!("{}.g", r.display()));
+    let code = kill(&s, &["--dry-run", &id], &[]);
+    let (alive, n, kept) = (common::alive(g), counted(&gr), !journals(&s).is_empty());
+    let control = kill(&s, &[&id], &[]);
+    let gone = !common::alive(g);
+    cleanup(&[&r]);
+    assert_eq!(code, Some(0));
+    assert!(alive && n == 0, "a dry run signalled the escapee ({n})");
+    assert!(kept, "a dry run removed the journal");
+    assert_eq!(control, Some(0));
+    assert!(gone, "control: without --dry-run the escapee dies");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P1-B: the journal's lineage in `kill <pid>` never reaches the kill's own caller. W's
+/// journaled subtree holds E (E was journaled under C under W, then reparented), and E runs
+/// `sheepdog kill W`: the kill is refused whole (exit 1), E and W get no signal.
+#[test]
+fn the_journal_lineage_never_reaches_the_caller() {
+    let d = scratch("caller");
+    let s = state(&d);
+    let (r, go1, go2, rc, rr) = (d.join("rec"), d.join("go1"), d.join("go2"), d.join("rc"), d.join("root"));
+    let script = format!(
+        r#""$FX" lineage-kill "{}" "{}" "{}" "{}" & exec "$FX" sigcount "{}""#,
+        r.display(),
+        go1.display(),
+        go2.display(),
+        rc.display(),
+        rr.display()
+    );
+    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    assert!(wait_until(15, || records(&r).len() >= 3), "W, E and C started");
+    let (w, e, cc) = (records(&r)[0], records(&r)[1], records(&r)[2]);
+    assert!(wait_until(10, || [w.0, e.0, cc.0].iter().all(|p| journaled(&s).contains(p))), "journaled while C lived");
+    std::fs::write(&go1, b"").unwrap();
+    assert!(wait_until(10, || !common::alive(cc)), "C exited (E reparented)");
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    std::fs::write(&go2, b"").unwrap();
+    let got = wait_until(20, || std::fs::read_to_string(&rc).is_ok_and(|t| !t.trim().is_empty()));
+    let code = std::fs::read_to_string(&rc).unwrap_or_default().trim().to_string();
+    let (e_alive, e_stopped, w_alive) = (common::alive(e), common::stopped(e), common::alive(w));
+    for p in [w, e].into_iter().chain(records(&rr)) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert!(got, "the kill did not finish (did it stop its own caller?)");
+    assert_eq!(code, "1", "refused");
+    assert!(e_alive && !e_stopped, "the kill signalled its own caller");
+    assert!(w_alive, "a refused kill signalled the target");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-1: `kill j-` of a live job is a phase-2 source (its supervisor comes from a
+/// journal): a forged header naming an untagged process the test built, with its correct
+/// identity, gets it withheld (counter 0, a `withheld` line in the cell's own sink).
+#[test]
+fn kill_job_turns_the_latch_on() {
+    let d = scratch("joblatch");
+    let s = state(&d);
+    let (mut c, _g, r) = live_job(&d, &s, "probe", |_| {});
+    let probe = journals(&s)[0].clone();
+    let header = std::fs::read_to_string(&probe).unwrap().lines().next().unwrap().to_string();
+    common::send_child(&mut c, libc::SIGTERM);
+    let _ = finished(&mut c, 15);
+    cleanup(&[&r]);
+    let ru = d.join("untagged");
+    let mut un = Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&ru).spawn().unwrap();
+    assert!(wait_until(10, || !records(&ru).is_empty()));
+    let p = records(&ru)[0];
+    let h = json::parse(&header).unwrap();
+    let field = |k: &str| h.get(k).and_then(Json::str).unwrap().to_string();
+    let forged = format!(
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":{}}},\"argv\":\"sheepdog run\"}}\n",
+        field("boot"),
+        field("pidns"),
+        unsafe { libc::getuid() },
+        p.0,
+        p.1
+    );
+    let path = probe.parent().unwrap().join("j-5eed0002.journal");
+    std::fs::write(&path, forged).unwrap();
+    let sink = d.join("sink");
+    let mut cmd = Command::new(sheepdog());
+    cmd.args(["kill", "j-5eed0002"]).env("SHEEPDOG_TEST_STATE", &s).env("SHEEPDOG_TEST_DEADLINE_MS", "500");
+    common::cell_sink(&mut cmd, &sink);
+    let _ = cmd.status();
+    let (alive, n) = (common::alive(p), counted(&ru));
+    let lines = std::fs::read_to_string(&sink).unwrap_or_default();
+    common::send_child(&mut un, libc::SIGKILL);
+    let _ = un.wait();
+    assert!(alive && n == 0, "the untagged 'supervisor' got {n} signal(s)");
+    assert!(lines.lines().any(|l| l.starts_with("withheld ") && l.split_whitespace().nth(1) == Some(&p.0.to_string())), "{lines:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review P2-8: `kill j-` of a dead job keeps the sweep's fences: a journal in this folder whose
+/// header names another boot is refused (exit 1), its member gets no signal.
+#[test]
+fn kill_job_keeps_the_sweep_fences() {
+    let d = scratch("jobfence");
+    let s = state(&d);
+    let (mut c, _g, r) = live_job(&d, &s, "probe", |_| {});
+    let probe = journals(&s)[0].clone();
+    let header = std::fs::read_to_string(&probe).unwrap().lines().next().unwrap().to_string();
+    common::send_child(&mut c, libc::SIGTERM);
+    let _ = finished(&mut c, 15);
+    cleanup(&[&r]);
+    let rd = d.join("decoy");
+    let mut decoy = Command::new(fixture()).arg("sigcount").arg(&rd).spawn().unwrap();
+    assert!(wait_until(10, || !records(&rd).is_empty()));
+    let p = records(&rd)[0];
+    let h = json::parse(&header).unwrap();
+    let pidns = h.get("pidns").and_then(Json::str).unwrap().to_string();
+    let forged = format!(
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0003\",\"boot\":\"00000000-0000-0000-0000-000000000000\",\"pidns\":\"{pidns}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":999999,\"id\":1}},\"argv\":\"sheepdog run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n",
+        unsafe { libc::getuid() },
+        p.0,
+        p.1
+    );
+    let path = probe.parent().unwrap().join("j-5eed0003.journal");
+    std::fs::write(&path, forged).unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let code = kill(&s, &["j-5eed0003"], &[]);
+    let (alive, n) = (common::alive(p), counted(&rd));
+    common::send_child(&mut decoy, libc::SIGKILL);
+    let _ = decoy.wait();
+    assert_eq!(code, Some(1), "refused");
+    assert!(alive && n == 0, "another boot's journal was swept ({n})");
+    assert!(path.exists(), "the journal was deleted");
+    let _ = std::fs::remove_dir_all(&d);
+}

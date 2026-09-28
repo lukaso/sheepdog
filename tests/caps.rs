@@ -205,3 +205,27 @@ fn kill_deadline_shortens_the_deadline() {
     assert!(r.took < Duration::from_secs(5), "took {:?} with a 500 ms deadline", r.took);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Review P2-4: a TERM from outside is the trigger from the moment it is taken: a timeout that
+/// then expires during the kill's TERM grace is a note, and sheepdog dies of the TERM.
+#[test]
+fn a_term_before_the_timeout_stays_the_trigger() {
+    let d = scratch("termfirst");
+    let r1 = d.join("rec");
+    let start = Instant::now();
+    let r = run(
+        &d,
+        "tf",
+        &format!(r#"--timeout 1s --grace 3s -- "$FX" sigcount "{}""#, r1.display()),
+        &[],
+        Duration::from_secs(30),
+        || start.elapsed() > Duration::from_millis(500),
+    );
+    for p in records(&r1) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert_eq!(field(&r, "trigger").and_then(Json::str), Some("term"));
+    assert!(notes(&r).iter().any(|n| n.starts_with("timeout")), "notes {:?}", notes(&r));
+    assert_eq!(r.code, None, "sheepdog dies of the TERM");
+    let _ = std::fs::remove_dir_all(&d);
+}

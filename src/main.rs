@@ -106,8 +106,9 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
         return None;
     }
     let end = args.iter().position(|a| a.as_bytes() == b"--").unwrap_or(args.len());
-    let i = args[..end].iter().position(|a| a.as_bytes() == b"--status-fd")?;
-    args.get(i + 1).filter(|_| i + 1 < end)?.to_str()?.parse().ok().filter(|&n: &i32| n >= 0)
+    // the last one counts, as in `parse`; 0-2 are the command's own streams, never the status fd
+    let i = args[..end].iter().rposition(|a| a.as_bytes() == b"--status-fd")?;
+    args.get(i + 1).filter(|_| i + 1 < end)?.to_str()?.parse().ok().filter(|&n: &i32| n >= 3)
 }
 
 fn usage() -> i32 {
@@ -158,7 +159,8 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
                 i += 2;
             }
             b"--status-fd" if i + 1 < sep => {
-                let fd: i32 = args[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n| n >= 0).ok_or_else(usage)?;
+                // 0-2 would be the command's own streams (the status fd is set close-on-exec)
+                let fd: i32 = args[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n| n >= 3).ok_or_else(usage)?;
                 status_fd = Some(fd);
                 i += 2;
             }
@@ -563,6 +565,10 @@ pub fn kill_failed(e: KillError) -> i32 {
     }
 }
 
+/// Set by `run` right before the kill of its own job: that `kill_tree` call (and only it) feeds
+/// the caps and the run's status record.
+pub static JOB_KILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The session, parent and command of a member, read at its first signal, for `killed[]`.
 fn member_info(pid: i32) -> (Option<i32>, Option<i32>, String) {
     let sid = unsafe { libc::getsid(pid) };
@@ -621,16 +627,21 @@ pub fn kill_tree(
         captured.borrow_mut().entry((p, id)).or_insert_with(|| member_info(p));
         send(p, id, sig)
     };
-    // the caps are evaluated on every scan while the job is being ended, too (a later one is a note)
+    // the run's own kill (not the auto-sweep's, not `kill`'s or `sweep`'s): the caps are
+    // evaluated on every scan while the job is being ended (a later one is a note), and what it
+    // kills goes into the run's `killed[]`
+    let own = JOB_KILL.swap(false, std::sync::atomic::Ordering::SeqCst);
     let mut members = members;
     let members = move || {
         let f = members();
-        let _ = caps::check(&f);
+        if own {
+            let _ = caps::check(&f);
+        }
         f
     };
     let result = kill_tree_inner(opts, members, reap, tree_empty, send, &known);
     for (&(p, id), (sid, ppid, cmd)) in captured.borrow().iter() {
-        if id != 0 && !same(p, id) {
+        if own && id != 0 && !same(p, id) {
             status::add_killed(status::Killed { pid: p, cmd: cmd.clone(), escaped: escaped_how(p, *sid, *ppid) });
         }
     }
