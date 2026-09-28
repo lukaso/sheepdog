@@ -154,14 +154,16 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
         return;
     }
     if !quiet {
-        let why = match root_status {
-            Some(st) if libc::WIFSIGNALED(st) => format!("the command died of signal {}", libc::WTERMSIG(st)),
-            Some(st) => format!("the command exited {}", libc::WEXITSTATUS(st)),
+        // (the cause, for the trace; the words, for the reader)
+        let (cause, why) = match root_status {
+            Some(st) if libc::WIFSIGNALED(st) => ("signaled".to_string(), format!("the command died of signal {}", libc::WTERMSIG(st))),
+            Some(st) => ("exited".to_string(), format!("the command exited {}", libc::WEXITSTATUS(st))),
             None => match crate::caps::by() {
-                Some(flag) => format!("the {flag} limit fired"),
-                None => "TERM from outside".to_string(),
+                Some(flag) => (flag.to_string(), format!("the {flag} limit fired")),
+                None => ("term".to_string(), "TERM from outside".to_string()),
             },
         };
+        crate::note(format!("report-cause {cause}"));
         let escaped: Vec<_> = killed.iter().filter(|k| k.2.is_some()).collect();
         crate::say!(
             "sheepdog: {why}: ended the job, {} process{} killed, {} of them had escaped{}",
