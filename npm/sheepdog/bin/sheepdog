@@ -1,0 +1,30 @@
+#!/bin/sh
+# The npm entry for sheepdog (PHASE3.md D9). It finds this platform's package and execs its
+# executable, so the process you hold is sheepdog itself (same pid) and it starts with your signal
+# dispositions, signal mask and environment. It is sh, not node: node resets every signal at start
+# and ignores SIGPIPE, and the job would inherit that.
+set -u
+me=$0 n=0
+while [ -L "$me" ]; do
+  n=$((n + 1)); [ $n -le 40 ] || break
+  l=$(readlink "$me") || break
+  case $l in /*) me=$l ;; *) me=$(dirname "$me")/$l ;; esac
+done
+pkg=$(cd -P "$(dirname "$me")/.." 2>/dev/null && pwd -P) || { echo "sheepdog: cannot find its npm package" >&2; exit 1; }
+case $(uname -s) in
+  Darwin) plat=darwin-universal exe=Sheepdog.app/Contents/MacOS/sheepdog ;;
+  Linux)
+    case $(uname -m) in
+      aarch64|arm64) plat=linux-arm64 ;;
+      x86_64|amd64) plat=linux-x64 ;;
+      *) echo "sheepdog: no npm package for Linux $(uname -m)" >&2; exit 1 ;;
+    esac
+    exe=bin/sheepdog ;;
+  *) echo "sheepdog: no npm package for $(uname -s)" >&2; exit 1 ;;
+esac
+# nested under this package, or hoisted beside it in the @lukaso scope
+for dir in "$pkg/node_modules/@lukaso/sheepdog-$plat" "$pkg/../sheepdog-$plat"; do
+  if [ -x "$dir/$exe" ]; then exec "$dir/$exe" "$@"; fi
+done
+echo "sheepdog: the package @lukaso/sheepdog-$plat is not installed; reinstall @lukaso/sheepdog without --no-optional" >&2
+exit 1
