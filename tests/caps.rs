@@ -44,14 +44,17 @@ struct Run {
     code: Option<i32>,
     status: Option<Json>,
     took: Duration,
+    /// sheepdog's stderr (the kill report)
+    err: String,
 }
 
 /// `sheepdog run --status-fd 3 ARGS` (through a shell), bounded by `limit`; `during` runs while
 /// it does and may end it early (returning true stops the wait with a TERM to sheepdog).
 fn run(d: &Path, name: &str, args: &str, env: &[(&str, &str)], limit: Duration, mut during: impl FnMut() -> bool) -> Run {
     let out = d.join(format!("{name}.status"));
+    let errf = d.join(format!("{name}.err"));
     let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {args} 3>"{}""#, out.display())]).env("SD", sheepdog()).env("FX", fixture());
+    cmd.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {args} 3>"{}" 2>"{}""#, out.display(), errf.display())]).env("SD", sheepdog()).env("FX", fixture());
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -75,7 +78,7 @@ fn run(d: &Path, name: &str, args: &str, env: &[(&str, &str)], limit: Duration, 
     };
     let took = start.elapsed();
     let text = std::fs::read_to_string(&out).unwrap_or_default();
-    Run { code, status: text.lines().next().and_then(|l| json::parse(l).ok()), took }
+    Run { code, status: text.lines().next().and_then(|l| json::parse(l).ok()), took, err: std::fs::read_to_string(&errf).unwrap_or_default() }
 }
 
 fn field<'a>(r: &'a Run, k: &str) -> Option<&'a Json> {
@@ -101,6 +104,9 @@ fn cell_13_max_mem_ends_a_growing_job() {
     assert!(reached < 1000, "it reached {reached} MB under a 500 MB cap");
     assert!(progress(&p2) >= 1200, "control: without the cap it reached {} MB", progress(&p2));
     assert_eq!(field(&control, "trigger").and_then(Json::str), Some("term"), "control ended by the test's TERM");
+    // the kill report names what ended the job, as the status line does
+    assert!(capped.err.contains("--max-mem") && !capped.err.contains("TERM"), "report: {}", capped.err);
+    assert!(control.err.contains("TERM from outside"), "control report: {}", control.err);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -120,6 +126,7 @@ fn max_procs_ends_a_forking_job() {
     assert_eq!(field(&capped, "trigger").and_then(Json::str), Some("cap"));
     assert!(n < 20, "{n} forked under --max-procs 8");
     assert_eq!(records(&r2).len(), 20, "control: all 20 without the cap");
+    assert!(capped.err.contains("--max-procs") && !capped.err.contains("TERM"), "report: {}", capped.err);
     let _ = control;
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -134,6 +141,7 @@ fn timeout_ends_the_job() {
     let at = field(&r, "trigger_at").and_then(Json::num).unwrap_or(0.0);
     assert!(at >= 1000.0, "trigger_at {at} ms before the 1 s timeout");
     assert!(r.took < Duration::from_secs(10), "took {:?}", r.took);
+    assert!(r.err.contains("--timeout") && !r.err.contains("TERM"), "report: {}", r.err);
     let _ = std::fs::remove_dir_all(&d);
 }
 

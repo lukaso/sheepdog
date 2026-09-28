@@ -157,7 +157,10 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
         let why = match root_status {
             Some(st) if libc::WIFSIGNALED(st) => format!("the command died of signal {}", libc::WTERMSIG(st)),
             Some(st) => format!("the command exited {}", libc::WEXITSTATUS(st)),
-            None => "TERM from outside".to_string(),
+            None => match crate::caps::by() {
+                Some(flag) => format!("the {flag} limit fired"),
+                None => "TERM from outside".to_string(),
+            },
         };
         let escaped: Vec<_> = killed.iter().filter(|k| k.2.is_some()).collect();
         crate::say!(

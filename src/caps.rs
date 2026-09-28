@@ -18,7 +18,8 @@ struct Caps {
     stopped_for: Duration,
     root_ended: bool,
     fired: Vec<&'static str>,
-    triggered: bool,
+    /// the flag that ended the job (`--timeout`, `--max-mem`, `--max-procs`), once one has
+    by: Option<&'static str>,
 }
 
 static C: Mutex<Option<Caps>> = Mutex::new(None);
@@ -30,7 +31,7 @@ fn with<R>(f: impl FnOnce(&mut Caps) -> R) -> Option<R> {
 /// Set the caps for this run (none at all: nothing is ever evaluated).
 pub fn set(timeout: Option<Duration>, max_mem: Option<u64>, max_procs: Option<usize>) {
     if timeout.is_some() || max_mem.is_some() || max_procs.is_some() {
-        *C.lock().unwrap_or_else(|e| e.into_inner()) = Some(Caps { timeout, max_mem, max_procs, start: Instant::now(), stopped_for: Duration::ZERO, root_ended: false, fired: Vec::new(), triggered: false });
+        *C.lock().unwrap_or_else(|e| e.into_inner()) = Some(Caps { timeout, max_mem, max_procs, start: Instant::now(), stopped_for: Duration::ZERO, root_ended: false, fired: Vec::new(), by: None });
     }
 }
 
@@ -46,39 +47,45 @@ pub fn root_ended() {
 
 /// Whether a cap or the timeout ended the job (so the exit code is 124).
 pub fn triggered() -> bool {
-    with(|c| c.triggered).unwrap_or(false)
+    by().is_some()
+}
+
+/// The flag whose limit ended the job, if one did (for the kill report).
+pub fn by() -> Option<&'static str> {
+    with(|c| c.by).flatten()
 }
 
 /// Evaluate the caps against `members`; true if one fired now and ends the job.
 pub fn check(members: &[(i32, u64)]) -> bool {
     with(|c| {
         let running = c.start.elapsed().saturating_sub(c.stopped_for);
-        let mut now: Vec<&'static str> = Vec::new();
+        // (the status line's trigger, the flag)
+        let mut now: Vec<(&'static str, &'static str)> = Vec::new();
         if c.timeout.is_some_and(|t| running >= t) {
-            now.push("timeout");
+            now.push(("timeout", "--timeout"));
         }
         if let Some(max) = c.max_mem {
             let sum: u64 = members.iter().map(|&(p, _)| mem_of(p)).sum();
             if sum > max {
-                now.push("cap");
+                now.push(("cap", "--max-mem"));
             }
         }
-        if c.max_procs.is_some_and(|m| members.len() > m) && !now.contains(&"cap") {
-            now.push("cap");
+        if c.max_procs.is_some_and(|m| members.len() > m) && !now.iter().any(|&(n, _)| n == "cap") {
+            now.push(("cap", "--max-procs"));
         }
         let mut ends = false;
-        for n in now {
+        for (n, flag) in now {
             if c.fired.contains(&n) {
                 continue;
             }
             c.fired.push(n);
             if c.root_ended {
                 crate::status::add_note(&format!("{n} after the command ended"));
-            } else if !c.triggered && crate::status::has_trigger() {
+            } else if c.by.is_none() && crate::status::has_trigger() {
                 // a TERM from outside came first: it stays the trigger, this is a note
                 crate::status::set_trigger(n);
-            } else if !c.triggered {
-                c.triggered = true;
+            } else if c.by.is_none() {
+                c.by = Some(flag);
                 crate::status::set_trigger(n);
                 ends = true;
             } else {
