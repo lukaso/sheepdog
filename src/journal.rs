@@ -156,7 +156,7 @@ fn member_cmd(pid: i32) -> Vec<u8> {
     #[cfg(target_os = "macos")]
     let argv = crate::macos::cmdline(pid);
     #[cfg(target_os = "linux")]
-    let argv = crate::linux::cmdline(pid);
+    let argv = crate::linux::report_cmd(pid);
     argv.join(" ").into_bytes()
 }
 

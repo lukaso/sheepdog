@@ -144,15 +144,20 @@ fn cell_26_the_status_line_tells_the_125s_apart() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Cell 26: the status fd is set CLOEXEC, so the root does not hold fd 3 (the fd sheepdog
-/// writes its status to).
+/// Cell 26: the status fd is set CLOEXEC, so the root does not hold it. The fd is 57, far above
+/// the low fds a translator keeps open (Rosetta holds 3 and up on the emulated leg).
 #[test]
 fn the_root_does_not_hold_the_status_fd() {
     let d = scratch("cloexec");
-    let flag = d.join("open");
-    let r = run(&d, "fd", &format!(r#"-- /bin/sh -c 'if [ -e /dev/fd/3 ]; then touch "{}"; fi'"#, flag.display()), &[], |_| {});
-    assert_eq!(r.code, Some(0));
-    assert_eq!(r.lines, 1, "control: sheepdog wrote its line to fd 3");
+    let (flag, out) = (d.join("open"), d.join("status57"));
+    let code = Command::new("/bin/sh")
+        .args(["-c", &format!(r#"exec "$SD" run --status-fd 57 -- /bin/sh -c 'if [ -e /dev/fd/57 ]; then touch "{}"; fi' 57>"{}""#, flag.display(), out.display())])
+        .env("SD", sheepdog())
+        .status()
+        .unwrap()
+        .code();
+    assert_eq!(code, Some(0));
+    assert_eq!(std::fs::read_to_string(&out).unwrap_or_default().lines().count(), 1, "control: sheepdog wrote its line to fd 57");
     assert!(!flag.exists(), "the root holds the status fd");
     let _ = std::fs::remove_dir_all(&d);
 }

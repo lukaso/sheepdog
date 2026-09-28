@@ -523,7 +523,7 @@ fn member_info(pid: i32) -> (Option<i32>, Option<i32>, String) {
     #[cfg(target_os = "macos")]
     let (ppid, argv) = (macos::parent(pid), macos::cmdline(pid));
     #[cfg(target_os = "linux")]
-    let (ppid, argv) = (linux::parent(pid), linux::cmdline(pid));
+    let (ppid, argv) = (linux::parent(pid), linux::report_cmd(pid));
     ((sid > 0).then_some(sid), ppid, journal::text(argv.join(" ").as_bytes()))
 }
 

@@ -103,6 +103,32 @@ pub fn cmdline(pid: i32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether this process runs under a translator (Rosetta or qemu: the emulated amd64 leg).
+fn translated() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::fs::read_link("/proc/self/exe")
+            .ok()
+            .and_then(|l| l.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .is_some_and(|n| n == "rosetta" || n.starts_with("qemu-"))
+    })
+}
+
+/// The command of `pid` for the journal and the kill report. Under a translator it is only the
+/// short name from /proc/<pid>/stat: Rosetta intercepts a read of another process's cmdline and
+/// aborts the READER (SIGTRAP, "Could not open /proc/N/auxv") when that process exits meanwhile
+/// (measured on the amd64 leg, 2026-09-28); /proc/<pid>/stat is not intercepted. Stated limit.
+pub fn report_cmd(pid: i32) -> Vec<String> {
+    if !translated() {
+        return cmdline(pid);
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| Some(s[s.find('(')? + 1..s.rfind(')')?].to_string()))
+        .into_iter()
+        .collect()
+}
+
 /// Linux has no responsible process.
 pub fn responsible_pid(_pid: i32) -> Option<i32> {
     None
