@@ -288,6 +288,8 @@ The responsibility calls are private SPI. They are exported, and Apple's own too
 
 ### 5.1 Release security (public repo, signed releases)
 
+**Amended 2026-09-28 (operator: "copy chiefofstaff"; PHASE3.md D1):** signing and notarization run on the operator's Mac through `scripts/release.sh`, not in GitHub CI. The notary credential is a notarytool keychain profile; no signing or notary secret exists in GitHub at all, so forks have nothing to reach. npm and the tap are published by the operator's own credentials. The rules below about CI secrets and the `release` environment are superseded; the fork, `pull_request_target`, action-pinning and `.dev` bundle-ID rules stand. Given up: "the build never sees a secret" (PHASE3.md D1 states the limit).
+
 - **Signing and notarization run only** on a `v*` tag pushed to `lukaso/sheepdog` (`if: github.repository == 'lukaso/sheepdog'`), in a protected GitHub **environment** `release` that requires the operator's approval.
 - **The Developer ID certificate, its password and the notarization credentials** are environment secrets of `release` only, never repository-wide secrets.
 - **No workflow uses `pull_request_target` or `workflow_run` on fork events.** Fork PRs run the test matrix only; GitHub gives them no secrets.
