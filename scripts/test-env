@@ -17,5 +17,7 @@ if [ -n "${SD_TEST_HARDENED:-}" ]; then
     || { echo "sd-test-env: cannot sign $s with the hardened runtime" >&2; exit 125; }
   flags=$(/usr/bin/codesign -d -v "$s" 2>&1 | sed -n 's/.*flags=[^(]*(\([^)]*\)).*/\1/p')
   echo "$(basename "$1") $flags" >> "$SD_TEST_HARDENED"
+  # not passed on: a cell that runs this runner as its subject must see a plain runner
+  unset SD_TEST_HARDENED
 fi
 exec "$f" test-env "$@"
