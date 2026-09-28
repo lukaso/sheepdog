@@ -228,7 +228,7 @@ impl Listener {
 
     /// Accept what is waiting (up to the cap: the rest stays in the listen backlog), read what has
     /// come, answer every complete record and drop every connection past its deadline; again while
-    /// that made room, up to MAX_ACCEPTS accepts. Never blocks. Returns the new fds to watch: only
+    /// that made room, up to the listener's accept bound (MAX_ACCEPTS). Never blocks. Returns the new fds to watch: only
     /// connections still pending.
     pub fn service(&mut self, admit: &mut Admit) -> Vec<RawFd> {
         let mut new = Vec::new();
@@ -363,6 +363,9 @@ mod tests {
     #[test]
     fn service_stops_at_its_accept_bound() {
         let mut l = Listener::open().expect("a listener");
+        // a listener is made with the production bound, which is finite and no larger than the
+        // listen backlog (64): the cell below then checks the bound's effect with a smaller one
+        assert!(l.max_accepts == MAX_ACCEPTS && MAX_ACCEPTS <= 64, "bound {}", l.max_accepts);
         l.max_accepts = 8;
         for _ in 0..20 {
             drop(std::os::unix::net::UnixStream::connect(&l.path).unwrap());
