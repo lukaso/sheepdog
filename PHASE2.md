@@ -123,6 +123,10 @@ Each step: failing cells first, then code, then its mutants (each seen red for i
 - **D3 (P1a): the root is not in the header.** The header is published before the root exists; the root's pid and identity are its own line, marked `"root":true`, written before the root runs.
 - **Stated (P1a, macOS):** a caller that blocks SIGCONT gets a root started unsuspended (phase 1's rule, PLAN.md §3.2), so that root is journaled just after it starts, not before.
 
+- **D4 (P0+P1 review round 2): two senders skip the tag check, by design.** (1) The rollback CONT (PLAN.md §3.3 step 4): it undoes this supervisor's own STOP, which landed on a process that is not the member (a pid reused after every check), so holding it back would leave that process stopped; it stays identity-checked. When its target lacks the tag, the STOP before it breached the wall, so a `rollback-untagged` line goes to the sink and the test run goes red. (2) The debug seam SHEEPDOG_TEST_WRONG_FREEZE, for its injected entry only (identity 0): it simulates that race.
+- **Amended (round 2): what the stress cell proves.** It detects false withheld lines in real kills. The rule "an exiting process is gone" is proved by envtag's unit cell on `verdict()`; a member that is exiting at its first signal is almost always already gone by identity, so no cell reaches the wiring of `exiting` in `verdict_for` deterministically. Stated.
+- **Amended (round 2): the door refuses a pid whose identity changed as `gone`** (no signal, no sink line). The P4 wall control "a journaled pid reused by an untagged built process" therefore expects no signal (the decoy's own counter 0) and a `gone` line, not `withheld`.
+
 ## 5. Review findings and where they went
 
 **Review 1.** P1-1 → §0.1, §0.4. P1-2 → §3.3, P4. P1-3 → §0.2, T, `--cmd` markers. P1-4 → decisions 6, 11. P2-1 → decision 2. P2-2 → decision 1. P2-3 → decision 6. P2-4 → decisions 6, 7. P2-5 → §3.4. P2-6 → §3.5, §3.7. P2-7 → decision 7. P2-8 → P4, P7, decision 12. P2-9 → P4 (live decoys, correct identities). P2-10 → P3. P2-11 → decision 4; PLAN's examples print `j-7f3a`. P2-12 → P8, decision 13. P3s → decisions 3, 6, 8, 9; P6; P8; P7.

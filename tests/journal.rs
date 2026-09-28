@@ -378,13 +378,13 @@ fn a_debug_run_never_writes_the_operators_state() {
         }
         let code = finish(cmd.spawn().unwrap());
         assert_eq!(code, Some(0));
-        // sheepdog's state only: another program may use the fake HOME (Rosetta keeps a cache in
-        // $HOME/.cache/rosetta on the emulated leg)
+        // everything but the sentinel and the one known outside writer: Rosetta keeps its cache in
+        // $HOME/.cache/rosetta on the emulated leg
         let written: Vec<_> = walk(&real)
             .into_iter()
             .filter(|p| {
-                let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                n == "jobs" || n.ends_with(".journal") || n.starts_with(".tmp-j-")
+                let r = p.strip_prefix(&real).unwrap().to_string_lossy().into_owned();
+                r != ".sheepdog-test" && r != ".cache" && r != ".cache/rosetta" && !r.starts_with(".cache/rosetta/")
             })
             .collect();
         assert!(written.is_empty(), "canary {canary}: {written:?}");
@@ -517,7 +517,7 @@ fn a_running_job_s_journal_stays_locked() {
             common::send(p.0, p.1, libc::SIGKILL);
         }
         assert!(started, "fail {fail}");
-        assert!(fail || published == 1, "control: the journal is published");
+        assert_eq!(published, 1, "fail {fail}: the journal is published (its header is written before any line)");
         assert!(unlocked.is_empty(), "fail {fail}: a running job's journal is unlocked: {unlocked:?}");
         assert_eq!(code, Some(0), "fail {fail}");
         assert!(journals(&s).is_empty(), "fail {fail}: a journal is left after a clean end");
@@ -576,5 +576,37 @@ fn the_phase_one_opt_out_writes_no_journal() {
     assert_eq!(code, Some(0));
     assert!(!s.join("jobs").exists(), "a journal was written under the opt-out");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A journal that could not keep its lines under `--leave-strays` is not left behind without its
+/// leave-strays mark (a sweep would take it for a dead job and kill the strays the operator chose
+/// to keep). With a failed write, no journal remains; the control, the same run without the
+/// failure, keeps one that carries the mark.
+#[test]
+fn a_leave_strays_journal_is_never_kept_without_its_mark() {
+    for fail in [false, true] {
+        let d = scratch(if fail { "strays-fail" } else { "strays-ok" });
+        let s = state(&d);
+        let m = marker();
+        let mut cmd = Command::new(sheepdog());
+        cmd.args(["run", "--leave-strays", "--", fixture(), "escape", &m]).arg(d.join("rec")).env("SHEEPDOG_TEST_STATE", &s);
+        if fail {
+            cmd.env("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL", "1");
+        }
+        let code = finish(cmd.spawn().unwrap());
+        for p in records(&d.join("rec"), 1) {
+            common::send(p.0, p.1, libc::SIGKILL); // the stray it left
+        }
+        let js = journals(&s);
+        assert_eq!(code, Some(0), "fail {fail}");
+        if fail {
+            assert!(js.is_empty(), "a journal without its mark was kept: {js:?}");
+        } else {
+            assert_eq!(js.len(), 1, "control: the leave-strays journal is kept");
+            let marked = lines(&js[0]).iter().any(|l| l.get("kind").and_then(Json::str) == Some("leave-strays"));
+            assert!(marked, "control: it carries the mark");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 

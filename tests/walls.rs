@@ -408,7 +408,12 @@ fn the_rollback_cont_is_not_withheld() {
     }
     let _ = stranger.wait();
     let s = s.expect("the stranger recorded itself");
+    let lines = sink_lines(&d.join("sink"));
     assert!(!was_stopped, "the stranger {s:?} was left stopped");
+    // the tripwire: a rollback that had to reach an untagged process means a STOP breached the
+    // wall; it is continued, and reported, so the runner goes red on a real breach
+    assert!(lines.iter().any(|(k, p, _)| k == "rollback-untagged" && *p == s.0), "no tripwire line: {lines:?}");
+    assert!(lines.iter().all(|(k, _, _)| k == "rollback-untagged"), "{lines:?}");
     assert_eq!(code.flatten(), Some(0));
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -433,3 +438,21 @@ fn a_panic_writes_the_status_line() {
     assert!(text.contains("\"code\":125"), "{text}");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Linux shows an empty environment for a moment inside an exec; the door reads again for a
+/// while before it calls a target untagged. A seam makes the first 4 reads of every target
+/// empty: the tagged member still dies, and not one line is withheld.
+#[test]
+fn an_empty_environment_is_read_again_before_it_counts() {
+    let d = scratch("reread");
+    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_ENV_EMPTY_READS", "4")], false, None);
+    let lines = sink_lines(&d.join("sink"));
+    let tagged_alive = common::alive(t);
+    common::send(t.0, t.1, libc::SIGKILL);
+    common::send(u.0, u.1, libc::SIGKILL);
+    assert!(!tagged_alive, "the tagged member was withheld after empty reads");
+    assert!(lines.iter().all(|(_, p, _)| *p == u.0), "{lines:?}");
+    assert_eq!(code, Some(125));
+    let _ = std::fs::remove_dir_all(&d);
+}
+

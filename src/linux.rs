@@ -336,7 +336,9 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
             libc::close(er[0]);
         }
         say!("sheepdog: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
-        return Err(126); // as phase 1's posix_spawnp reported a spawn that failed (EAGAIN, ENOMEM)
+        // phase 1's posix_spawnp reported a spawn without resources (EAGAIN, ENOMEM) as 126; any
+        // other failure is sheepdog's own (it cannot run its own binary)
+        return Err(if rc == libc::EAGAIN || rc == libc::ENOMEM { 126 } else { 125 });
     }
     // the handshake: the shim is running, is this protocol, and holds its PDEATHSIG and parent
     // (5 s: a cold start under an emulator)
@@ -704,7 +706,19 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     // go pipe unsent makes the shim exit without its exec)
     if sig.watch_term && crate::term_pending() {
         shim.abandon();
-        unsafe { libc::waitpid(root, std::ptr::null_mut(), 0) };
+        // bounded: a shim that something else stopped never hangs sheepdog; after 2 s it gets
+        // SIGKILL (it is this supervisor's own unreaped child, so its pid cannot be reused)
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) } == 0 {
+            if std::time::Instant::now() > end {
+                unsafe {
+                    libc::kill(root, libc::SIGKILL); // raw signal site: the shim this supervisor spawned (PHASE2.md §0.3)
+                    libc::waitpid(root, std::ptr::null_mut(), 0);
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         crate::status::set_root_final("not-started");
         journal.into_inner().finish(true);
         return crate::die_by_term(143);
@@ -805,8 +819,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     }
     if a.leave_strays && status.is_some() {
         let mut j = journal.into_inner();
-        j.mark_leave_strays();
-        j.finish(false);
+        let marked = j.mark_leave_strays();
+        j.finish(!marked);
         crate::release_relay(relay, stopped);
         return crate::finish(status, Ok(()), &mut ints, sig);
     }

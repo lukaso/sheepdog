@@ -344,7 +344,9 @@ fn an_unset_path_searches_what_posix_spawnp_searches() {
     let name = format!("sd-localtool-{}", std::process::id());
     let tool = Path::new("/usr/local/bin").join(&name);
     if std::fs::write(&tool, "#!/bin/sh\nexit 7\n").is_err() {
-        eprintln!("skipped: /usr/local/bin is not writable here");
+        // only the unprivileged leg may lack it; as root this is a red, never a skip
+        assert_ne!(unsafe { libc::geteuid() }, 0, "root cannot write /usr/local/bin");
+        eprintln!("skipped: /usr/local/bin is not writable for this user");
         return;
     }
     std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -395,6 +397,49 @@ fn a_term_before_the_go_byte_means_the_command_never_runs() {
     assert!(!ran.exists(), "the command ran after the TERM");
     assert_eq!(code, None, "sheepdog dies of the TERM");
     assert_eq!(st.as_ref().and_then(|j| j.get("root")).and_then(Json::str), Some("not-started"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The TERM-before-go path never hangs on a shim that something else stopped: the shim is
+/// SIGSTOPped while the go byte is held, then sheepdog gets TERM; it still ends (bounded wait,
+/// then SIGKILL to the shim, its own unreaped child).
+#[test]
+fn a_term_before_go_ends_even_with_a_stopped_shim() {
+    let d = scratch("stoppedshim");
+    let s = state(&d);
+    let (rel, ready) = (d.join("release"), d.join("ready"));
+    let mut c = Command::new(sheepdog())
+        .args(["run", "--", "/bin/sh", "-c", "exit 0"])
+        .env("SHEEPDOG_TEST_STATE", &s)
+        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .spawn()
+        .unwrap();
+    let held = wait_for(&ready, 20);
+    let root = journaled_root(&s);
+    if let Some(r) = root {
+        common::send(r.0, r.1, libc::SIGSTOP);
+    }
+    common::send_child(&mut c, libc::SIGTERM);
+    std::fs::write(&rel, b"").unwrap();
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut ended = false;
+    while Instant::now() < end {
+        if c.try_wait().unwrap().is_some() {
+            ended = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !ended {
+        common::send_child(&mut c, libc::SIGKILL);
+        let _ = c.wait();
+    }
+    if let Some(r) = root {
+        common::send(r.0, r.1, libc::SIGKILL);
+    }
+    assert!(held && root.is_some());
+    assert!(ended, "sheepdog hung on the stopped shim");
     let _ = std::fs::remove_dir_all(&d);
 }
 

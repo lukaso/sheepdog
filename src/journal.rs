@@ -335,9 +335,11 @@ impl Journal {
         }
     }
 
-    /// The root ended by itself under `--leave-strays`: say so, and keep the journal.
-    pub fn mark_leave_strays(&mut self) {
-        self.write("{\"v\":1,\"kind\":\"leave-strays\"}\n");
+    /// The root ended by itself under `--leave-strays`: say so, and keep the journal. A journal
+    /// that cannot carry the mark (a write failed) is removed instead: kept unmarked, a sweep
+    /// would take it for a dead job and kill the strays. So finish with `!mark_leave_strays()`.
+    pub fn mark_leave_strays(&mut self) -> bool {
+        self.write("{\"v\":1,\"kind\":\"leave-strays\"}\n")
     }
 
     /// The end: after a clean kill the journal is unlinked, then the lock released by closing

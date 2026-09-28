@@ -79,20 +79,38 @@ fn verdict_for(pid: i32, id: u64, tag: &str) -> TagVerdict {
     if live != id {
         return TagVerdict::Gone;
     }
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(&v) = c.0.get(&(pid, live)) {
-        return v;
-    }
-    // debug seam: a read after this target's first signal finds an empty environment
-    let seam_empty = crate::seam_flag("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live));
-    let read_once = || if seam_empty { EnvRead::Block(Vec::new()) } else { envtag::read_env(pid) };
+    let seam_empty = {
+        let c = cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&v) = c.0.get(&(pid, live)) {
+            return v;
+        }
+        // debug seam: a read after this target's first signal finds an empty environment
+        crate::seam_flag("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live))
+    }; // the lock is not held while the reads below wait
+    // debug seam SHEEPDOG_TEST_ENV_EMPTY_READS=N: the first N reads of a target are empty
+    let mut empty_reads = crate::seam_ms("SHEEPDOG_TEST_ENV_EMPTY_READS").unwrap_or(0);
+    let mut read_once = || {
+        if seam_empty {
+            return EnvRead::Block(Vec::new());
+        }
+        if empty_reads > 0 {
+            empty_reads -= 1;
+            return EnvRead::Block(Vec::new());
+        }
+        envtag::read_env(pid)
+    };
     let mut read = read_once();
     // Linux shows an empty environment for a moment inside an exec (before the new image's
-    // stack is set up): read once more before calling an empty block untagged
-    if matches!(read, EnvRead::Block(ref e) if e.is_empty()) {
+    // stack is set up): read again, 2 ms apart, for up to 20 ms, while the process is still the
+    // same one and not exiting, before calling an empty block untagged
+    for _ in 0..10 {
+        if !matches!(read, EnvRead::Block(ref e) if e.is_empty()) || envtag::exiting(pid) || identity(pid) != Some(live) {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(2));
         read = read_once();
     }
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
     // the read must describe the process whose identity was taken
     if identity(pid) != Some(live) {
         return TagVerdict::Gone;
@@ -110,6 +128,26 @@ fn verdict_for(pid: i32, id: u64, tag: &str) -> TagVerdict {
         c.1.insert((pid, live));
     }
     v
+}
+
+/// The rollback's tripwire (PHASE2.md D4): the rollback CONT is not held back by the wall (it
+/// undoes this supervisor's own STOP), but a rollback that reaches a process without the tag
+/// means that STOP breached the wall, so it is reported to the sink and the test run goes red.
+pub fn rollback_tripwire(pid: i32, id: u64) {
+    if !cfg!(debug_assertions) || !LATCH.on() {
+        return;
+    }
+    let v = match own_tag() {
+        Some(tag) => verdict_for(pid, id, tag),
+        None => TagVerdict::Withheld,
+    };
+    if matches!(v, TagVerdict::Withheld | TagVerdict::Unreadable) {
+        let line = format!("rollback-untagged {pid} {}", libc::SIGCONT);
+        crate::trace(line.clone());
+        if let Ok(p) = std::env::var("SHEEPDOG_TEST_SINK") {
+            crate::trace_to(std::path::Path::new(&p), &line);
+        }
+    }
 }
 
 /// The door's wall check for `sig` to `pid` (called after the inert seam and, on Linux, after

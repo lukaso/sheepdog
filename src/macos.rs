@@ -846,8 +846,8 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints) };
             if a.leave_strays && status.is_some() {
                 let mut j = journal.into_inner();
-                j.mark_leave_strays();
-                j.finish(false);
+                let marked = j.mark_leave_strays();
+                j.finish(!marked);
                 crate::release_relay(relay, stopped);
                 return crate::finish(status, Ok(()), &mut ints, sig);
             }

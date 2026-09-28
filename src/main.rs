@@ -247,6 +247,8 @@ fn rollback(pid: i32, landed_on: u64) {
     if same(pid, landed_on) {
         trace(format!("rollback {pid}"));
         // it undoes this supervisor's own STOP: identity-checked, never held back by the wall
+        // (PHASE2.md D4), but reported if the process lacks the tag
+        wall::rollback_tripwire(pid, landed_on);
         let _ = send_checked_as(pid, landed_on, libc::SIGCONT, false);
     }
 }
@@ -271,7 +273,7 @@ fn send_checked_as(pid: i32, id: u64, sig: c_int, wall: bool) -> Sent {
     if inert(pid, sig) {
         return Sent::No;
     }
-    let race = wrong_freeze_race(pid, sig);
+    let race = wrong_freeze_race(pid, id, sig);
     let fd = if race || seam("SHEEPDOG_TEST_PIDFD_ENOSYS") {
         None
     } else {
@@ -331,8 +333,9 @@ fn inert(pid: i32, sig: c_int) -> bool {
 /// Test seam (debug builds only): SHEEPDOG_TEST_WRONG_FREEZE=<pid> makes the identity check of
 /// the STOP to that pid pass on the kill path, as a pid reused between the check and the kill
 /// would (S3): the STOP lands on a process that is not the member.
-fn wrong_freeze_race(pid: i32, sig: c_int) -> bool {
-    sig == libc::SIGSTOP && seam_ms("SHEEPDOG_TEST_WRONG_FREEZE") == Some(pid as u64)
+fn wrong_freeze_race(pid: i32, id: u64, sig: c_int) -> bool {
+    // only the kill loop's injected entry (identity 0), never another STOP to that pid
+    id == 0 && sig == libc::SIGSTOP && seam_ms("SHEEPDOG_TEST_WRONG_FREEZE") == Some(pid as u64)
 }
 
 /// Send `sig` to `pid` only if it is the process with identity `id` (PLAN.md §3.3 step 2).
@@ -347,7 +350,7 @@ fn send_checked_as(pid: i32, id: u64, sig: c_int, wall: bool) -> Sent {
         return Sent::No;
     }
     // the wrong-freeze seam simulates a pid reused after every check passed for the member
-    let race = wrong_freeze_race(pid, sig);
+    let race = wrong_freeze_race(pid, id, sig);
     if wall && !race && !wall::admit(pid, id, sig) {
         return Sent::No;
     }
