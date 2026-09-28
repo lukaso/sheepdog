@@ -459,11 +459,7 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
         }
         let age = os::start_secs(r.pid).map(|s| now.saturating_sub(s));
         let mem = crate::caps::mem_of(r.pid);
-        let full = os::cmdline(r.pid).join(" ");
-        let mut cmd = crate::journal::text(full.as_bytes());
-        if full.len() > crate::journal::CMD_CAP {
-            cmd.push('…'); // cut at the journal's cap
-        }
+        let cmd = shown_cmd(&os::cmdline(r.pid).join(" "));
         let name = clean(&os::exe_name(r.pid).unwrap_or_else(|| "?".into()));
         let line = if json {
             let ev: Vec<String> = r.evidence.iter().map(|e| crate::journal::json_str(e)).collect();
@@ -546,6 +542,16 @@ fn suspects_with(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &
     out
 }
 
+/// A command line as shown: the journal's text (capped at CMD_CAP bytes, backslashes doubled),
+/// ending with `…` when it was cut.
+pub(crate) fn shown_cmd(full: &str) -> String {
+    let mut cmd = crate::journal::text(full.as_bytes());
+    if full.len() > crate::journal::CMD_CAP {
+        cmd.push('…');
+    }
+    cmd
+}
+
 /// Text for a terminal: every control character (C0, DEL, C1) as `\xHH`, so a process's
 /// command line cannot forge rows or reach the terminal.
 pub(crate) fn clean(s: &str) -> String {
@@ -590,6 +596,13 @@ mod tests {
         let t1 = pr(200, 50, 2000, 1, 1, None, None);
         let procs1 = vec![t1, pr(201, 1, 2001, 1, 1, None, None)];
         assert!(suspects_with((200, 2000), &[], &procs1, &[], 501, |_| false).is_empty());
+    }
+
+    #[test]
+    fn a_cut_command_line_says_so() {
+        let cap = crate::journal::CMD_CAP;
+        assert!(!shown_cmd(&"x".repeat(cap)).ends_with('…'));
+        assert!(shown_cmd(&"x".repeat(cap + 1)).ends_with('…'));
     }
 
     #[test]

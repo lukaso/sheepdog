@@ -411,7 +411,8 @@ fn strays_kill_skips_an_orphaned_supervisor() {
     let _k = Kill(sup);
     // its caller (the shell) is gone: the supervisor's parent is PID 1 (macOS) or the reaper
     let ppid = || String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &sup.0.to_string()]).output().unwrap().stdout).trim().to_string();
-    let adopters: Vec<String> = std::iter::once("1".to_string()).chain(c.reapers.iter().map(|r| r.id().to_string())).collect();
+    // macOS: launchd; Linux: this cell's reaper (never PID 1: that would be a marked row)
+    let adopters: Vec<String> = if cfg!(target_os = "linux") { c.reapers.iter().map(|r| r.id().to_string()).collect() } else { vec!["1".to_string()] };
     assert!(wait_until(10, || adopters.contains(&ppid())), "the supervisor was not adopted (parent {})", ppid());
     let l = strays(&["--json", "--cmd", &c.word], &[]);
     let row = rows(&l.out).remove(&sup.0);

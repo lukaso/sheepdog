@@ -218,7 +218,7 @@ fn scan() -> Vec<Row> {
         let mut origin = Vec::new();
         let leader = |q: i32, what: &str, origin: &mut Vec<String>| {
             if q > 1 && q != p.pid && by_pid.contains_key(&q) {
-                origin.push(format!("{what} {q} = {}", crate::journal::text(os::cmdline(q).join(" ").as_bytes())));
+                origin.push(format!("{what} {q} = {}", crate::kill::shown_cmd(&os::cmdline(q).join(" "))));
             }
         };
         leader(p.pgid, "group leader", &mut origin);
@@ -262,7 +262,7 @@ fn scan() -> Vec<Row> {
             mem: crate::caps::mem_of(p.pid),
             age: os::start_secs(p.pid).map(|s| now.saturating_sub(s)),
             cpu: os::cpu_secs(p.pid),
-            cmd: crate::journal::text(full.as_bytes()),
+            cmd: crate::kill::shown_cmd(&full),
             origin,
             tree: tree_set.len().saturating_sub(1),
             named: false,
@@ -372,16 +372,6 @@ pub fn main(args: &[OsString]) -> i32 {
     worst
 }
 
-/// A shown command line that was cut (at the journal's cap) ends with `…`: `--cmd` matched the
-/// whole one, so the match can be in the part not shown.
-fn shown(cmd: &str, full: &str) -> String {
-    if full.len() > crate::journal::CMD_CAP {
-        format!("{cmd}…")
-    } else {
-        cmd.to_string()
-    }
-}
-
 fn print(rows: &[Row], json: bool) {
     for r in rows {
         let line = if json {
@@ -393,7 +383,7 @@ fn print(rows: &[Row], json: bool) {
                 r.mem,
                 r.age.map_or("null".into(), |a| a.to_string()),
                 r.cpu.map_or("null".into(), |c| format!("{c:.2}")),
-                crate::journal::json_str(&shown(&r.cmd, &r.full)),
+                crate::journal::json_str(&r.cmd),
                 origin.join(","),
                 r.tree,
                 r.job.as_deref().map_or("null".into(), crate::journal::json_str),
@@ -420,7 +410,7 @@ fn print(rows: &[Row], json: bool) {
                 crate::kill::human(r.mem),
                 r.age.map_or("?".into(), |a| format!("{a}s")),
                 r.cpu.map_or("?".into(), |c| format!("{c:.1}s")),
-                crate::kill::clean(&shown(&r.cmd, &r.full)),
+                crate::kill::clean(&r.cmd),
                 crate::kill::clean(&r.origin.join("; "))
             )
         };
