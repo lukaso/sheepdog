@@ -643,7 +643,7 @@ fn a_line_naming_another_users_process_is_never_signalled() {
     let (code, _) = sweep(&s, &d, &[], &[]);
     let (alive, n) = (common::alive(p), counted(&r));
     end_decoy(&mut c);
-    assert!(alive && n == 0, "another user's process got {n} signal(s) (code {code:?})");
+    assert!(alive && n == 0, "another user's process was signalled: alive {alive}, {n} counted signal(s) (code {code:?})");
     let _ = std::fs::remove_dir_all(&d);
 }
 
