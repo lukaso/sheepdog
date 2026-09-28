@@ -125,17 +125,43 @@ fn help(cmd: Option<&OsString>) -> i32 {
     0
 }
 
-/// Set by a subcommand's parser when it takes `--json` as a flag (not as another option's value).
-static JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether `args` of subcommand `sub` hold the `--json` flag: the word as a flag, wherever it
+/// stands, never as the value of an option that takes one (`strays --cmd --json`), so a usage
+/// error before or after it still gets its JSON error.
+fn json_flag(sub: &str, args: &[OsString]) -> bool {
+    let takes_value: &[&[u8]] = match sub {
+        "kill" => &[b"--grace"],
+        "strays" => &[b"--min-mem", b"--older-than", b"--cmd", b"--pid"],
+        _ => &[],
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_bytes() {
+            b"--json" => return true,
+            b"--" => return false,
+            x if takes_value.contains(&x) => {
+                it.next();
+            }
+            _ => {}
+        }
+    }
+    false
+}
 
-pub(crate) fn json_on() {
-    JSON.store(true, std::sync::atomic::Ordering::SeqCst);
+/// `s` as one shell word: as it is when it holds only characters no shell treats specially,
+/// else single-quoted (a `'` inside becomes `'\''`).
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:=@%+,".contains(&b)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 /// `--json` errors (PLAN.md §10.5): a command whose parser took `--json` and that ends with a
 /// non-zero code writes one line `{"v":1,"error":{"code","message","fix"}}` to stdout.
-fn json_error(sub: &str, code: i32) -> i32 {
-    if code == 0 || !JSON.load(std::sync::atomic::Ordering::SeqCst) {
+fn json_error(sub: &str, args: &[OsString], code: i32) -> i32 {
+    if code == 0 || !json_flag(sub, args) {
         return code;
     }
     let (name, fix) = match code {
@@ -194,6 +220,10 @@ fn parse_long_duration(s: &str) -> Option<Duration> {
 
 fn parse_duration_max(s: &str, max: Duration) -> Option<Duration> {
     let d = if let Some(ms) = s.strip_suffix("ms") {
+        // digits only: `u64::from_str` would take a leading `+`
+        if ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         Duration::from_millis(ms.parse().ok()?)
     } else {
         let (n, unit) = match s.as_bytes().last()? {
@@ -1597,20 +1627,35 @@ fn run(argv: Vec<OsString>) -> i32 {
             let _ = writeln!(std::io::stdout(), "sheepdog {} ({}, {}{api})", env!("CARGO_PKG_VERSION"), env!("SHEEPDOG_COMMIT"), std::env::consts::OS);
             return 0;
         }
-        Some(b"doctor") => return json_error("doctor", doctor::main(rest)),
-        Some(b"kill") => return json_error("kill", kill::main(rest)),
-        Some(b"strays") => return json_error("strays", strays::main(rest)),
-        Some(b"ps") => return json_error("ps", kill::ps(rest)),
-        Some(b"sweep") => return json_error("sweep", sweep::main(rest)),
+        Some(b"doctor") => return json_error("doctor", rest, doctor::main(rest)),
+        Some(b"kill") => return json_error("kill", rest, kill::main(rest)),
+        Some(b"strays") => return json_error("strays", rest, strays::main(rest)),
+        Some(b"ps") => return json_error("ps", rest, kill::ps(rest)),
+        Some(b"sweep") => return json_error("sweep", rest, sweep::main(rest)),
         Some(b"run") => {}
         Some(_) => {
             let typed: Vec<String> = argv[1..].iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
-            // options (or `--`) first: they are run's, so `run` goes in front of them as typed
-            let fix = if typed[0].starts_with('-') {
-                let tail = if typed.iter().any(|t| t == "--") { "" } else { " -- COMMAND" };
-                format!("sheepdog run {}{tail}", typed.join(" "))
-            } else {
-                format!("sheepdog run -- {}", typed.join(" "))
+            // shell-quoted, so the line pasted into a shell runs what was typed
+            let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
+            let dash = typed.iter().position(|t| t == "--");
+            let sub = typed[..dash.unwrap_or(typed.len())].iter().position(|t| ["run", "kill", "strays", "ps", "sweep", "doctor"].contains(&t.as_str()));
+            let fix = match sub {
+                // options, then a subcommand: that subcommand, with the rest as typed
+                Some(i) if typed[0].starts_with('-') => {
+                    let mut rest = q.clone();
+                    let name = rest.remove(i);
+                    format!("sheepdog {name} {}", rest.join(" "))
+                }
+                // options (or `--`) first: they are run's, so `run` goes in front of them
+                _ if typed[0].starts_with('-') => {
+                    let tail = match dash {
+                        None => " -- COMMAND",
+                        Some(d) if d + 1 == typed.len() => " COMMAND",
+                        Some(_) => "",
+                    };
+                    format!("sheepdog run {}{tail}", q.join(" "))
+                }
+                _ => format!("sheepdog run -- {}", q.join(" ")),
             };
             fail!("sheepdog: '{}' is not a sheepdog command. To run it under sheepdog: {fix}", typed[0]);
             return 2;
@@ -1698,7 +1743,7 @@ mod tests {
         assert_eq!(d("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(d("1d"), Some(Duration::from_secs(86_400)));
         assert_eq!(d("0"), Some(Duration::ZERO));
-        for bad in ["", "5x", "m", "-1s", "-5m", "1e999s", "nan", "inf", "5 m", "5mm", "1.5ms", "86401", "2d"] {
+        for bad in ["", "5x", "m", "-1s", "-5m", "1e999s", "nan", "inf", "5 m", "5mm", "1.5ms", "86401", "2d", "+5ms", "+5s", "+5"] {
             assert_eq!(d(bad), None, "{bad:?} was accepted");
         }
         // a job's own length (--timeout, --older-than) may be up to 365 days

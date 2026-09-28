@@ -67,6 +67,11 @@ fn usage() -> i32 {
     2
 }
 
+fn usage_ps() -> i32 {
+    crate::fail!("usage: {USAGE_PS}");
+    2
+}
+
 fn target(a: &[u8]) -> Option<Target> {
     let s = std::str::from_utf8(a).ok()?;
     if let Some(hex) = s.strip_prefix("j-") {
@@ -90,10 +95,7 @@ fn parse(args: &[OsString]) -> Option<Args> {
         match args[i].as_bytes() {
             b"--dry-run" => dry_run = true,
             b"--include-suspects" => include_suspects = true,
-            b"--json" => {
-                json = true;
-                crate::json_on();
-            }
+            b"--json" => json = true,
             b"--grace" => {
                 i += 1;
                 grace = parse_duration(&args.get(i)?.to_string_lossy())?;
@@ -229,14 +231,19 @@ pub fn ps(args: &[OsString]) -> i32 {
     let mut a: Vec<OsString> = vec!["--dry-run".into()];
     for x in args {
         if matches!(x.as_bytes(), b"--dry-run" | b"--include-suspects" | b"--grace") {
-            return usage();
+            return usage_ps();
         }
         a.push(x.clone());
     }
-    main(&a)
+    main_as(&a, true)
 }
 
 pub fn main(args: &[OsString]) -> i32 {
+    main_as(args, false)
+}
+
+/// `kill`, or (`ps`) its dry run: a usage error names the command that was typed.
+fn main_as(args: &[OsString], ps: bool) -> i32 {
     // signals that would end sheepdog at their default action and that it never uses: blocked
     // for the whole run (a closed stderr is EPIPE, never SIGPIPE; phase-1 review)
     unsafe {
@@ -249,7 +256,7 @@ pub fn main(args: &[OsString]) -> i32 {
         }
         libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
-    let Some(a) = parse(args) else { return usage() };
+    let Some(a) = parse(args) else { return if ps { usage_ps() } else { usage() } };
     #[cfg(target_os = "linux")]
     if let Some(why) = os::proc_problem() {
         crate::fail!("sheepdog: {why}, so sheepdog cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");

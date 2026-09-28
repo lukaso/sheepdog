@@ -26,10 +26,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let (mut json, mut grants) = (false, false);
     for a in args {
         match a.as_bytes() {
-            b"--json" => {
-                json = true;
-                crate::json_on();
-            }
+            b"--json" => json = true,
             b"--grants" => grants = true,
             _ => {
                 fail!("usage: {USAGE}");

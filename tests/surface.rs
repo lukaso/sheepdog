@@ -12,6 +12,11 @@ fn sheepdog() -> &'static str {
     env!("CARGO_BIN_EXE_sheepdog")
 }
 
+fn fixture() -> &'static str {
+    common::test_env();
+    env!("CARGO_BIN_EXE_sd-fixture")
+}
+
 struct Out {
     code: Option<i32>,
     out: String,
@@ -172,4 +177,69 @@ fn json_mode_is_the_parsed_flag() {
     let c = sd(&["strays", "--json", "--bogus"]);
     assert_eq!(c.code, Some(2));
     assert!(json::parse(c.out.trim()).is_ok_and(|j| j.get("error").is_some()), "control: no JSON error: {}", c.out);
+}
+
+/// JSON mode does not depend on where `--json` stands: a usage error before it still writes the
+/// JSON error (`kill --bogus --json`, `strays --older-than 5x --json`, `doctor --bogus --json`,
+/// and `ps --json --include-suspects 5`, which ps refuses before it parses). The control: as
+/// another option's value (`strays --cmd --json --bogus`) it is not the flag.
+#[test]
+fn json_mode_does_not_depend_on_argument_order() {
+    for args in [&["kill", "--bogus", "--json"][..], &["strays", "--older-than", "5x", "--json"][..], &["doctor", "--bogus", "--json"][..], &["ps", "--json", "--include-suspects", "5"][..]] {
+        let o = sd(args);
+        assert_eq!(o.code, Some(2), "{args:?}");
+        let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{args:?}: no JSON error ({e:?}): {:?}", o.out));
+        assert_eq!(j.get("error").and_then(|e| e.get("code")).and_then(Json::str), Some("usage"), "{args:?}");
+    }
+    assert!(sd(&["strays", "--cmd", "--json", "--bogus"]).out.trim().is_empty(), "control: --cmd's value");
+}
+
+/// A `ps` usage error's JSON message is ps's usage; the control, `kill`'s, is kill's.
+#[test]
+fn a_ps_usage_error_names_ps() {
+    for (sub, want) in [("ps", "usage: sheepdog ps"), ("kill", "usage: sheepdog kill")] {
+        let o = sd(&[sub, "--json"]);
+        let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{sub}: ({e:?}) {:?}", o.out));
+        let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
+        assert!(m.starts_with(want), "{sub}: {m:?}");
+    }
+}
+
+/// The suggested fix, pasted into a shell, runs the command that was typed: arguments with
+/// spaces or shell characters are quoted (`sheepdog -- sh -c 'exit 3'` suggests a line that
+/// exits 3 through `sh -c`); with no command after `--` it names COMMAND; a subcommand typed
+/// after an option is suggested as that subcommand.
+#[test]
+fn the_suggested_fix_runs_in_a_shell() {
+    let fix_of = |typed: &[&str]| -> String {
+        let o = sd(typed);
+        assert_eq!(o.code, Some(2), "{typed:?}");
+        let l = o.err.lines().find(|l| l.contains("To run it under sheepdog:")).unwrap_or_else(|| panic!("{typed:?}: {}", o.err)).to_string();
+        l.split("To run it under sheepdog: ").nth(1).unwrap().to_string()
+    };
+    let sh = |fix: &str| -> Option<i32> {
+        let line = fix.replacen("sheepdog", sheepdog(), 1);
+        Command::new("/bin/sh").args(["-c", &line]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code()
+    };
+    assert_eq!(sh(&fix_of(&["--", "sh", "-c", "exit 3"])), Some(3), "the fix does not run the typed command");
+    assert_eq!(sh(&fix_of(&["--", "sh", "-c", "exit 4 # it's"])), Some(4), "a quote inside an argument");
+    assert_eq!(sh(&fix_of(&["--", "true"])), Some(0), "control");
+    assert!(fix_of(&["--"]).ends_with("-- COMMAND"), "{}", fix_of(&["--"]));
+    assert!(fix_of(&["--json", "kill", "5"]).starts_with("sheepdog kill "), "{}", fix_of(&["--json", "kill", "5"]));
+}
+
+/// Each duration flag has its own cap: `--kill-deadline` and `kill --grace` at most one day,
+/// `--timeout` at most 365 days (controls: one day, 365 days).
+#[test]
+fn each_duration_flag_keeps_its_cap() {
+    assert_eq!(sd(&["run", "--kill-deadline", "86401", "--", "true"]).code, Some(125));
+    assert_eq!(sd(&["run", "--kill-deadline", "1d", "--", "true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "366d", "--", "true"]).code, Some(125));
+    assert_eq!(sd(&["run", "--timeout", "365d", "--", "true"]).code, Some(0));
+    assert_eq!(sd(&["kill", "--grace", "2d", "1"]).code, Some(2));
+    let mut c = Command::new(fixture()).arg("sigcount").arg(std::env::temp_dir().join(format!("sd-cap-{}", std::process::id()))).spawn().unwrap();
+    let ok = sd(&["kill", "--dry-run", "--grace", "1d", &c.id().to_string()]).code;
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    assert_eq!(ok, Some(0), "control: kill --grace 1d");
 }

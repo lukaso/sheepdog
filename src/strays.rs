@@ -110,10 +110,7 @@ fn parse(args: &[OsString]) -> Option<Args> {
                 a.pids.push((p.parse().ok().filter(|&p: &i32| p > 1)?, id.parse().ok()?));
                 i += 1;
             }
-            b"--json" => {
-                a.json = true;
-                crate::json_on();
-            }
+            b"--json" => a.json = true,
             b"--kill" => a.kill = true,
             b"--yes" => a.yes = true,
             _ => return None,
