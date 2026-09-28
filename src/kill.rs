@@ -416,8 +416,12 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
             }
             crate::sweep::Outcome::Deadline(c) => Ok(JobTarget::Done(c)),
         },
-        Err(_) => {
-            say!("sheepdog: job {prefix} is busy or unreadable (another sweep, or its supervisor is just ending). Nothing was signalled.");
+        Err(crate::sweep::Skip::Live) => {
+            say!("sheepdog: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
+            Err(1)
+        }
+        Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) => {
+            say!("sheepdog: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
             Err(1)
         }
     }

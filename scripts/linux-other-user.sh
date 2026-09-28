@@ -50,7 +50,10 @@ for b in $bins; do
   # a shell of `sd` stays as the test binary's parent (it does not exec it): a cell that walks
   # its own ancestors needs one of its own user above it
   # through the cargo runner, as cargo test would (PHASE2.md §0.4: the test environment)
-  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp SD_PLANTED="$PLANTED" SHEEPDOG_LEG_TAG="$LEGTAG" /bin/sh -c '/w/scripts/test-env "$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
+  # the shared leg tag (and the planted journals) only for the sweep binary: every other binary
+  # keeps a tag of its own, so the wall still keeps it off the planted decoy
+  case $(basename "$b") in sweep-*) extra="SD_PLANTED=$PLANTED SHEEPDOG_LEG_TAG=$LEGTAG" ;; *) extra="SD_NOTHING=1" ;; esac
+  timeout 900 /bin/setpriv --reuid=sd --regid=sd --clear-groups env HOME=/tmp TMPDIR=/tmp $extra /bin/sh -c '/w/scripts/test-env "$0"; exit $?' "$b" > /tmp/b.log 2>&1 || rc=1
   echo "$(basename "$b"): $(grep -E '^test result' /tmp/b.log | cut -c1-80)"
   grep -E '^thread|FAILED' /tmp/b.log | cut -c1-200
 done
@@ -58,8 +61,13 @@ st=$(ps -o stat= -p "$decoy" | tr -d ' ')
 sigs=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
 echo "decoy: state=${st:-gone} signals=$sigs (1 is the control)"
 kill -KILL "$decoy" 2>/dev/null
-kill -KILL "$dpid" 2>/dev/null
-grep -q . /tmp/planted/decoy.sig 2>/dev/null && echo "planted decoy signals: $(wc -l < /tmp/planted/decoy.sig)"
+# the planted decoy: the control sweep must have ended it; SIGKILL only if it is still that very
+# process (field 22 of its stat, the identity the journal named), never a reused pid
+if [ "$(cut -d')' -f2 /proc/$dpid/stat 2>/dev/null | awk '{print $20}')" = "$did" ]; then
+  echo "planted decoy: ALIVE (the control sweep did not end it)"; kill -KILL "$dpid"; rc=1
+else
+  echo "planted decoy: gone (the control sweep ended it)"
+fi
 sleep 0.2
 left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
 echo "leftovers: $left"

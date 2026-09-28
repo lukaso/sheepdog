@@ -269,7 +269,7 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
     let done = wait_until(20, || ran.exists() && std::fs::read_to_string(&out).is_ok_and(|t| !t.is_empty()));
     let st = std::fs::read_to_string(&out).ok().and_then(|t| json::parse(t.trim_end()).ok());
     let (wit_alive, n) = (common::alive(witness), counted(&wit));
-    let noted = notes(&st).iter().any(|n| n.starts_with("auto-sweep skipped"));
+    let noted = wpid.is_some_and(|w| notes(&st).iter().any(|n| n.starts_with("auto-sweep skipped job j-") && n.contains(&w.to_string())));
     let wid = wpid.and_then(sheepdog::ident::identity);
     if let Some(p) = wpid.zip(wid) {
         common::send(p.0, p.1, libc::SIGKILL);

@@ -108,7 +108,7 @@
 //! - `lineage-kill R GO1 GO2 RC`: P4 review (P1-B). W records itself and forks C; C forks E and
 //!   records itself once E has; C exits on GO1 (E is reparented, but the journal saw E under C
 //!   under W); on GO2, E runs `sheepdog kill <W>` (by name, the test PATH), waits for it, writes
-//!   its code to RC and waits. So the kill's own parent, E, is in W's journaled subtree although
+//!   its code to RC (its stderr to RC.err) and waits; without GO2 it exits and runs nothing. So the kill's own parent, E, is in W's journaled subtree although
 //!   W is no ancestor of it. R's lines: W, E, C.
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
 //!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
@@ -1220,7 +1220,16 @@ fn main() {
                 if libc::fork() == 0 {
                     record(&r, libc::getpid()); // E
                     wait_file(&go2);
-                    let st = std::process::Command::new("sheepdog").args(["kill", &w.to_string()]).status();
+                    if !std::path::Path::new(&go2).exists() {
+                        libc::_exit(3); // the test gave up: never run the kill late
+                    }
+                    let err = std::fs::File::create(format!("{rc}.err")).ok();
+                    let mut cmd = std::process::Command::new("sheepdog");
+                    cmd.args(["kill", &w.to_string()]);
+                    if let Some(e) = err {
+                        cmd.stderr(e);
+                    }
+                    let st = cmd.status();
                     let code = st.ok().and_then(|s| s.code()).map_or("none".to_string(), |c| c.to_string());
                     let _ = std::fs::write(&rc, format!("{code}\n"));
                     libc::alarm(60);

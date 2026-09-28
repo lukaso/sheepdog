@@ -461,6 +461,9 @@ fn the_journal_lineage_never_reaches_the_caller() {
     }
     assert!(got, "the kill did not finish (did it stop its own caller?)");
     assert_eq!(code, "1", "refused");
+    // for this reason: the journaled subtree holds E (a failed ancestor walk is also exit 1)
+    let err = std::fs::read_to_string(format!("{}.err", rc.display())).unwrap_or_default();
+    assert!(err.split(|c: char| !c.is_ascii_digit()).any(|w| w == e.0.to_string()), "the refusal does not name pid {}: {err}", e.0);
     assert!(e_alive && !e_stopped, "the kill signalled its own caller");
     assert!(w_alive, "a refused kill signalled the target");
     let _ = std::fs::remove_dir_all(&d);
@@ -543,5 +546,28 @@ fn kill_job_keeps_the_sweep_fences() {
     assert_eq!(code, Some(1), "refused");
     assert!(alive && n == 0, "another boot's journal was swept ({n})");
     assert!(path.exists(), "the journal was deleted");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `kill j-` of a dead job that carries the leave-strays mark refuses, touches nothing, and says
+/// why: the operator chose to leave those strays.
+#[test]
+fn kill_job_of_a_leave_strays_job_names_the_reason() {
+    use std::io::Write;
+    let d = scratch("leave");
+    let s = state(&d);
+    let (mut c, g, r) = live_job(&d, &s, "a", |_| {});
+    let id = job_id(&s);
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    let j = journals(&s).pop().unwrap();
+    std::fs::OpenOptions::new().append(true).open(&j).unwrap().write_all(b"{\"v\":1,\"kind\":\"leave-strays\"}\n").unwrap();
+    let out = Command::new(sheepdog()).args(["kill", &id]).env("SHEEPDOG_TEST_STATE", &s).output().unwrap();
+    let alive = common::alive(g);
+    cleanup(&[&r]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(alive, "the leave-strays job's escapee was signalled");
+    assert!(err.contains("--leave-strays"), "the refusal does not name the reason: {err}");
     let _ = std::fs::remove_dir_all(&d);
 }
