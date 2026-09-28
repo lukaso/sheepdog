@@ -194,11 +194,14 @@ fn json_mode_does_not_depend_on_argument_order() {
     assert!(sd(&["strays", "--cmd", "--json", "--bogus"]).out.trim().is_empty(), "control: --cmd's value");
 }
 
-/// A `ps` usage error's JSON message is ps's usage; the control, `kill`'s, is kill's.
+/// A `ps` usage error's JSON message is ps's usage, from its parse and from its refusal of
+/// kill's own options; the control, `kill`'s, is kill's.
 #[test]
 fn a_ps_usage_error_names_ps() {
-    for (sub, want) in [("ps", "usage: sheepdog ps"), ("kill", "usage: sheepdog kill")] {
-        let o = sd(&[sub, "--json"]);
+    // ps refuses kill's own options itself, before its parse
+    for (args, want) in [(&["ps", "--json"][..], "usage: sheepdog ps"), (&["ps", "--json", "--grace", "1", "5"][..], "usage: sheepdog ps"), (&["kill", "--json"][..], "usage: sheepdog kill")] {
+        let sub = args[0];
+        let o = sd(args);
         let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{sub}: ({e:?}) {:?}", o.out));
         let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
         assert!(m.starts_with(want), "{sub}: {m:?}");
