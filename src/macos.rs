@@ -1026,7 +1026,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 crate::trace("degraded".into());
                 crate::status::set_degraded("the macOS responsibility API is not available");
             }
-            if !a.inherit {
+            // only a disclaimed job loses the terminal's permissions (without the disclaim it keeps
+            // them, as it would without sheepdog, and the warning's advice would be wrong)
+            if ok {
                 tcc_warning(&a.cmd);
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);

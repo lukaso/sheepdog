@@ -353,6 +353,36 @@ fn the_privacy_warning_counts_only_arguments_written_as_paths() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// D10: when the disclaim did not take (the responsibility API is broken: seam), the job keeps
+/// the terminal's permissions, as it would without sheepdog, and there is no warning to give
+/// (its advice, Full Disk Access for sheepdog, would be wrong); the control, the same run with
+/// the API working, warns.
+#[cfg(target_os = "macos")]
+#[test]
+fn no_privacy_warning_when_the_disclaim_did_not_take() {
+    let d = scratch("tccnodisc");
+    let prot = d.join("prot");
+    std::fs::create_dir_all(&prot).unwrap();
+    let warned = |env: &[(&str, &str)]| -> bool {
+        let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
+        let st = Command::new(sheepdog())
+            .args(["run", "--", "/usr/bin/true"])
+            .current_dir(&prot)
+            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .envs(env.iter().copied())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(0));
+        std::fs::read_to_string(&trace).unwrap_or_default().lines().any(|l| l.starts_with("tcc-warning "))
+    };
+    assert!(!warned(&[("SHEEPDOG_TEST_SPI", "broken")]), "a warning with advice for a disclaim that did not take");
+    assert!(warned(&[]), "control: the disclaimed run warns");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// `--version` prints this build's version.
 #[test]
 fn version_prints_the_build_version() {
