@@ -129,15 +129,15 @@ pub fn parent(pid: i32) -> Option<i32> {
     stat(pid).map(|(ppid, _)| ppid)
 }
 
-/// The file name of `pid`'s executable (` (deleted)` stripped: the binary was replaced). Under
-/// a binary translator (Rosetta runs amd64 containers on Apple silicon; qemu-user) the link names
-/// the translator, so the program's own name is argv[0]'s file name.
 /// `pid`'s command name (`/proc/<pid>/comm`, 15 bytes at most): readable for any process, where
 /// the executable link of another user's process is not.
 pub fn comm(pid: i32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim_end_matches('\n').to_string())
 }
 
+/// The file name of `pid`'s executable (` (deleted)` stripped: the binary was replaced). Under
+/// a binary translator (Rosetta runs amd64 containers on Apple silicon; qemu-user) the link names
+/// the translator, so the program's own name is argv[0]'s file name.
 pub fn exe_name(pid: i32) -> Option<String> {
     let p = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     let s = p.to_string_lossy();

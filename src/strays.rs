@@ -37,15 +37,30 @@ fn pid1_is_os_init(name: &str) -> bool {
     name == "systemd" || name == "init"
 }
 
-/// Linux: a cgroup file (`/proc/<pid>/cgroup`) that places the process in a systemd service or
-/// in systemd's own scope (`*.service` or `init.scope` leaf, v2 or the v1 name=systemd line): it
-/// is a unit's process, adopted on purpose, never a stray (PHASE2.md D9).
+/// Linux: where a cgroup file (`/proc/<pid>/cgroup`, v2 or the v1 name=systemd line) places a
+/// process (PHASE2.md D9).
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn service_cgroup(text: &str) -> bool {
+#[derive(Debug, PartialEq)]
+enum Cgroup {
+    /// a systemd unit's (`*.service` or `init.scope` leaf): adopted on purpose, never a stray
+    Service,
+    /// a desktop app's scope (`app-*.scope`): listed, but skipped by `--kill` unless named
+    AppScope,
+    Other,
+}
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn cgroup_kind(text: &str) -> Cgroup {
     let line = text.lines().find(|l| l.starts_with("0::")).or_else(|| text.lines().find(|l| l.contains(":name=systemd:")));
-    let Some(path) = line.and_then(|l| l.splitn(3, ':').nth(2)) else { return false };
+    let Some(path) = line.and_then(|l| l.splitn(3, ':').nth(2)) else { return Cgroup::Other };
     let leaf = path.rsplit('/').next().unwrap_or("");
-    leaf.ends_with(".service") || leaf == "init.scope"
+    if leaf.ends_with(".service") || leaf == "init.scope" {
+        Cgroup::Service
+    } else if leaf.starts_with("app-") && leaf.ends_with(".scope") {
+        Cgroup::AppScope
+    } else {
+        Cgroup::Other
+    }
 }
 
 struct Args {
@@ -133,6 +148,10 @@ struct Row {
     /// the running job it belongs to ("j-..." or "sheepdog PID")
     job: Option<String>,
     pid1_child: bool,
+    /// Linux: in a desktop app's scope (skipped unless named)
+    app_scope: bool,
+    /// the whole command line, for `--cmd` (the shown `cmd` is capped and escaped)
+    full: String,
 }
 
 /// The rows of running jobs: every live journal's members, by (pid, identity).
@@ -149,6 +168,7 @@ fn live_journal_members() -> HashMap<(i32, u64), String> {
         if !same(sup.0, sup.1) {
             continue; // a dead job: its strays are listed as strays
         }
+        m.insert(sup, job.clone());
         for k in crate::sweep::peek(&p) {
             m.insert(k, job.clone());
         }
@@ -176,12 +196,13 @@ fn scan() -> Vec<Row> {
             continue;
         }
         #[cfg(target_os = "macos")]
-        let (orphan, pid1_child) = (p.ppid == 1 && p.puniq != Some(1) && !app_helper(p.pid), false);
+        let (orphan, pid1_child, app_scope) = (p.ppid == 1 && p.puniq != Some(1) && !app_helper(p.pid), false, false);
         #[cfg(target_os = "linux")]
-        let (orphan, pid1_child) = {
+        let (orphan, pid1_child, app_scope) = {
             let reaped = p.ppid == 1 || (p.ppid > 1 && os::comm(p.ppid).is_some_and(|n| REAPERS.contains(&n.as_str())));
-            let unit = std::fs::read_to_string(format!("/proc/{}/cgroup", p.pid)).is_ok_and(|t| service_cgroup(&t));
-            (reaped && !unit, reaped && !unit && p.ppid == 1 && pid1_app)
+            let kind = std::fs::read_to_string(format!("/proc/{}/cgroup", p.pid)).map_or(Cgroup::Other, |t| cgroup_kind(&t));
+            let orphan = reaped && kind != Cgroup::Service;
+            (orphan, orphan && p.ppid == 1 && pid1_app, orphan && kind == Cgroup::AppScope)
         };
         if !orphan {
             continue;
@@ -189,7 +210,7 @@ fn scan() -> Vec<Row> {
         let mut origin = Vec::new();
         let leader = |q: i32, what: &str, origin: &mut Vec<String>| {
             if q > 1 && q != p.pid && by_pid.contains_key(&q) {
-                origin.push(format!("{what} {q} = {}", os::cmdline(q).join(" ")));
+                origin.push(format!("{what} {q} = {}", crate::journal::text(os::cmdline(q).join(" ").as_bytes())));
             }
         };
         leader(p.pgid, "group leader", &mut origin);
@@ -212,23 +233,29 @@ fn scan() -> Vec<Row> {
         let mut t = crate::kill::Proved { known: HashMap::from([(p.pid, p.id)]), ever: std::collections::HashSet::from([p.id]), protected: protected.clone() };
         let tree_set = t.scan();
         let sup_in_tree = tree_set.iter().find(|&&(q, _)| q != p.pid && crate::kill::is_sheepdog(q)).map(|&(q, _)| q);
+        // a row that is itself a live supervisor, a member of a running job, or holds a live
+        // supervisor in its tree: skipped by `--kill` unless named
         let job = jobs
             .get(&(p.pid, p.id))
             .cloned()
+            .or_else(|| crate::kill::is_sheepdog(p.pid).then(|| format!("sheepdog {}, a supervisor", p.pid)))
             .or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepdog {s}")))
             .or_else(|| sup_in_tree.map(|s| format!("sheepdog {s} in its tree")));
+        let full = os::cmdline(p.pid).join(" ");
         rows.push(Row {
             pid: p.pid,
             id: p.id,
             mem: crate::caps::mem_of(p.pid),
             age: os::start_secs(p.pid).map(|s| now.saturating_sub(s)),
             cpu: os::cpu_secs(p.pid),
-            cmd: crate::journal::text(os::cmdline(p.pid).join(" ").as_bytes()),
+            cmd: crate::journal::text(full.as_bytes()),
             origin,
             tree: tree_set.len().saturating_sub(1),
             named: false,
             job,
             pid1_child,
+            app_scope,
+            full,
         });
     }
     rows
@@ -274,7 +301,7 @@ pub fn main(args: &[OsString]) -> i32 {
         .into_iter()
         .filter(|r| r.mem >= a.min_mem)
         .filter(|r| a.older_than.is_zero() || r.age.is_some_and(|s| Duration::from_secs(s) >= a.older_than))
-        .filter(|r| re.as_ref().map_or(true, |re| re.is_match(&r.cmd)))
+        .filter(|r| re.as_ref().map_or(true, |re| re.is_match(&r.full)))
         .filter(|r| a.pids.is_empty() || a.pids.contains(&(r.pid, r.id)))
         .collect();
     rows.sort_by(|x, y| y.mem.cmp(&x.mem).then(x.pid.cmp(&y.pid)));
@@ -316,6 +343,10 @@ pub fn main(args: &[OsString]) -> i32 {
                 continue;
             }
         }
+        if r.app_scope && !named {
+            say!("sheepdog: skipping pid {}: it runs in a desktop app's scope (a launched app); name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
+            continue;
+        }
         if r.pid1_child && !named {
             say!("sheepdog: skipping pid {}: its parent is PID 1, which is not an init here, so it may be that program's own child; name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
             continue;
@@ -332,7 +363,7 @@ fn print(rows: &[Row], json: bool) {
         let line = if json {
             let origin: Vec<String> = r.origin.iter().map(|o| crate::journal::json_str(o)).collect();
             format!(
-                "{{\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"tree\":{},\"job\":{},\"pid1_child\":{}}}",
+                "{{\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"tree\":{},\"job\":{},\"pid1_child\":{},\"app_scope\":{}}}",
                 r.pid,
                 r.id,
                 r.mem,
@@ -342,7 +373,8 @@ fn print(rows: &[Row], json: bool) {
                 origin.join(","),
                 r.tree,
                 r.job.as_deref().map_or("null".into(), crate::journal::json_str),
-                r.pid1_child
+                r.pid1_child,
+                r.app_scope
             )
         } else {
             let mut flags = String::new();
@@ -354,6 +386,9 @@ fn print(rows: &[Row], json: bool) {
             }
             if r.pid1_child {
                 flags.push_str(" (child of PID 1 app?)");
+            }
+            if r.app_scope {
+                flags.push_str(" (desktop app?)");
             }
             format!(
                 "{}\t{}\t{}\t{}\t{}{flags}\t{}",
@@ -384,13 +419,15 @@ mod tests {
     }
 
     #[test]
-    fn a_service_cgroup_is_never_a_stray() {
-        assert!(service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service\n"));
-        assert!(service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"));
-        assert!(service_cgroup("12:pids:/x\n1:name=systemd:/system.slice/foo.service\n"));
-        assert!(!service_cgroup("0::/user.slice/user-1000.slice/session-3.scope\n"));
-        assert!(!service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-terminal-1234.scope\n"));
-        assert!(!service_cgroup("0::/\n"));
-        assert!(!service_cgroup(""));
+    fn cgroups_place_units_apps_and_the_rest() {
+        use Cgroup::*;
+        assert_eq!(cgroup_kind("0::/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service\n"), Service);
+        assert_eq!(cgroup_kind("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"), Service);
+        assert_eq!(cgroup_kind("12:pids:/x\n1:name=systemd:/system.slice/foo.service\n"), Service);
+        assert_eq!(cgroup_kind("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-firefox-1234.scope\n"), AppScope);
+        assert_eq!(cgroup_kind("0::/user.slice/user-1000.slice/session-3.scope\n"), Other);
+        assert_eq!(cgroup_kind("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.gnome.Terminal.slice/vte-spawn-5a.scope\n"), Other);
+        assert_eq!(cgroup_kind("0::/\n"), Other);
+        assert_eq!(cgroup_kind(""), Other);
     }
 }

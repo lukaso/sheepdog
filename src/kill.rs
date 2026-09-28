@@ -373,7 +373,13 @@ pub fn main(args: &[OsString]) -> i32 {
             }
         }
         rows.extend(sus.iter().map(|((p, id), ev)| Row { pid: *p, id: *id, class: "suspect", evidence: ev.clone() }));
-        rows.extend(under.iter().map(|&(p, id)| Row { pid: p, id, class: "suspect", evidence: vec!["under a suspect".into()] }));
+        rows.extend(under.iter().map(|&(p, id)| {
+            let mut ev = vec!["under a suspect".to_string()];
+            if is_sheepdog(p) {
+                ev.push("sheepdog: ended first".into());
+            }
+            Row { pid: p, id, class: "suspect", evidence: ev }
+        }));
         return print_rows(&rows, a.json);
     }
     let mut left = sus.len();

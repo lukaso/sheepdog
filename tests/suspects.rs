@@ -252,11 +252,17 @@ fn ps_text_output_holds_no_control_bytes() {
     use std::os::unix::process::CommandExt;
     let d = scratch("ctl");
     let r = d.join("x");
-    let mut c = Command::new(fixture()).arg0("sl\n4242\tfake\tproved\x1b[2Kx\u{9b}y\u{7f}").args(["sigcount", r.to_str().unwrap()]).spawn().unwrap();
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            common::send_child(&mut self.0, libc::SIGKILL);
+            let _ = self.0.wait();
+        }
+    }
+    let c = Guard(Command::new(fixture()).arg0("sl\n4242\tfake\tproved\x1b[2Kx\u{9b}y\u{7f}").args(["sigcount", r.to_str().unwrap()]).spawn().unwrap());
     assert!(wait_until(10, || record(&d, "x").is_some()));
-    let o = sd(&d, &["ps", &c.id().to_string()], &[]);
-    common::send_child(&mut c, libc::SIGKILL);
-    let _ = c.wait();
+    let o = sd(&d, &["ps", &c.0.id().to_string()], &[]);
+    drop(c);
     let lines: Vec<&str> = o.out.lines().collect();
     assert_eq!(lines.len(), 1, "one process, one row:\n{}", o.out);
     let bad: Vec<char> = o.out.chars().filter(|&ch| (ch < ' ' && ch != '\t' && ch != '\n') || ch == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&ch)).collect();
@@ -266,18 +272,31 @@ fn ps_text_output_holds_no_control_bytes() {
 
 /// The root of another live `sheepdog run` job in the target's session, started after it, is
 /// that job's member, never a suspect; nor is that job's orphan that stays in the session (its
-/// parent exited; on macOS its responsible process is the job's supervisor).
+/// parent exited; on macOS its responsible process is the job's supervisor). The orphan is the
+/// live-job rule's witness, on macOS (the root is excluded by the parent-PID-1 rule too, and on
+/// Linux the job's supervisor, a subreaper, adopts the orphan).
 #[test]
 fn a_live_jobs_root_in_the_session_is_no_suspect() {
     let _serial = serial();
     let d = scratch("jobroot");
-    let (t, root) = (d.join("t"), d.join("root"));
+    let t = d.join("t");
     let script = format!(
         r#""$0" sigcount "{}" & sleep 0.1; exec "$1" run -- /bin/sh -c '"$0" stray "$1" js && exec "$0" sigcount "$1/root"' "$0" "{}""#,
         t.display(),
         d.display()
     );
     let mut leader = Command::new(fixture()).args(["new-session", "/bin/sh", "-c", &script, fixture(), sheepdog()]).stdin(Stdio::null()).spawn().unwrap();
+    struct Recs<'a>(&'a Path);
+    impl Drop for Recs<'_> {
+        fn drop(&mut self) {
+            for n in ["t", "root", "js"] {
+                if let Some(p) = record(self.0, n) {
+                    common::send(p.0, p.1, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let _g = Recs(&d);
     assert!(wait_until(15, || record(&d, "t").is_some() && record(&d, "root").is_some() && record(&d, "js").is_some()), "the tree did not start");
     let (tp, rp, js) = (record(&d, "t").unwrap(), record(&d, "root").unwrap(), record(&d, "js").unwrap());
     let o = sd(&d, &["ps", "--json", &tp.0.to_string()], &[]);

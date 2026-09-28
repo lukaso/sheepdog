@@ -955,10 +955,12 @@ fn main() {
         std::process::exit(0);
     }
     if mode == "run-then-count" && a.len() >= 5 {
+        let first = unsafe { libc::getppid() };
         record(&format!("{}/{}.d", a[2], a[3]), std::process::id() as i32);
-        // an orphan first (bounded, 10 s): its parent exits once the record above exists
+        // an orphan first (bounded, 10 s): its parent exits once the record above exists, and it
+        // is adopted (by PID 1 or a subreaper)
         let mut n = 0;
-        while unsafe { libc::getppid() } != 1 && n < 1000 {
+        while unsafe { libc::getppid() } == first && n < 1000 {
             unsafe { libc::usleep(10_000) };
             n += 1;
         }
@@ -987,6 +989,22 @@ fn main() {
                 libc::execv(helper.as_ptr(), argv.as_ptr());
             });
             sigcount_as(&a[2], "app", false);
+        }
+    }
+    // `reaper NAME PROG ARGS...` (Linux): a subreaper whose command name is NAME (as `tini` is):
+    // it runs PROG ARGS as its child, then reaps every orphan it adopts, until it is killed.
+    #[cfg(target_os = "linux")]
+    if mode == "reaper" && a.len() >= 4 {
+        let name = CString::new(a[2].as_str()).unwrap();
+        unsafe {
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+            libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+        }
+        let _ = std::process::Command::new(&a[3]).args(&a[4..]).spawn();
+        loop {
+            if unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } < 0 {
+                unsafe { libc::usleep(200_000) };
+            }
         }
     }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.

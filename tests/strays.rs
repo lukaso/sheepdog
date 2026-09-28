@@ -3,6 +3,11 @@
 //! `strays` reads every process of this user, so every cell filters with `--cmd <word>`, a word
 //! unique to the cell that is in the scratch path of every process it built; `--kill` then
 //! reaches only them (and the wall keeps any untagged process). Cells run one at a time.
+//!
+//! Linux: the legs' containers run `--init`, so an orphan's parent is PID 1, not an OS init, and
+//! every stray would be a `pid1-child` (skipped unless named). So on Linux a cell's strays are
+//! made under a subreaper of its own named `tini` (the `reaper` fixture), which is no PID 1: the
+//! unnamed paths of `--kill` run there too.
 
 mod common;
 
@@ -29,34 +34,53 @@ fn fixture() -> &'static str {
     env!("CARGO_BIN_EXE_sd-fixture")
 }
 
-/// A cell's scratch directory; its name is the cell's filter word.
+/// A cell's scratch directory; its name is the cell's filter word. Its reapers (Linux) and every
+/// recorded process die with it.
 struct Cell {
     dir: PathBuf,
     word: String,
     recs: Vec<PathBuf>,
+    reapers: Vec<std::process::Child>,
 }
 
 impl Cell {
     fn new() -> Cell {
+        Cell::under(&std::env::temp_dir())
+    }
+    /// A cell whose directory is under BASE.
+    fn under(base: &std::path::Path) -> Cell {
         // ends with `z`, so no word is a prefix of another (x1z, x10z)
         let word = format!("sdstr{}x{}z", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst));
-        let dir = std::env::temp_dir().join(&word);
+        let dir = base.join(&word);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Cell { dir, word, recs: Vec::new() }
+        Cell { dir, word, recs: Vec::new(), reapers: Vec::new() }
     }
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
-    /// Run the fixture with ARGS (DIR is `{}`) to its end; remember NAMES as records to clean.
-    fn make(&mut self, args: &[&str], names: &[&str]) {
+    /// Run PROG ARGS (DIR is `{}` in ARGS) to its end, on Linux under a reaper of this cell's;
+    /// remember NAMES as records to clean, and wait until each is written.
+    fn spawn(&mut self, prog: &str, args: &[&str], names: &[&str]) {
         let d = self.dir.to_str().unwrap().to_string();
         let a: Vec<String> = args.iter().map(|x| x.replace("{}", &d)).collect();
-        let st = Command::new(fixture()).args(&a).stdin(Stdio::null()).status().unwrap();
-        assert!(st.success(), "fixture {a:?}: {st:?}");
         for n in names {
             self.recs.push(self.path(n));
         }
+        if cfg!(target_os = "linux") {
+            let r = Command::new(fixture()).args(["reaper", "tini", prog]).args(&a).stdin(Stdio::null()).spawn().unwrap();
+            self.reapers.push(r);
+        } else {
+            let st = Command::new(prog).args(&a).stdin(Stdio::null()).status().unwrap();
+            assert!(st.success(), "{prog} {a:?}: {st:?}");
+        }
+        let want: Vec<PathBuf> = names.iter().map(|n| self.path(n)).collect();
+        assert!(wait_until(20, || want.iter().all(|p| std::fs::read_to_string(p).is_ok_and(|t| !t.is_empty()))), "{prog} {a:?} did not start {names:?}");
+    }
+    /// The fixture with ARGS: see `spawn`.
+    fn make(&mut self, args: &[&str], names: &[&str]) {
+        let fx = fixture().to_string();
+        self.spawn(&fx, args, names);
     }
     fn rec(&self, name: &str) -> Option<(i32, u64)> {
         let t = std::fs::read_to_string(self.path(name)).ok()?;
@@ -73,6 +97,10 @@ impl Cell {
 
 impl Drop for Cell {
     fn drop(&mut self) {
+        for r in &mut self.reapers {
+            common::send_child(r, libc::SIGKILL);
+            let _ = r.wait();
+        }
         for r in &self.recs {
             for suffix in ["", ".d"] {
                 let p = PathBuf::from(format!("{}{suffix}", r.display()));
@@ -276,16 +304,15 @@ fn strays_skips_a_live_apps_helper() {
 }
 
 /// A stray that is an ancestor of the `strays --kill` that names it (a daemon that runs it) is
-/// refused by `kill`'s target checks, and survives. (macOS: in the Linux legs' containers the
-/// daemon is a child of PID 1, skipped before `kill`'s checks are reached.)
-#[cfg(target_os = "macos")]
+/// refused by `kill`'s target checks, and survives.
 #[test]
 fn strays_kill_refuses_the_callers_ancestor() {
     let _s = serial();
     let mut c = Cell::new();
     let sd = sheepdog().to_string();
     let w = c.word.clone();
-    c.make(&["stray-run", "{}", "daemon", &sd, "strays", "--kill", "--yes", "--cmd", &w], &["daemon", "daemon.d"]);
+    c.make(&["stray-run", "{}", "daemon", &sd, "strays", "--kill", "--yes", "--cmd", &w], &["daemon.d"]);
+    c.recs.push(c.path("daemon")); // written when its strays has ended
     let d = c.rec("daemon.d").unwrap();
     // the daemon's strays ends (its code), or the daemon itself was killed
     assert!(wait_until(30, || c.path("daemon.code").exists() || !common::alive(d)), "the daemon's strays did not end");
@@ -337,7 +364,8 @@ fn strays_kill_skips_a_tree_that_holds_a_supervisor() {
     let sd = sheepdog().to_string();
     let fx = fixture().to_string();
     let inner = c.path("inner").to_str().unwrap().to_string();
-    c.make(&["stray-run", "{}", "daemon", &sd, "run", "--", &fx, "sigcount", &inner], &["daemon", "daemon.d", "inner"]);
+    c.make(&["stray-run", "{}", "daemon", &sd, "run", "--", &fx, "sigcount", &inner], &["daemon.d", "inner"]);
+    c.recs.push(c.path("daemon")); // never written: its program runs until killed
     assert!(wait_until(15, || c.rec("inner").is_some()), "the inner job did not start");
     let d = c.rec("daemon.d").unwrap();
     let l = strays(&["--json", "--cmd", &c.word], &[]);
@@ -351,4 +379,58 @@ fn strays_kill_skips_a_tree_that_holds_a_supervisor() {
     assert!(tree >= 2.0, "its tree (the supervisor and the job's root) is not counted: {tree}\n{}", l.out);
     assert!(kept, "a stray whose tree holds a live supervisor was killed unnamed: {}", k.err);
     assert!(gone, "control: named, the stray and its tree survived ({:?}): {}", named.code, named.err);
+}
+
+/// A `sheepdog run` supervisor that is itself a stray (its caller exited: `nohup sheepdog run ...
+/// &` and a closed terminal) is listed as its job's and skipped by `--kill` unless named; named,
+/// it is killed (its job ends with it).
+#[test]
+fn strays_kill_skips_an_orphaned_supervisor() {
+    let _s = serial();
+    let mut c = Cell::new();
+    let sd = sheepdog().to_string();
+    let fx = fixture().to_string();
+    let script = format!(r#""{sd}" run -- "{fx}" sigcount "{{}}/inner" & sleep 1"#);
+    c.spawn("/bin/sh", &["-c", &script], &["inner"]);
+    let inner = c.rec("inner").unwrap();
+    let sup = common::found(String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &inner.0.to_string()]).output().unwrap().stdout).trim().parse().unwrap_or(0)).expect("the supervisor");
+    struct Kill((i32, u64));
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            common::send(self.0 .0, self.0 .1, libc::SIGKILL);
+        }
+    }
+    let _k = Kill(sup);
+    // its caller (the shell) is gone: the supervisor is an orphan now
+    assert!(wait_until(10, || String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &sup.0.to_string()]).output().unwrap().stdout).trim() != ""), "no supervisor");
+    std::thread::sleep(Duration::from_millis(1500));
+    let l = strays(&["--json", "--cmd", &c.word], &[]);
+    let row = rows(&l.out).remove(&sup.0);
+    let k = strays(&["--kill", "--yes", "--cmd", &c.word], &[]);
+    let kept = common::alive(sup) && common::alive(inner);
+    let named = strays(&["--kill", "--yes", "--pid", &format!("{}:{}", sup.0, sup.1), "--cmd", &c.word], &[]);
+    let gone = wait_until(15, || !common::alive(sup) && !common::alive(inner));
+    assert!(row.is_some(), "the orphaned supervisor is not listed:\n{}", l.out);
+    assert!(row.as_ref().is_some_and(|r| r.get("job").is_some_and(|j| j.str().is_some())), "it is not marked with its job:\n{}", l.out);
+    assert!(kept, "an orphaned supervisor was killed unnamed: {}", k.err);
+    assert!(gone, "control: named, the supervisor and its job survived ({:?}): {}", named.code, named.err);
+}
+
+/// `--cmd` matches the whole command line, not the shown one (capped at 256 bytes): a stray whose
+/// filter word comes after its first 256 bytes is found.
+#[test]
+fn strays_cmd_matches_the_whole_command_line() {
+    let _s = serial();
+    let base = std::env::temp_dir().join("p".repeat(240));
+    std::fs::create_dir_all(&base).unwrap();
+    let mut c = Cell::under(&base);
+    c.make(&["stray", "{}", "s"], &["s"]);
+    let o = strays(&["--json", "--cmd", &c.word], &[]);
+    let s = c.rec("s").unwrap();
+    let row = rows(&o.out).remove(&s.0);
+    drop(c);
+    let _ = std::fs::remove_dir(&base);
+    let r = row.unwrap_or_else(|| panic!("the stray is not found by a word past its first 256 bytes:\n{}", o.out));
+    let shown = r.get("cmd").and_then(Json::str).unwrap_or("").to_string();
+    assert!(shown.len() <= 300, "control: the shown command line is capped: {} bytes", shown.len());
 }
