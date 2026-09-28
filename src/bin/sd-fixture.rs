@@ -102,6 +102,9 @@
 //!   becomes `sigcount R.root`. Every process is this fixture, so its environment can be read.
 //! - `spawn-on GO R`: P4 (the closure). Records itself in R, waits for the file GO, then forks a
 //!   child that records itself in R and waits; both wait (60 s at most).
+//! - `worker R GO`: P4 (the journal in `kill <pid>`). Records itself (W) in R, forks C; C forks E
+//!   and waits for the file GO before it exits; E records itself in R and waits. W waits. Every
+//!   process is this fixture (60 s at most). R's lines: W, then E, then C.
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
 //!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
 //!   and exits. G escaped by reparenting only.
@@ -1189,6 +1192,41 @@ fn main() {
                 loop {
                     libc::pause();
                 }
+            }
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    if mode == "worker" && a.len() == 4 {
+        let (r, go) = (a[2].clone(), a[3].clone());
+        unsafe {
+            libc::alarm(60);
+            record(&r, libc::getpid());
+            if libc::fork() == 0 {
+                // C
+                if libc::fork() == 0 {
+                    record(&r, libc::getpid()); // E
+                    libc::alarm(60);
+                    loop {
+                        libc::pause();
+                    }
+                }
+                let mut n = 0;
+                while std::fs::metadata(&r).map_or(0, |m| m.len()) == 0 || std::fs::read_to_string(&r).map_or(0, |t| t.lines().count()) < 2 {
+                    libc::usleep(5_000);
+                    n += 1;
+                    if n > 2000 {
+                        break;
+                    }
+                }
+                record(&r, libc::getpid()); // C, last
+                let mut n = 0;
+                while !std::path::Path::new(&go).exists() && n < 6000 {
+                    libc::usleep(10_000);
+                    n += 1;
+                }
+                libc::_exit(0);
             }
             loop {
                 libc::pause();
