@@ -28,14 +28,28 @@ cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
 grep -E '^test result|^thread|FAILED|left:|right:' /tmp/suite.log | cut -c1-200
-left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
-# and any live process that still carries this leg's tag (test-all passes SHEEPDOG_LEG_TAG; the
-# runner gives it to every test process), whatever its name
-tagged=0
-if [ -n "${SHEEPDOG_LEG_TAG:-}" ]; then
-  for e in /proc/[0-9]*/environ; do
-    tr '\0' '\n' < "$e" 2>/dev/null | grep -qx "SHEEPDOG_TEST_TAG=$SHEEPDOG_LEG_TAG" && tagged=$((tagged+1))
+# a leftover by name, and any live process that still carries this leg's tag (test-all passes
+# SHEEPDOG_LEG_TAG; the runner gives it to every test process), whatever its name. Counted
+# again for up to 3 s: a process still exiting when the suite ends is not a leftover (under an
+# emulator the last cells' kills take a while), one that is alive after 3 s is (the name
+# patterns are 20-29 s sleeps and live supervisors). The ones left are printed.
+PAT='^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))'
+tagged_pids() {
+  [ -n "${SHEEPDOG_LEG_TAG:-}" ] || return 0
+  for d in /proc/[0-9]*; do
+    { tr '\0' '\n' < "$d/environ" | grep -qx "SHEEPDOG_TEST_TAG=$SHEEPDOG_LEG_TAG"; } 2>/dev/null && echo "${d#/proc/}"
   done
+}
+i=0
+while :; do
+  left=$(ps -eo args | grep -cE "$PAT")
+  tagged=$(tagged_pids | grep -c .)
+  { [ "$left" -eq 0 ] && [ "$tagged" -eq 0 ]; } || [ $i -ge 30 ] && break
+  sleep 0.1; i=$((i+1))
+done
+if [ "$left" -gt 0 ] || [ "$tagged" -gt 0 ]; then
+  ps -eo pid,ppid,stat,args | grep -E "$PAT" | grep -v grep | cut -c1-200
+  for p in $(tagged_pids); do echo "tagged $p: $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-200)"; done
 fi
 echo "leftovers: $left, tagged: $tagged"
 left=$((left+tagged))
