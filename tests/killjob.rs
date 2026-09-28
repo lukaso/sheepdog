@@ -491,7 +491,7 @@ fn kill_job_turns_the_latch_on() {
     let h = json::parse(&header).unwrap();
     let field = |k: &str| h.get(k).and_then(Json::str).unwrap().to_string();
     // a supervisor that is gone: a reaped child's pid with an identity it never had
-    let mut dead = Command::new("/usr/bin/true").spawn().unwrap();
+    let mut dead = Command::new("true").spawn().unwrap();
     let _ = dead.wait();
     let forged = format!(
         "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1}},\"argv\":\"sheepdog run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
