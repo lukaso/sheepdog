@@ -323,6 +323,36 @@ fn the_privacy_warning_fires_only_for_a_refused_protected_folder() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// D10: an argument counts only when it is written as a path (it has a `/`): `ssh host ls prot`
+/// names a remote folder, and probing the local one could raise a privacy prompt the job never
+/// needs. From a plain cwd, a bare `prot` gives no warning; `./prot` and the absolute path do.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_privacy_warning_counts_only_arguments_written_as_paths() {
+    let d = scratch("tccargs");
+    let prot = d.join("prot");
+    std::fs::create_dir_all(&prot).unwrap();
+    let warned = |arg: &str| -> bool {
+        let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
+        let st = Command::new(sheepdog())
+            .args(["run", "--", "/bin/echo", arg])
+            .current_dir(&d)
+            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(st.code(), Some(0));
+        std::fs::read_to_string(&trace).unwrap_or_default().lines().any(|l| l.starts_with("tcc-warning "))
+    };
+    assert!(!warned("prot"), "a bare word was probed as a local path");
+    assert!(warned("./prot"), "control: ./prot is a path");
+    assert!(warned(prot.to_str().unwrap()), "control: the absolute path");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// `--version` prints this build's version.
 #[test]
 fn version_prints_the_build_version() {

@@ -227,20 +227,47 @@ pub(crate) fn spi_active() -> bool {
 /// privacy-protected folder that this (disclaimed) process cannot read, say how to fix it, once.
 /// Debug seam SHEEPDOG_TEST_TCC_PROTECTED=<dir>: that dir counts as protected and its probe fails.
 fn tcc_warning(cmd: &[OsString]) {
-    // paths compared resolved (the cwd is reported resolved: /var is /private/var on macOS)
-    let real = |p: std::path::PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-    let seam = std::env::var_os("SHEEPDOG_TEST_TCC_PROTECTED").filter(|_| cfg!(debug_assertions)).map(|p| real(std::path::PathBuf::from(p)));
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut roots: Vec<std::path::PathBuf> = home.iter().flat_map(|h| ["Documents", "Desktop", "Downloads", "Library/Mobile Documents"].map(|x| real(h.join(x)))).collect();
-    roots.extend(seam.clone());
-    let cwd = std::env::current_dir().ok();
-    let mut cands: Vec<std::path::PathBuf> = cwd.clone().map(real).into_iter().collect();
-    for a in cmd.iter().skip(1) {
-        let p = std::path::PathBuf::from(a);
-        let p = if p.is_absolute() { p } else { cwd.as_ref().map_or(p.clone(), |c| c.join(&p)) };
-        if p.exists() {
-            cands.push(real(p));
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
+    // the path text, made absolute and without `.` and `..`, with no file call: a path outside
+    // the protected folders is never touched (an automount or a dead network volume could hang
+    // the start, and a protected folder the job does not use must not raise a privacy prompt)
+    let lexical = |p: &Path| -> PathBuf {
+        let mut out = PathBuf::new();
+        for c in p.components() {
+            match c {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                c => out.push(c),
+            }
         }
+        out
+    };
+    let seam: Vec<PathBuf> = std::env::var_os("SHEEPDOG_TEST_TCC_PROTECTED")
+        .filter(|_| cfg!(debug_assertions))
+        .map(PathBuf::from)
+        .into_iter()
+        .flat_map(|s| [std::fs::canonicalize(&s).ok(), Some(s)]) // debug seam only
+        .flatten()
+        .collect();
+    // the roots as written, and under the resolved home (the cwd is reported resolved); the
+    // home itself is not protected, so resolving it touches nothing that is
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut homes: Vec<PathBuf> = home.iter().cloned().collect();
+    homes.extend(home.as_ref().and_then(|h| std::fs::canonicalize(h).ok()));
+    let mut roots: Vec<PathBuf> = homes.iter().flat_map(|h| ["Documents", "Desktop", "Downloads", "Library/Mobile Documents"].map(|x| h.join(x))).collect();
+    roots.extend(seam.iter().cloned());
+    let cwd = std::env::current_dir().ok();
+    let mut cands: Vec<PathBuf> = cwd.iter().cloned().collect();
+    for a in cmd.iter().skip(1) {
+        // only an argument written as a path: a bare word may name something remote
+        if !a.as_bytes().contains(&b'/') {
+            continue;
+        }
+        let p = PathBuf::from(a);
+        cands.push(lexical(&if p.is_absolute() { p } else { cwd.as_ref().map_or(p.clone(), |c| c.join(&p)) }));
     }
     for c in cands {
         let root = roots.iter().find(|r| c.starts_with(r)).cloned().or_else(|| {
@@ -248,14 +275,17 @@ fn tcc_warning(cmd: &[OsString]) {
             (it.next().is_some() && it.next().is_some_and(|x| x.as_os_str() == "Volumes") && it.next().is_some()).then(|| c.iter().take(3).collect())
         });
         let Some(root) = root else { continue };
+        if !c.exists() {
+            continue;
+        }
         let dir = if c.is_dir() { c.clone() } else { c.parent().map_or(c.clone(), |p| p.to_path_buf()) };
-        let refused = seam.as_ref().is_some_and(|s| c.starts_with(s)) || matches!(std::fs::read_dir(&dir), Err(e) if e.raw_os_error() == Some(libc::EPERM));
+        let refused = seam.iter().any(|s| c.starts_with(s)) || matches!(std::fs::read_dir(&dir), Err(e) if e.raw_os_error() == Some(libc::EPERM));
         if !refused {
             continue;
         }
         let me = exe_path(unsafe { libc::getpid() }).unwrap_or_else(|| "sheepdog".into());
         let bundle = me.find(".app/").map_or(me.clone(), |i| me[..i + 4].to_string());
-        let shown = home.as_ref().and_then(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string());
+        let shown = homes.iter().find_map(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string());
         say!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G to paste the path). Or run with --inherit-terminal-permissions (weaker tracking).");
         crate::note(format!("tcc-warning {}", root.display()));
         return;
