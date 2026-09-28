@@ -46,6 +46,10 @@ pub struct Journal {
     pub path: PathBuf,
     file: std::fs::File,
     pub job: String,
+    /// the header's boot id and pid namespace: a journal from another boot or namespace is
+    /// never swept, whichever folder it is in (the folder only narrows the read)
+    pub boot: String,
+    pub pidns: String,
     pub owner: String,
     pub sup: (i32, u64),
     pub members: Vec<Line>,
@@ -111,6 +115,8 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         path: path.to_path_buf(),
         file,
         job: h.get("job").and_then(Json::str).unwrap_or("").to_string(),
+        boot: h.get("boot").and_then(Json::str).unwrap_or("").to_string(),
+        pidns: h.get("pidns").and_then(Json::str).unwrap_or("").to_string(),
         owner: h.get("owner").and_then(Json::str).unwrap_or("default").to_string(),
         sup,
         members: Vec::new(),
@@ -279,6 +285,10 @@ pub fn main(args: &[OsString]) -> i32 {
                 continue;
             }
         };
+        if Some(j.boot.as_str()) != crate::journal::boot_id().as_deref() || j.pidns != crate::journal::pidns() {
+            crate::note(format!("sweep skipped {}: another boot or pid namespace", f.display()));
+            continue;
+        }
         if j.owner != owner || j.leave_strays {
             continue;
         }

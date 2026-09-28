@@ -198,8 +198,16 @@ fn sweep_keeps_to_its_own_boot_pid_namespace_and_owner() {
     ];
     for (name, dir, owner, strays, args) in cases {
         let s = state(&d.join(name));
+        // this boot's folder exists too (with nothing to sweep), so a sweep does read this state
+        std::fs::create_dir_all(s.join("jobs").join(&here)).unwrap();
+        std::fs::set_permissions(s.join("jobs").join(&here), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let (hb, hp) = match name {
+            "other-boot" => ("00000000-0000-0000-0000-000000000000".to_string(), pidns.clone()),
+            "other-pidns" => (boot.clone(), "12345.678".to_string()),
+            _ => (boot.clone(), pidns.clone()),
+        };
         let (mut c, p, r) = decoy(&d, &format!("decoy-{name}"));
-        let j = forge(&s, &dir, "j-0badf00d", owner, &boot, &pidns, &[p], strays);
+        let j = forge(&s, &dir, "j-0badf00d", owner, &hb, &hp, &[p], strays);
         let (code, _) = sweep(&s, &d, args, &[]);
         let (alive, n) = (common::alive(p), counted(&r));
         end_decoy(&mut c);
@@ -394,36 +402,39 @@ fn sweep_never_touches_its_own_ancestors() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// An inner supervisor in a dead job is ended first (TERM, then CONT): it then ends its own job,
-/// so its escapee (reachable only through the inner supervisor's responsibility on macOS) dies.
+/// An inner supervisor in a dead job is ended first (TERM, then CONT): it then ends its own job.
+/// The inner job's escapee is born after the outer supervisor died (GO), so no outer scan saw it:
+/// on macOS only the inner supervisor can reach it; on Linux the ppid closure does too.
 #[test]
 fn sweep_ends_an_inner_supervisor_first() {
     let d = scratch("inner");
     let s = state(&d);
-    let (r, rr) = (d.join("rec"), d.join("root"));
+    let (r, rr, go) = (d.join("rec"), d.join("root"), d.join("go"));
     let inner_state = state(&d.join("inner"));
     // the inner run is a background child (so it inherits no PDEATHSIG on Linux) with a state of
     // its own; the outer root becomes a counting fixture
     let script = format!(
-        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" & exec "$FX" sigcount "{}""#,
+        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" "{}" & exec "$FX" sigcount "{}""#,
         inner_state.display(),
         r.display(),
+        go.display(),
         rr.display()
     );
     let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
-    let g = wait_until(15, || !records(&r).is_empty()).then(|| records(&r)[0]);
-    std::thread::sleep(Duration::from_millis(600)); // a few outer scans journal the inner supervisor
+    // the inner supervisor is journaled by the outer (a few scans), then the outer is SIGKILLed
+    std::thread::sleep(Duration::from_millis(800));
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
+    std::fs::write(&go, b"").unwrap();
+    let g = wait_until(15, || !records(&r).is_empty()).then(|| records(&r)[0]);
     let g_before = g.is_some_and(common::alive);
     let (code, _) = sweep(&s, &d, &[], &[]);
-    let g_after = g.is_some_and(common::alive);
+    let g_after = wait_until(5, || !g.is_some_and(common::alive)) == false;
     for p in g.iter().copied().chain(records(&rr)).chain(records(&PathBuf::from(format!("{}.root", r.display())))) {
         common::send(p.0, p.1, libc::SIGKILL);
     }
-    assert!(g_before, "control: the inner escapee outlived the outer's SIGKILL");
+    assert!(g_before, "control: the inner escapee was born and lives");
     assert_eq!(code, Some(0));
     assert!(!g_after, "the inner job's escapee survived the sweep");
     let _ = std::fs::remove_dir_all(&d);
 }
-

@@ -97,7 +97,7 @@
 //!   once (pages touched), writes MB to PROGRESS, and keeps running (60 s at most).
 //! - `forker N INTERVAL_MS R`: P3 (`--max-procs`). Forks N children, one every INTERVAL_MS, each
 //!   recording itself and waiting (60 s at most); then waits itself.
-//! - `escapee-and-wait R`: P4 (sweep). Starts a setsid escapee G (C: setsid, fork G, exit) that
+//! - `escapee-and-wait R [GO]`: P4 (sweep). (With GO: first waits for that file.) Starts a setsid escapee G (C: setsid, fork G, exit) that
 //!   records itself in R and becomes `sigcount R.g` (the same pid); once R has G, this process
 //!   becomes `sigcount R.root`. Every process is this fixture, so its environment can be read.
 //! - `spawn-on GO R`: P4 (the closure). Records itself in R, waits for the file GO, then forks a
@@ -1131,10 +1131,17 @@ fn main() {
             }
         }
     }
-    if mode == "escapee-and-wait" && a.len() == 3 {
+    if mode == "escapee-and-wait" && (a.len() == 3 || a.len() == 4) {
         let me = std::env::current_exe().unwrap();
         let exe = CString::new(me.as_os_str().as_encoded_bytes()).unwrap();
         let r = a[2].clone();
+        if let Some(go) = a.get(3) {
+            let mut n = 0;
+            while !std::path::Path::new(go).exists() && n < 6000 {
+                unsafe { libc::usleep(10_000) };
+                n += 1;
+            }
+        }
         unsafe {
             match libc::fork() {
                 0 => {
