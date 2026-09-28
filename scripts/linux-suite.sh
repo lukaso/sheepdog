@@ -24,7 +24,16 @@ timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
 grep -E '^test result|^thread|FAILED|left:|right:' /tmp/suite.log | cut -c1-200
 left=$(ps -eo args | grep -cE '^(/bin/sleep 2[0-9]\.|\S*sd-fixture |\S*/sheepdog run|sheepdog (run|__root))')
-echo "leftovers: $left"
+# and any live process that still carries this leg's tag (test-all passes SHEEPDOG_LEG_TAG; the
+# runner gives it to every test process), whatever its name
+tagged=0
+if [ -n "${SHEEPDOG_LEG_TAG:-}" ]; then
+  for e in /proc/[0-9]*/environ; do
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -qx "SHEEPDOG_TEST_TAG=$SHEEPDOG_LEG_TAG" && tagged=$((tagged+1))
+  done
+fi
+echo "leftovers: $left, tagged: $tagged"
+left=$((left+tagged))
 # the pid-reuse race cell returns early without SD_REUSE_TEST: require that it ran
 race_ok=0
 if [ -n "${SD_REUSE_TEST:-}" ]; then

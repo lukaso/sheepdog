@@ -74,6 +74,11 @@ bg_wait() {
 
 record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
 
+# A tag of its own for each leg (PHASE2.md §0.4): the runner adopts it, so every test process of
+# the leg carries SHEEPDOG_TEST_TAG=<it>, and after the suite any live process that still does is
+# a leftover, whatever its name.
+legtag() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+
 # A leg container: --init (so a signal to the container ends it: a shell as PID 1 ignores TERM),
 # its id recorded in a cidfile (cleanup removes it even after a timeout or ctrl-C), and bounded.
 leg_run() { # leg-name docker-args...
@@ -87,17 +92,22 @@ leg_run() { # leg-name docker-args...
 
 suite_in() { # image target-dir leg-name [docker args...]
   local img=$1 tgt=$2 name=$3; shift 3
-  leg_run "$name" "$@" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh
+  leg_run "$name" "$@" -e SHEEPDOG_LEG_TAG="$(legtag)" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh
 }
 
 leg_macos() {
   [ "$(uname)" = Darwin ] || { record macos "skipped (not macOS)"; return 0; }
-  bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
+  local lt
+  lt=$(legtag)
+  SHEEPDOG_LEG_TAG=$lt bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
   local rc=$?
-  local left
+  local left tagged
   # a nested run or a root shim found through the test PATH has argv[0] `sheepdog`
   left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
-  [ $rc -eq 0 ] && [ "$left" -eq 0 ] && record macos PASS || record macos "FAIL (rc $rc, leftovers $left; $LOGDIR/macos.log)"
+  # and any process that still carries the leg's tag (`ps eww` shows the environment of every
+  # process but Apple's platform binaries; the bracket keeps grep's own argv from matching)
+  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPDOG_TEST_TA[G]=$lt")
+  [ $rc -eq 0 ] && [ "$left" -eq 0 ] && [ "$tagged" -eq 0 ] && record macos PASS || record macos "FAIL (rc $rc, leftovers $left, tagged $tagged; $LOGDIR/macos.log)"
 }
 
 leg_alpine() {
