@@ -574,6 +574,53 @@ fn a_member_born_during_the_supervisor_wait_is_journaled_first() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The same rule inside the kill itself: a child born after the sweep's first freeze (its
+/// parent, a member the test resumes while the sweep holds) is found by a later scan of the
+/// kill, and has its journal line before any signal to it.
+#[test]
+fn a_member_born_during_the_kill_is_journaled_first() {
+    let d = scratch("killjournal");
+    let s = state(&d);
+    let (go, r, rr, log, ready, release) = (d.join("go"), d.join("rec"), d.join("root"), d.join("log"), d.join("ready"), d.join("release"));
+    let script = format!(r#""$FX" spawn-on "{}" "{}" & exec "$FX" sigcount "{}""#, go.display(), r.display(), rr.display());
+    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let parent = wait_until(15, || !records(&r).is_empty() && !records(&rr).is_empty()).then(|| records(&r)[0]);
+    let journaled_all = parent.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p.0) && journaled(&s).contains(&records(&rr)[0].0)));
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    let (s2, d2, l2, rd2, rl2) = (s.clone(), d.clone(), log.clone(), ready.clone(), release.clone());
+    let t = std::thread::spawn(move || {
+        let env = [("SHEEPDOG_TEST_SIGNAL_LOG", l2.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "5000"), ("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", rl2.to_str().unwrap()), ("SHEEPDOG_TEST_READY_FILE", rd2.to_str().unwrap())];
+        sweep(&s2, &d2, &[], &env)
+    });
+    // the sweep has frozen the job and holds: resume the parent, which spawns its child now
+    let held = wait_until(15, || ready.exists());
+    if let Some(p) = parent {
+        common::send(p.0, p.1, libc::SIGCONT);
+    }
+    std::fs::write(&go, b"").unwrap();
+    let born = wait_until(10, || records(&r).len() >= 2);
+    std::fs::write(&release, b"").unwrap();
+    let (code, _) = t.join().unwrap();
+    let child = records(&r).get(1).copied();
+    for p in records(&r).into_iter().chain(records(&rr)) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert!(journaled_all, "the job did not journal its members");
+    assert!(held, "the sweep never reached its hold after the freeze");
+    assert!(born, "the member's child was not born during the hold");
+    let cp = child.unwrap().0.to_string();
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let j = text.lines().position(|l| l.split_whitespace().collect::<Vec<_>>() == ["journal", cp.as_str()]);
+    let first = text.lines().position(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && (w[0] == "kill" || w[0] == "pidfd") && w[1] == cp
+    });
+    assert!(first.is_some(), "the sweep never signalled the child born during the kill (code {code:?}):\n{text}");
+    assert!(j.is_some() && j < first, "journal at {j:?}, first signal at {first:?}:\n{text}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A journal line that names another user's process (with its correct identity) never reaches
 /// the signal door: a root sweeper would otherwise deliver to it. Linux legs run as root; on a
 /// normal account the kernel refuses the signal anyway, so the cell needs root.
