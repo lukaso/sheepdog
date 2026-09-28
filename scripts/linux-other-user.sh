@@ -6,14 +6,19 @@
 set -u
 apk add -q procps bash util-linux-misc setpriv >/dev/null || exit 3
 rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xmf -) && cd /w || exit 3
-export CARGO_TARGET_DIR=/tgt
+# build in a directory of the container, seeded from the mounted cache (deps keep their mtimes,
+# so they stay fresh; the incremental data is left out): a build that writes to the bind mount
+# failed at random ("libc required to be available in rlib format", a left-over incremental
+# directory), and every leg recompiles sheepdog anyway
+mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
+export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
 cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 # the test executables only (the profile of a plain bin target has "test":false)
 bins=$(cargo test --no-run --message-format=json 2>/dev/null | grep '"profile":{[^}]*"test":true' | grep -o '"executable":"[^"]*"' | cut -d'"' -f4)
 [ -n "$bins" ] || { echo "no test executables found"; exit 3; }
 adduser -D sd 2>/dev/null
 mkdir -p /tmp/decoy && chmod 777 /tmp/decoy
-/bin/setpriv --reuid=65534 --regid=65534 --clear-groups /tgt/debug/sd-fixture sigcount /tmp/decoy/rec &
+/bin/setpriv --reuid=65534 --regid=65534 --clear-groups /t/debug/sd-fixture sigcount /tmp/decoy/rec &
 i=0; while [ ! -s /tmp/decoy/rec ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 decoy=$(cut -d' ' -f1 /tmp/decoy/rec)
 echo "decoy pid $decoy (uid $(ps -o uid= -p "$decoy" | tr -d ' '))"
@@ -32,7 +37,7 @@ LEGTAG=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 boot=$(cat /proc/sys/kernel/random/boot_id)
 pidns=$(stat -L -c '%d.%i' /proc/self/ns/pid)
 mkdir -p /tmp/planted && chown sd:sd /tmp/planted
-/bin/setpriv --reuid=sd --regid=sd --clear-groups env SHEEPDOG_TEST_TAG="$LEGTAG" /tgt/debug/sd-fixture sigcount /tmp/planted/decoy &
+/bin/setpriv --reuid=sd --regid=sd --clear-groups env SHEEPDOG_TEST_TAG="$LEGTAG" /t/debug/sd-fixture sigcount /tmp/planted/decoy &
 i=0; while [ ! -s /tmp/planted/decoy ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 dpid=$(cut -d' ' -f1 /tmp/planted/decoy); did=$(cut -d' ' -f2 /tmp/planted/decoy)
 [ -n "$dpid" ] && [ -n "$did" ] || { echo "the planted decoy did not start"; exit 3; }

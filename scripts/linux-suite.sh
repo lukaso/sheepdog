@@ -18,7 +18,12 @@ if [ -n "${SD_PS_SHIM:-}" ]; then
   printf '#!/bin/sh\n%s "$@" | sed -E "s#/run/rosetta/rosetta [^ ]+ ##"\n' "$real" > /usr/local/bin/ps && chmod +x /usr/local/bin/ps
 fi
 rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xmf -) && cd /w || exit 3
-export CARGO_TARGET_DIR=/tgt
+# build in a directory of the container, seeded from the mounted cache (deps keep their mtimes,
+# so they stay fresh; the incremental data is left out): a build that writes to the bind mount
+# failed at random ("libc required to be available in rlib format", a left-over incremental
+# directory), and every leg recompiles sheepdog anyway
+mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
+export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
 cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
@@ -43,7 +48,7 @@ probe_ok=0
 if [ -n "${SD_LEG_PROBE:-}" ]; then
   # which door delivers signals: a stray the kill must end
   rm -f /tmp/probe.log
-  SHEEPDOG_TEST_SIGNAL_LOG=/tmp/probe.log timeout 30 /tgt/debug/sheepdog run --quiet -- /bin/sh -c '/bin/sleep 29.5 & exit 0'
+  SHEEPDOG_TEST_SIGNAL_LOG=/tmp/probe.log timeout 30 /t/debug/sheepdog run --quiet -- /bin/sh -c '/bin/sleep 29.5 & exit 0'
   p=$(grep -c '^pidfd ' /tmp/probe.log); k=$(grep -c '^kill ' /tmp/probe.log)
   echo "probe: pidfd=$p kill=$k (want $SD_LEG_PROBE)"
   case "$SD_LEG_PROBE" in
