@@ -60,6 +60,15 @@ pub fn uniq(pid: pid_t) -> Option<(u64, u64)> {
     (r == n).then_some((u.uniqueid, u.puniqueid))
 }
 
+/// (uniqueid, p_idversion) of a live process: the version changes when the pid is reused and on
+/// exec, so the same pair before and after a check means the same image throughout.
+pub fn uniq_version(pid: pid_t) -> Option<(u64, i32)> {
+    let mut u: UniqInfo = unsafe { zeroed() };
+    let n = size_of::<UniqInfo>() as c_int;
+    let r = unsafe { libc::proc_pidinfo(pid, PROC_PIDUNIQIDENTIFIERINFO, 0, &mut u as *mut _ as *mut c_void, n) };
+    (r == n && u.uniqueid != 0).then_some((u.uniqueid, u.idversion))
+}
+
 /// The uniqueid of the process responsible for `pid`; None means "no fact" (PLAN.md §3.2).
 pub fn resp_uniq(pid: pid_t) -> Option<u64> {
     // Test seam (debug builds only): SHEEPDOG_TEST_SPI=broken makes the SPI answer "no fact".
@@ -247,13 +256,13 @@ fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool 
         Some((u, _)) => u,
         None => return false,
     };
-    if resp_uniq(me) == Some(mine) {
-        return true; // already re-exec'd
-    }
-    // At most one attempt (PLAN.md §3.1): the re-exec carries this pid in REEXEC_MARK. If the
-    // mark is ours, the attempt already happened and did not take effect: fall back, never loop.
+    // At most one attempt (PLAN.md §3.1): the re-exec carries this pid in REEXEC_MARK. With the
+    // mark ours, the attempt happened: it took effect if this process is now responsible for
+    // itself, else fall back (never loop). Without the mark there is always one attempt: a
+    // process whose responsible process has died also reads as responsible for itself, and its
+    // children would then stay tied to the dead one.
     if std::env::var(REEXEC_MARK).ok().as_deref() == Some(me.to_string().as_str()) {
-        return false;
+        return resp_uniq(me) == Some(mine);
     }
     std::env::set_var(REEXEC_MARK, me.to_string());
     let disclaim: Disclaim = match sym("responsibility_spawnattrs_setdisclaim") {
@@ -544,6 +553,7 @@ fn wait(
     members: &mut dyn FnMut() -> Vec<(pid_t, u64)>,
     group_is_ours: &mut dyn FnMut(i32) -> bool,
     ints: &mut crate::Interrupts,
+    mut reg: Option<(&mut crate::register::Listener, &mut crate::register::Admit)>,
 ) -> Option<c_int> {
     let mut jobs = crate::JobControl::new(relay);
     let watch_term = sig.watch_term;
@@ -644,6 +654,21 @@ fn wait(
                 }
             }
         }
+        // the registration socket and its connections wake the loop (served on every wake anyway)
+        let watch_fd = |fd: i32| {
+            let mut ev: libc::kevent = zeroed();
+            ev.ident = fd as usize;
+            ev.filter = libc::EVFILT_READ;
+            ev.flags = libc::EV_ADD;
+            libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+        };
+        if let Some((l, _)) = reg.as_ref() {
+            if !polling {
+                for fd in l.fds() {
+                    watch_fd(fd);
+                }
+            }
+        }
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
         let mut exited: Option<i32> = None;
@@ -708,15 +733,27 @@ fn wait(
             if polling {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 let _ = members();
+                if let Some((l, admit)) = reg.as_mut() {
+                    l.service(&mut **admit);
+                }
                 continue;
             }
             let mut ev: libc::kevent = zeroed();
-            let tick = libc::timespec { tv_sec: 0, tv_nsec: tick_ns };
+            // wake by the tick, or sooner for a pending registration's deadline
+            let wait_ns = reg.as_ref().and_then(|(l, _)| l.next_deadline()).map_or(tick_ns, |d| {
+                (d.saturating_duration_since(std::time::Instant::now()).as_nanos() as i64).clamp(1_000_000, tick_ns)
+            });
+            let tick = libc::timespec { tv_sec: 0, tv_nsec: wait_ns };
             let r = libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &tick);
             // the error now: the membership scan below makes calls of its own that replace errno
             // (an EINTR from a STOP and CONT was then read as a failure; phase-1 review)
             let err = std::io::Error::last_os_error();
             let _ = members(); // membership while running (a tick or an event)
+            if let Some((l, admit)) = reg.as_mut() {
+                for fd in l.service(&mut **admit) {
+                    watch_fd(fd);
+                }
+            }
             if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {
                 relay_died(); // taken as TERM on the next pass
             } else if r > 0 && ev.filter == libc::EVFILT_PROC && ev.ident == pid as usize {
@@ -742,6 +779,18 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         None | Some("responsible") => {
             if let Some(code) = relay_if_needed(sig) {
                 return code;
+            }
+            // registration (PLAN.md §3.2): with every enclosing supervisor, before the disclaim;
+            // the re-exec'd image (already responsible for itself) does not register again
+            // (the re-exec'd image is known by the mark, never by responsibility: a process whose
+            // responsible process died also reads as responsible for itself)
+            let me_pid = unsafe { libc::getpid() };
+            let disclaimed = std::env::var(REEXEC_MARK).ok().as_deref() == Some(me_pid.to_string().as_str());
+            if !disclaimed && !crate::seam_flag("SHEEPDOG_TEST_PHASE1") {
+                let chain = crate::register::inherited(true);
+                if !chain.is_empty() {
+                    crate::register::register_all(&chain);
+                }
             }
             let ok = become_responsible(&a.argv, &sig.caller_mask);
             std::env::remove_var(REEXEC_MARK);
@@ -769,6 +818,25 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             // after the SETEXEC (the lock is CLOEXEC and would not survive it), before the root
             let journal = std::cell::RefCell::new(crate::journal::Journal::open(&a.owner, &a.argv));
+            // the listener for nested runs, and the chain the root inherits (a phase-2 source:
+            // none under the phase-1 opt-out)
+            let mut listener = if crate::seam_flag("SHEEPDOG_TEST_PHASE1") {
+                None
+            } else {
+                let mut chain = crate::register::inherited(false);
+                if chain.len() >= sheepdog::regwire::MAX {
+                    crate::note("chain full".into());
+                    say!("sheepdog: {} enclosing sheepdogs already: jobs nested in this one are found by the scan only", sheepdog::regwire::MAX);
+                    None
+                } else {
+                    let l = crate::register::Listener::open();
+                    if let Some(l) = &l {
+                        chain.push(l.entry());
+                        std::env::set_var(sheepdog::regwire::VAR, sheepdog::regwire::format(&chain));
+                    }
+                    l
+                }
+            };
             let tracker = std::cell::RefCell::new(crate::Tracker::default());
             tracker.borrow_mut().r.insert(me);
             tracker.borrow_mut().ever.insert(me);
@@ -857,9 +925,27 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 let _ = crate::caps::check(&live); // wait() ends the job when a cap fired
                 live
             };
+            // a registration: the peer joins R only if it is a member now, by the scan's own
+            // function (PLAN.md §3.2 step 3)
+            let mut admit = |_pid: i32, u: u64| -> bool {
+                let mut t = tracker.borrow_mut();
+                let found = members(&mut t);
+                if !t.ever.contains(&u) {
+                    return false;
+                }
+                if crate::wall::gate().is_none() {
+                    return false;
+                }
+                t.r.insert(u);
+                journal.borrow_mut().record(&found);
+                true
+            };
             let mut ints = crate::Interrupts::new(a, relay);
             let mut ours = |pg: i32| crate::only_ours(&group_pids(pg), relay, &tracker.borrow().known);
-            let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints) };
+            let reg = listener.as_mut().map(|l| (l, &mut admit as &mut crate::register::Admit));
+            let status = if ended { None } else { wait(root, sig, relay, &mut current, &mut ours, &mut ints, reg) };
+            // no registration is served during the kill: an inner run then fails fast (no socket)
+            drop(listener);
             if a.leave_strays && status.is_some() {
                 let mut j = journal.into_inner();
                 let marked = j.mark_leave_strays();
@@ -899,7 +985,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             };
             let r = uniq(root).map(|u| u.0).unwrap_or(0);
             let mut ints = crate::Interrupts::none();
-            let status = wait(root, sig, None, &mut Vec::new, &mut |_| false, &mut ints);
+            let status = wait(root, sig, None, &mut Vec::new, &mut |_| false, &mut ints, None);
             let result = kill_tree(&crate::KillOpts::from_env(), || responsible_to(r), || {}, || None, crate::signal, Default::default());
             crate::finish(status, result, &mut ints, sig)
         }

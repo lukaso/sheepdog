@@ -21,6 +21,8 @@
 mod caps;
 mod journal;
 mod kill;
+#[cfg(target_os = "macos")]
+mod register;
 mod state;
 mod status;
 mod sweep;

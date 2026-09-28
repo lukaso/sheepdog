@@ -133,6 +133,28 @@ fn record(path: &str, pid: i32) {
     }
 }
 
+/// Send one registration record over a fresh connection to `path`; the outer's answer: `ack`,
+/// `refused` (closed without a byte), `none` (nothing in 2 s) or `err <why>`.
+fn reg_client(path: &std::path::Path, rec: &[u8]) -> String {
+    use std::io::Read;
+    let mut s = match std::os::unix::net::UnixStream::connect(path) {
+        Ok(s) => s,
+        Err(e) => return format!("err {e}"),
+    };
+    if let Err(e) = s.write_all(rec) {
+        return format!("err {e}");
+    }
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let mut b = [0u8; 1];
+    match s.read(&mut b) {
+        Ok(1) if b[0] == b'1' => "ack".into(),
+        Ok(0) => "refused".into(),
+        Ok(_) => "err an unexpected answer".into(),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => "none".into(),
+        Err(e) => format!("err {e}"),
+    }
+}
+
 unsafe fn exec_sleep(arg: &CString) -> ! {
     let prog = CString::new("/bin/sleep").unwrap();
     let argv = [prog.as_ptr(), arg.as_ptr(), std::ptr::null()];
@@ -662,6 +684,120 @@ fn main() {
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
     if mode == "test-env" && a.len() >= 3 {
         test_env(&a[2..]);
+    }
+    // P5 (registration). `dfork-exec R PROG ARGS...`: a fast double fork: C forks G and exits at
+    // once; G (not in a new session) records itself in R and execs PROG ARGS. The root waits
+    // until R has G's line (bounded, 10 s), then becomes `sigcount R.root` (this fixture, so its
+    // environment can be read; `/bin/sleep` is a platform binary whose environment cannot).
+    if mode == "dfork-exec" && a.len() >= 4 {
+        let r = a[2].clone();
+        let prog: Vec<CString> = a[3..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*const libc::c_char> = prog.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    if libc::fork() == 0 {
+                        record(&r, libc::getpid());
+                        libc::execvp(ptrs[0], ptrs.as_ptr());
+                        libc::_exit(127);
+                    }
+                    libc::_exit(0);
+                }
+                -1 => std::process::exit(1),
+                c => {
+                    libc::waitpid(c, std::ptr::null_mut(), 0);
+                    let mut n = 0;
+                    while std::fs::read_to_string(&r).map_or(true, |t| t.is_empty()) && n < 1000 {
+                        libc::usleep(10_000);
+                        n += 1;
+                    }
+                    let me = CString::new(std::env::current_exe().unwrap().as_os_str().as_encoded_bytes()).unwrap();
+                    let args = [me.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{r}.root")).unwrap()];
+                    let argv = [args[0].as_ptr(), args[1].as_ptr(), args[2].as_ptr(), std::ptr::null()];
+                    libc::execv(me.as_ptr(), argv.as_ptr());
+                    libc::_exit(127);
+                }
+            }
+        }
+    }
+    // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
+    if mode == "after" && a.len() >= 4 {
+        let mut n = 0;
+        while !std::path::Path::new(&a[2]).exists() && n < 6000 {
+            unsafe { libc::usleep(10_000) };
+            n += 1;
+        }
+        let prog: Vec<CString> = a[3..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*const libc::c_char> = prog.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        unsafe {
+            libc::execvp(ptrs[0], ptrs.as_ptr());
+            libc::_exit(127);
+        }
+    }
+    // `print-env VAR OUT [M]`: write VAR's value (empty if unset) to OUT.tmp, rename it to OUT,
+    // then run `/bin/sleep M` if M is given.
+    if mode == "print-env" && (a.len() == 4 || a.len() == 5) {
+        let v = std::env::var(&a[2]).unwrap_or_default();
+        let tmp = format!("{}.tmp", a[3]);
+        let _ = std::fs::write(&tmp, v);
+        let _ = std::fs::rename(&tmp, &a[3]);
+        if let Some(m) = a.get(4) {
+            unsafe { exec_sleep(&CString::new(m.as_str()).unwrap()) };
+        }
+        std::process::exit(0);
+    }
+    // `register SRC IDX CLAIM KIND OUT [M]`: register with entry IDX of a registration chain
+    // (SRC: `env` for SHEEPDOG_OUTER, else a file holding the chain's text), claiming pid CLAIM
+    // (`self` for its own), sending a well-formed record (`good`) or one with a bad magic
+    // (`bad`). Writes `ack`, `refused`, `none` (no answer in 2 s) or `err <why>` to OUT (via a
+    // rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
+    if mode == "register" && (a.len() == 7 || a.len() == 8) {
+        let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
+        let (chain, _) = sheepdog::regwire::parse(&text);
+        let idx: usize = a[3].parse().unwrap_or(usize::MAX);
+        let claim = if a[4] == "self" { std::process::id() as i32 } else { a[4].parse().unwrap_or(0) };
+        let res = match chain.get(idx) {
+            None => "err no such entry".to_string(),
+            Some(e) => {
+                let mut rec = sheepdog::regwire::record(&e.nonce, claim);
+                if a[5] == "bad" {
+                    rec[0] = b'X';
+                }
+                reg_client(&e.path, &rec)
+            }
+        };
+        let tmp = format!("{}.tmp", a[6]);
+        let _ = std::fs::write(&tmp, &res);
+        let _ = std::fs::rename(&tmp, &a[6]);
+        if let Some(m) = a.get(7) {
+            unsafe { exec_sleep(&CString::new(m.as_str()).unwrap()) };
+        }
+        std::process::exit(if res == "ack" { 0 } else { 1 });
+    }
+    // `silent SRC N M READY`: open N connections to entry 0 of the chain and send nothing; write
+    // READY; then run `/bin/sleep M`, which keeps them open.
+    if mode == "silent" && a.len() == 6 {
+        let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
+        let (chain, _) = sheepdog::regwire::parse(&text);
+        let n: usize = a[3].parse().unwrap_or(0);
+        let mut held = Vec::new();
+        if let Some(e) = chain.first() {
+            for _ in 0..n {
+                if let Ok(s) = std::os::unix::net::UnixStream::connect(&e.path) {
+                    held.push(s);
+                }
+            }
+        }
+        let _ = std::fs::write(&a[5], format!("{}", held.len()));
+        // the connections survive the exec (UnixStream is CLOEXEC: clear it)
+        for s in &held {
+            use std::os::fd::AsRawFd;
+            unsafe { libc::fcntl(s.as_raw_fd(), libc::F_SETFD, 0) };
+        }
+        std::mem::forget(held);
+        unsafe { exec_sleep(&CString::new(a[4].as_str()).unwrap()) };
     }
     #[cfg(target_os = "macos")]
     if mode == "redisclaim-c" && a.len() == 4 {
