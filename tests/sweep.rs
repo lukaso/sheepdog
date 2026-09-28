@@ -274,6 +274,7 @@ fn a_wrong_identity_entry_is_never_signalled() {
     end_decoy(&mut c);
     assert_eq!(code, Some(0));
     assert!(pa && ca, "parent alive {pa}, child alive {ca}");
+    assert!(journals(&s).is_empty(), "control: the journal was read (and, naming nothing alive, removed)");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -493,6 +494,7 @@ fn a_reused_journaled_pid_is_gone_not_withheld() {
     assert_eq!(code, Some(0));
     assert!(alive && n == 0, "{n}");
     assert!(lines.is_empty(), "a reused pid is gone, not withheld: {lines:?}");
+    assert!(journals(&s).is_empty(), "control: the journal was read (and, naming nothing alive, removed)");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -517,5 +519,106 @@ fn another_users_journal_is_never_swept() {
     assert!(alive && n == 0, "another user's journal was swept ({n})");
     assert_eq!(code2, Some(0));
     assert!(gone, "control: the same journal owned by this user is swept");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Every candidate a sweep finds is journaled before its first signal, not only those of its
+/// first scan (PHASE2.md §3 rule 2): a member's child born while the sweep waits for an inner
+/// supervisor to end (its caller ignores TERM, so the wait runs its full length) has its journal
+/// line before any signal to it.
+#[test]
+fn a_member_born_during_the_supervisor_wait_is_journaled_first() {
+    let d = scratch("latejournal");
+    let s = state(&d);
+    let (go, r, inner, rr, log) = (d.join("go"), d.join("rec"), d.join("inner"), d.join("root"), d.join("log"));
+    let script = format!(
+        r#"(trap "" TERM; exec "$SD" run -- "$FX" sigcount "{}") & "$FX" spawn-on "{}" "{}" & exec "$FX" sigcount "{}""#,
+        inner.display(),
+        go.display(),
+        r.display(),
+        rr.display()
+    );
+    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SD", sheepdog()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let parent = wait_until(15, || !records(&r).is_empty() && !records(&inner).is_empty()).then(|| records(&r)[0]);
+    let ir = records(&inner).first().copied();
+    let isup = ir.and_then(|x| {
+        let o = Command::new("ps").args(["-o", "ppid=", "-p", &x.0.to_string()]).output().ok()?;
+        common::found(String::from_utf8_lossy(&o.stdout).trim().parse().ok()?)
+    });
+    let journaled_all = parent.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p.0) && isup.is_some_and(|i| journaled(&s).contains(&i.0))));
+    common::send_child(&mut c, libc::SIGKILL);
+    let _ = c.wait();
+    // the child is born while the sweep waits for the inner supervisor (grace 2 s + the deadline)
+    let g2 = go.clone();
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(700));
+        std::fs::write(&g2, b"").unwrap();
+    });
+    let (code, _) = sweep(&s, &d, &[], &[("SHEEPDOG_TEST_SIGNAL_LOG", log.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "1500")]);
+    let _ = t.join();
+    let child = records(&r).get(1).copied();
+    let everyone: Vec<(i32, u64)> = records(&r).into_iter().chain(records(&rr)).chain(records(&inner)).chain(isup).collect();
+    for p in &everyone {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert!(journaled_all, "the outer did not journal the member and the inner supervisor");
+    let cp = child.expect("the member's child was not born").0.to_string();
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let j = text.lines().position(|l| l.split_whitespace().collect::<Vec<_>>() == ["journal", cp.as_str()]);
+    let first = text.lines().position(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        w.len() >= 2 && (w[0] == "kill" || w[0] == "pidfd") && w[1] == cp
+    });
+    assert!(first.is_some(), "the sweep never signalled the late child (code {code:?}):\n{text}");
+    assert!(j.is_some() && j < first, "journal at {j:?}, first signal at {first:?}:\n{text}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A journal line that names another user's process (with its correct identity) never reaches
+/// the signal door: a root sweeper would otherwise deliver to it. Linux legs run as root; on a
+/// normal account the kernel refuses the signal anyway, so the cell needs root.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_line_naming_another_users_process_is_never_signalled() {
+    if unsafe { libc::getuid() } != 0 {
+        eprintln!("skipped: needs root (a normal account cannot signal another user's process)");
+        return;
+    }
+    let d = scratch("foreignuid");
+    std::fs::set_permissions(&d, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let r = d.join("nobody");
+    let mut c = Command::new(fixture()).args(["as-uid", "65534", fixture(), "sigcount"]).arg(&r).spawn().unwrap();
+    assert!(wait_until(10, || !records(&r).is_empty()), "the other user's process did not start");
+    let p = records(&r)[0];
+    forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[p], false);
+    let (code, _) = sweep(&s, &d, &[], &[]);
+    let (alive, n) = (common::alive(p), counted(&r));
+    end_decoy(&mut c);
+    assert!(alive && n == 0, "another user's process got {n} signal(s) (code {code:?})");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `kill j-` of a journal whose header names a live process that is no `sheepdog` refuses and
+/// signals nothing (a live job's supervisor is always a sheepdog; anything else is a stale or
+/// forged header, and its process's tree is outside the journal's lineage).
+#[test]
+fn kill_job_refuses_a_header_that_names_no_supervisor() {
+    let d = scratch("fakesup");
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let r = d.join("decoy");
+    let mut c = Command::new(fixture()).args(["sigcount"]).arg(&r).spawn().unwrap();
+    assert!(wait_until(10, || !records(&r).is_empty()));
+    let p = records(&r)[0];
+    let path = forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[], false);
+    let text = std::fs::read_to_string(&path).unwrap().replace("\"sup\":{\"pid\":999999,\"id\":1}", &format!("\"sup\":{{\"pid\":{},\"id\":{}}}", p.0, p.1));
+    std::fs::write(&path, text).unwrap();
+    let st = Command::new(sheepdog()).args(["kill", "j-0badf00d"]).env("SHEEPDOG_TEST_STATE", &s).env("SHEEPDOG_TEST_DEADLINE_MS", "1000").status().unwrap();
+    let (alive, n) = (common::alive(p), counted(&r));
+    end_decoy(&mut c);
+    assert!(alive && n == 0, "the process the header named got {n} signal(s)");
+    assert_eq!(st.code(), Some(1));
     let _ = std::fs::remove_dir_all(&d);
 }

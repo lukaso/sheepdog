@@ -185,7 +185,9 @@ impl Proved {
             self.known.insert(p, id);
             self.ever.insert(id);
         }
-        self.known.retain(|&p, &mut id| same(p, id));
+        // only what this scan saw stays known: this user's live, unprotected processes (a seed
+        // that names another user's process is never carried into a signal)
+        self.known.retain(|p, id| members.get(p) == Some(id));
         members.into_iter().collect()
     }
 }
@@ -671,6 +673,10 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
         return Err(1);
     };
     if sup.0 > 1 && same(sup.0, sup.1) {
+        if !is_sheepdog(sup.0) {
+            say!("sheepdog: job {prefix}'s journal names pid {} as its supervisor, but that process is not a sheepdog. Nothing was signalled.", sup.0);
+            return Err(1);
+        }
         return Ok(JobTarget::Live(sup.0, sup.1, path));
     }
     if dry_run {

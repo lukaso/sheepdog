@@ -89,6 +89,28 @@ fn dead_job(d: &Path, s: &Path, name: &str, flags: &[&str]) -> ((i32, u64), Path
     (g, r)
 }
 
+/// The outer run of a cell, SIGKILLed when the cell ends (a panic too): a live outer holds the
+/// test's output pipe, and cargo would wait for it.
+struct Outer(std::process::Child);
+impl Drop for Outer {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            common::send_child(&mut self.0, libc::SIGKILL);
+            let _ = self.0.wait();
+        }
+    }
+}
+
+/// Record files and argv markers whose processes are SIGKILLed (by identity) when the cell
+/// ends, a panic too.
+struct Leftovers(Vec<PathBuf>, Vec<String>);
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        cleanup(&self.0.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+        common::kill_marked(&self.1.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+}
+
 fn cleanup(recs: &[&Path]) {
     for r in recs {
         for suffix in ["", ".g", ".root"] {
@@ -167,7 +189,7 @@ fn a_partial_pass_leaves_nothing_stopped() {
     assert!(ran.exists(), "the new command ran");
     assert!(alive, "control: the seam kept the member alive");
     assert!(!stopped, "the member was left stopped");
-    assert!(notes(&st).iter().any(|n| n.starts_with("partial")), "notes {:?}", notes(&st));
+    assert!(notes(&st).iter().any(|n| n.starts_with("partial: job")), "notes {:?}", notes(&st));
     assert!(!journals(&s).is_empty(), "the journal is kept");
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -188,14 +210,16 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
         d.join("innerpid").display(),
         rr.display()
     );
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    // the inner run and its escapee carry r's path in their argv
+    let _left = Leftovers(vec![r.clone(), rr.clone()], vec![r.display().to_string()]);
+    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
     assert!(wait_until(15, || !records(&r).is_empty()));
     let g = records(&r)[0];
     // the outer supervisor has journaled the inner one (readiness, not a fixed wait)
     let inner: i32 = { assert!(wait_until(10, || std::fs::read_to_string(d.join("innerpid")).is_ok_and(|t| !t.trim().is_empty()))); std::fs::read_to_string(d.join("innerpid")).unwrap().trim().parse().unwrap() };
     assert!(wait_until(10, || journaled(&s).contains(&inner)), "the inner supervisor was journaled");
-    common::send_child(&mut c, libc::SIGKILL);
-    let _ = c.wait();
+    common::send_child(&mut c.0, libc::SIGKILL);
+    let _ = c.0.wait();
     let gr = PathBuf::from(format!("{}.g", r.display()));
     let ran = d.join("ran");
     let (code, st) = run(&d, &s, "auto", "", &format!(r#"/bin/sh -c 'touch "{}"'"#, ran.display()), &[]);
@@ -258,13 +282,14 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
         out.display()
     );
     let script = format!(r#"/bin/sh -c '{}' & "$FX" sigcount "{}" & exec "$FX" sigcount "{}""#, w.replace('\'', r#"'\''"#), wit.display(), rr.display());
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let _left = Leftovers(vec![wit.clone(), rr.clone()], vec![m.clone()]);
+    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
     let wpid: Option<i32> = wait_until(15, || std::fs::read_to_string(&me).is_ok_and(|t| !t.trim().is_empty())).then(|| std::fs::read_to_string(&me).unwrap().trim().parse().unwrap());
     assert!(wpid.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p))) && wait_until(10, || !records(&wit).is_empty()));
     let witness = records(&wit)[0];
     assert!(wait_until(10, || journaled(&s).contains(&witness.0)));
-    common::send_child(&mut c, libc::SIGKILL);
-    let _ = c.wait();
+    common::send_child(&mut c.0, libc::SIGKILL);
+    let _ = c.0.wait();
     std::fs::write(&go, b"").unwrap();
     let done = wait_until(20, || ran.exists() && std::fs::read_to_string(&out).is_ok_and(|t| !t.is_empty()));
     let st = std::fs::read_to_string(&out).ok().and_then(|t| json::parse(t.trim_end()).ok());

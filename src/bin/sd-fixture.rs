@@ -1042,6 +1042,22 @@ fn main() {
         let code = std::process::Command::new(&a[3]).args(&a[4..]).status().ok().and_then(|s| s.code()).unwrap_or(1);
         std::process::exit(code);
     }
+    // `as-uid UID PROG ARGS...` (Linux, run as root): drop to UID (its group the same number),
+    // then exec PROG ARGS: a process of another user, for a cell that must never signal it.
+    #[cfg(target_os = "linux")]
+    if mode == "as-uid" && a.len() >= 4 {
+        let uid: libc::uid_t = a[2].parse().unwrap_or(65534);
+        let prog: Vec<CString> = a[3..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*const libc::c_char> = prog.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        unsafe {
+            if libc::setgroups(0, std::ptr::null()) != 0 || libc::setgid(uid) != 0 || libc::setuid(uid) != 0 {
+                libc::_exit(4);
+            }
+            libc::execv(ptrs[0], ptrs.as_ptr());
+            libc::_exit(127);
+        }
+    }
     // `setsid-kid-fx R`: cell 2 with fixture processes only (an inherit-mode cell latches the
     // wall, and a platform binary's environment cannot be read): the root forks C (recorded in
     // R); C starts a new session, forks G (`sigcount R.g`) and waits; the root waits.

@@ -469,9 +469,11 @@ fn the_journal_lineage_never_reaches_the_caller() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Review P2-1: `kill j-` of a live job is a phase-2 source (its supervisor comes from a
-/// journal): a forged header naming an untagged process the test built, with its correct
-/// identity, gets it withheld (counter 0, a `withheld` line in the cell's own sink).
+/// Review P2-1: `kill j-` is a phase-2 source (its targets come from a journal): a forged journal
+/// of a dead job whose member is an untagged process the test built, with its correct identity,
+/// gets it withheld (counter 0, a `withheld` line in the cell's own sink). (A live header that
+/// names a non-sheepdog is refused before any signal: sweep.rs
+/// `kill_job_refuses_a_header_that_names_no_supervisor`.)
 #[test]
 fn kill_job_turns_the_latch_on() {
     let d = scratch("joblatch");
@@ -488,11 +490,15 @@ fn kill_job_turns_the_latch_on() {
     let p = records(&ru)[0];
     let h = json::parse(&header).unwrap();
     let field = |k: &str| h.get(k).and_then(Json::str).unwrap().to_string();
+    // a supervisor that is gone: a reaped child's pid with an identity it never had
+    let mut dead = Command::new("/usr/bin/true").spawn().unwrap();
+    let _ = dead.wait();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":{}}},\"argv\":\"sheepdog run\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1}},\"argv\":\"sheepdog run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
         field("boot"),
         field("pidns"),
         unsafe { libc::getuid() },
+        dead.id(),
         p.0,
         p.1
     );
@@ -507,7 +513,7 @@ fn kill_job_turns_the_latch_on() {
     let lines = std::fs::read_to_string(&sink).unwrap_or_default();
     common::send_child(&mut un, libc::SIGKILL);
     let _ = un.wait();
-    assert!(alive && n == 0, "the untagged 'supervisor' got {n} signal(s)");
+    assert!(alive && n == 0, "the untagged member got {n} signal(s)");
     assert!(lines.lines().any(|l| l.starts_with("withheld ") && l.split_whitespace().nth(1) == Some(&p.0.to_string())), "{lines:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
