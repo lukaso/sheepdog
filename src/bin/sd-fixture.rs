@@ -148,7 +148,8 @@ fn reg_client(path: &std::path::Path, rec: &[u8], conn: &str) -> String {
     let _ = std::fs::write(conn, b"");
     // the answer's timeout: SD_REG_TIMEOUT_MS, default 2000 (a cell that holds the outer back
     // on purpose gives its clients longer)
-    let ms: u64 = std::env::var("SD_REG_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    // (at least 1 ms: a zero timeout is refused by the socket and would mean no timeout at all)
+    let ms: u64 = std::env::var("SD_REG_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000).max(1);
     let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(ms)));
     let mut b = [0u8; 1];
     match s.read(&mut b) {

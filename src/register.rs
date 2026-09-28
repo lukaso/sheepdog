@@ -141,6 +141,8 @@ pub struct Listener {
     path: PathBuf,
     nonce: [u8; 16],
     pending: Vec<Conn>,
+    /// Accepts in one `service` call at most (MAX_ACCEPTS; a cell sets a smaller one).
+    max_accepts: usize,
     /// Accepts in the last `service` call (for its cell).
     last_accepts: usize,
 }
@@ -197,7 +199,7 @@ impl Listener {
             return fail(format!("listen: {}", std::io::Error::last_os_error()), fd);
         }
         crate::note(format!("listening {}", path.display()));
-        Some(Listener { fd, dir, path, nonce, pending: Vec::new(), last_accepts: 0 })
+        Some(Listener { fd, dir, path, nonce, pending: Vec::new(), max_accepts: MAX_ACCEPTS, last_accepts: 0 })
     }
 
     pub fn entry(&self) -> Entry {
@@ -233,7 +235,7 @@ impl Listener {
         let mut accepts = 0;
         loop {
             let mut accepted = false;
-            while self.pending.len() < MAX_PENDING && accepts < MAX_ACCEPTS {
+            while self.pending.len() < MAX_PENDING && accepts < self.max_accepts {
                 let c = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
                 if c < 0 {
                     break; // EAGAIN: nothing more waiting (any other error: try again next wake)
@@ -245,7 +247,7 @@ impl Listener {
                 accepts += 1;
             }
             self.serve_pending(admit);
-            if !accepted || self.full() || accepts >= MAX_ACCEPTS {
+            if !accepted || self.full() || accepts >= self.max_accepts {
                 break;
             }
         }
@@ -355,39 +357,23 @@ mod tests {
     }
 
     /// A same-uid process that connects and closes without end cannot keep the wait loop inside
-    /// one `service` call: it returns within a bounded number of accepts (the rest waits in the
-    /// backlog for the next pass).
+    /// one `service` call: a call stops at its accept bound, and what it left in the backlog is
+    /// taken by the next call. Deterministic: 20 closed connections wait in the backlog and the
+    /// bound is 8 (an unbounded call takes all 20; nothing refills the backlog meanwhile).
     #[test]
-    fn service_returns_while_a_flooder_runs() {
+    fn service_stops_at_its_accept_bound() {
         let mut l = Listener::open().expect("a listener");
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let floods: Vec<_> = (0..8)
-            .map(|_| {
-                let (p, stop) = (l.path.clone(), stop.clone());
-                // each flooder ends by itself after 3 s, so an unbounded `service` ends too (and
-                // the cell fails instead of hanging)
-                let end = Instant::now() + std::time::Duration::from_secs(3);
-                std::thread::spawn(move || {
-                    while !stop.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < end {
-                        let _ = std::os::unix::net::UnixStream::connect(&p);
-                    }
-                })
-            })
-            .collect();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let mut no = |_: u64, _: bool| false;
-        let t0 = Instant::now();
-        let _ = l.service(&mut no);
-        let took = t0.elapsed();
-        let accepts = l.last_accepts;
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        for f in floods {
-            let _ = f.join();
+        l.max_accepts = 8;
+        for _ in 0..20 {
+            drop(std::os::unix::net::UnixStream::connect(&l.path).unwrap());
         }
-        // the bound is what ended the call: exactly MAX_ACCEPTS accepts (an unbounded call can also
-        // return early, when the flooders do not refill the backlog in time)
-        assert_eq!(accepts, MAX_ACCEPTS, "service made {accepts} accepts in {took:?}");
-        assert!(took < std::time::Duration::from_secs(1), "service ran {took:?} under a flood");
+        let mut no = |_: u64, _: bool| false;
+        let mut counts = Vec::new();
+        for _ in 0..4 {
+            let _ = l.service(&mut no);
+            counts.push(l.last_accepts);
+        }
+        assert_eq!(counts, vec![8, 8, 4, 0]);
     }
 }
 
