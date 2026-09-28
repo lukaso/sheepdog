@@ -415,13 +415,13 @@ fn the_privacy_warning_counts_only_arguments_written_as_paths() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// D10: when the disclaim did not take (the responsibility API is broken: seam), the job keeps
-/// the terminal's permissions, as it would without sheepdog, and there is no warning to give
-/// (its advice, Full Disk Access for sheepdog, would be wrong); the control, the same run with
-/// the API working, warns.
+/// D10 follows the disclaim, not its read-back: with the responsibility getter broken (seam) the
+/// disclaimed re-exec still happens and the job loses the terminal's permissions, so the run
+/// warns; with the disclaim symbol absent (seam) there is no re-exec, the job keeps the
+/// terminal's permissions, and there is no warning; a plain run warns.
 #[cfg(target_os = "macos")]
 #[test]
-fn no_privacy_warning_when_the_disclaim_did_not_take() {
+fn the_privacy_warning_follows_the_disclaim() {
     let d = scratch("tccnodisc");
     let prot = d.join("prot");
     std::fs::create_dir_all(&prot).unwrap();
@@ -440,8 +440,49 @@ fn no_privacy_warning_when_the_disclaim_did_not_take() {
         assert_eq!(st.code(), Some(0));
         std::fs::read_to_string(&trace).unwrap_or_default().lines().any(|l| l.starts_with("tcc-warning "))
     };
-    assert!(!warned(&[("SHEEPDOG_TEST_SPI", "broken")]), "a warning with advice for a disclaim that did not take");
-    assert!(warned(&[]), "control: the disclaimed run warns");
+    assert!(warned(&[("SHEEPDOG_TEST_SPI", "broken")]), "no warning, though the disclaimed re-exec happened");
+    assert!(!warned(&[("SHEEPDOG_TEST_SPI", "nodisclaim")]), "a warning, though there was no disclaim");
+    assert!(warned(&[]), "control: a plain run warns");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The D10 probe is bounded: a probe that blocks (a dead network volume; seam) gives up in
+/// well under a second and the run goes on (it exits 0 at once, with a trace that the probe
+/// timed out); the control, a cwd outside the protected folders, has no such trace.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_blocked_privacy_probe_does_not_hold_the_start() {
+    let d = scratch("tcchang");
+    let (prot, plain) = (d.join("prot"), d.join("plain"));
+    std::fs::create_dir_all(&prot).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    let go = |cwd: &Path| -> (Option<i32>, Duration, String) {
+        let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
+        let t0 = Instant::now();
+        let mut c = Command::new(sheepdog())
+            .args(["run", "--", "/usr/bin/true"])
+            .current_dir(cwd)
+            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPDOG_TEST_TCC_PROBE_HANG", &prot)
+            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let ended = wait_until(20, || c.try_wait().ok().flatten().is_some());
+        if !ended {
+            common::send_child(&mut c, libc::SIGKILL);
+        }
+        let code = c.wait().ok().and_then(|s| s.code());
+        (code, t0.elapsed(), std::fs::read_to_string(&trace).unwrap_or_default())
+    };
+    let (code, took, trace) = go(&prot);
+    let (ccode, _, ctrace) = go(&plain);
+    assert_eq!(code, Some(0), "the run did not finish ({took:?})");
+    assert!(took < Duration::from_secs(5), "the blocked probe held the start {took:?}");
+    assert!(trace.lines().any(|l| l == "tcc-probe timed out"), "the seam did not block the probe: {trace}");
+    assert_eq!(ccode, Some(0));
+    assert!(!ctrace.lines().any(|l| l == "tcc-probe timed out"), "control: {ctrace}");
     let _ = std::fs::remove_dir_all(&d);
 }
 

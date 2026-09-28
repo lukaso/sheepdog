@@ -226,7 +226,29 @@ pub(crate) fn spi_active() -> bool {
 /// D10 (PLAN.md §4.4): when the cwd or an argument that names an existing path is under a
 /// privacy-protected folder that this (disclaimed) process cannot read, say how to fix it, once.
 /// Debug seam SHEEPDOG_TEST_TCC_PROTECTED=<dir>: that dir counts as protected and its probe fails.
+/// The probe runs in a thread and the start waits for it at most 500 ms: a file call on a dead
+/// network volume (or a network home) can block for minutes, and it gives up silently then.
 fn tcc_warning(cmd: &[OsString]) {
+    let cmd = cmd.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("tcc-probe".into()).spawn(move || {
+        let _ = tx.send(tcc_probe(&cmd));
+    });
+    if spawned.is_err() {
+        return;
+    }
+    match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+        Ok(Some((message, root))) => {
+            say!("{message}");
+            crate::note(format!("tcc-warning {root}"));
+        }
+        Ok(None) => {}
+        Err(_) => crate::note("tcc-probe timed out".to_string()),
+    }
+}
+
+/// The D10 probe: the warning and its root, if a candidate is refused.
+fn tcc_probe(cmd: &[OsString]) -> Option<(String, String)> {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Component, Path, PathBuf};
     // the path text, made absolute and without `.` and `..`, with no file call: a path outside
@@ -275,6 +297,12 @@ fn tcc_warning(cmd: &[OsString]) {
             (it.next().is_some() && it.next().is_some_and(|x| x.as_os_str() == "Volumes") && it.next().is_some()).then(|| c.iter().take(3).collect())
         });
         let Some(root) = root else { continue };
+        // debug seam: a probe under this dir blocks, as one on a dead network volume does
+        if let Some(h) = std::env::var_os("SHEEPDOG_TEST_TCC_PROBE_HANG").filter(|_| cfg!(debug_assertions)).map(PathBuf::from) {
+            if [std::fs::canonicalize(&h).ok(), Some(h.clone())].into_iter().flatten().any(|h| c.starts_with(h)) {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
         if !c.exists() {
             continue;
         }
@@ -286,10 +314,9 @@ fn tcc_warning(cmd: &[OsString]) {
         let me = exe_path(unsafe { libc::getpid() }).unwrap_or_else(|| "sheepdog".into());
         let bundle = me.find(".app/").map_or(me.clone(), |i| me[..i + 4].to_string());
         let shown = homes.iter().find_map(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string());
-        say!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G to paste the path). Or run with --inherit-terminal-permissions (weaker tracking).");
-        crate::note(format!("tcc-warning {}", root.display()));
-        return;
+        return Some((format!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G to paste the path). Or run with --inherit-terminal-permissions (weaker tracking)."), root.display().to_string()));
     }
+    None
 }
 
 /// doctor's mechanisms on macOS: the responsibility SPI resolves and answers, and a child
@@ -467,7 +494,9 @@ fn become_responsible(argv0: &[OsString], caller_mask: &libc::sigset_t) -> bool 
         return resp_uniq(me) == Some(mine);
     }
     std::env::set_var(REEXEC_MARK, me.to_string());
-    let disclaim: Disclaim = match sym("responsibility_spawnattrs_setdisclaim") {
+    // debug seam SHEEPDOG_TEST_SPI=nodisclaim: the disclaim symbol is missing (no re-exec)
+    let missing = cfg!(debug_assertions) && std::env::var("SHEEPDOG_TEST_SPI").as_deref() == Ok("nodisclaim");
+    let disclaim: Disclaim = match sym("responsibility_spawnattrs_setdisclaim").filter(|_| !missing) {
         Some(f) => f,
         None => return false,
     };
@@ -1040,9 +1069,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 crate::trace("degraded".into());
                 crate::status::set_degraded("the macOS responsibility API is not available");
             }
-            // only a disclaimed job loses the terminal's permissions (without the disclaim it keeps
-            // them, as it would without sheepdog, and the warning's advice would be wrong)
-            if ok {
+            // only a disclaimed job loses the terminal's permissions: this is the disclaimed
+            // re-exec (whether or not the read-back confirms it); without the re-exec the job
+            // keeps them, as it would without sheepdog, and the warning's advice would be wrong
+            if disclaimed && !a.inherit {
                 tcc_warning(&a.cmd);
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
