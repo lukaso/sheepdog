@@ -317,7 +317,8 @@ fn a_non_utf8_argument_is_escaped() {
 }
 
 /// Publishing never replaces a journal: when the chosen id is taken, a new id is picked and the
-/// existing file is left as it was.
+/// existing file is left as it was. (`--no-sweep`: the first run's kept journal is a dead job's,
+/// which the second run's auto-sweep would otherwise remove first.)
 #[test]
 fn a_taken_job_id_is_never_overwritten() {
     let d = scratch("taken");
@@ -325,7 +326,7 @@ fn a_taken_job_id_is_never_overwritten() {
     // a first run (kept) shows the folder; then a second run forced to the same id
     let first = finish(
         Command::new(sheepdog())
-            .args(["run", "--", "/bin/sh", "-c", "exit 0"])
+            .args(["run", "--no-sweep", "--", "/bin/sh", "-c", "exit 0"])
             .env("SHEEPDOG_TEST_STATE", &s)
             .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
             .env("SHEEPDOG_TEST_JOB_ID", "0badc0de")
@@ -339,7 +340,7 @@ fn a_taken_job_id_is_never_overwritten() {
     let before = std::fs::read(&js[0]).unwrap();
     let second = finish(
         Command::new(sheepdog())
-            .args(["run", "--", "/bin/sh", "-c", "exit 0"])
+            .args(["run", "--no-sweep", "--", "/bin/sh", "-c", "exit 0"])
             .env("SHEEPDOG_TEST_STATE", &s)
             .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
             .env("SHEEPDOG_TEST_JOB_ID", "0badc0de")
