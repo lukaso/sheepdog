@@ -5,7 +5,7 @@
 # signal and is neither gone nor stopped.
 set -u
 apk add -q procps bash util-linux-misc setpriv >/dev/null || exit 3
-rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xf -) && cd /w || exit 3
+rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xmf -) && cd /w || exit 3
 export CARGO_TARGET_DIR=/tgt
 cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 # the test executables only (the profile of a plain bin target has "test":false)

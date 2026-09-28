@@ -17,7 +17,7 @@ if [ -n "${SD_PS_SHIM:-}" ]; then
   real=$(command -v ps)
   printf '#!/bin/sh\n%s "$@" | sed -E "s#/run/rosetta/rosetta [^ ]+ ##"\n' "$real" > /usr/local/bin/ps && chmod +x /usr/local/bin/ps
 fi
-rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xf -) && cd /w || exit 3
+rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./target-*' --exclude=./spike . | (cd /w && tar xmf -) && cd /w || exit 3
 export CARGO_TARGET_DIR=/tgt
 cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
 timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1

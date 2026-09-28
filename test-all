@@ -138,7 +138,7 @@ leg_amd64() {
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
   leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xf -) && cd /w && CARGO_TARGET_DIR=/tgt cargo build -q --bins'
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt cargo build -q --bins'
 }
 
 # Start `sheepdog run -- sd-fixture ticker` as the container's main process; prints the id.
