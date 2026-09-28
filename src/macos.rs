@@ -217,6 +217,100 @@ pub fn cwd(pid: pid_t) -> Option<String> {
     Some(p.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
 }
 
+/// D10 (PLAN.md §4.4): when the cwd or an argument that names an existing path is under a
+/// privacy-protected folder that this (disclaimed) process cannot read, say how to fix it, once.
+/// Debug seam SHEEPDOG_TEST_TCC_PROTECTED=<dir>: that dir counts as protected and its probe fails.
+fn tcc_warning(cmd: &[OsString]) {
+    // paths compared resolved (the cwd is reported resolved: /var is /private/var on macOS)
+    let real = |p: std::path::PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let seam = std::env::var_os("SHEEPDOG_TEST_TCC_PROTECTED").filter(|_| cfg!(debug_assertions)).map(|p| real(std::path::PathBuf::from(p)));
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut roots: Vec<std::path::PathBuf> = home.iter().flat_map(|h| ["Documents", "Desktop", "Downloads", "Library/Mobile Documents"].map(|x| real(h.join(x)))).collect();
+    roots.extend(seam.clone());
+    let cwd = std::env::current_dir().ok();
+    let mut cands: Vec<std::path::PathBuf> = cwd.clone().map(real).into_iter().collect();
+    for a in cmd.iter().skip(1) {
+        let p = std::path::PathBuf::from(a);
+        let p = if p.is_absolute() { p } else { cwd.as_ref().map_or(p.clone(), |c| c.join(&p)) };
+        if p.exists() {
+            cands.push(real(p));
+        }
+    }
+    for c in cands {
+        let root = roots.iter().find(|r| c.starts_with(r)).cloned().or_else(|| {
+            let mut it = c.components();
+            (it.next().is_some() && it.next().is_some_and(|x| x.as_os_str() == "Volumes") && it.next().is_some()).then(|| c.iter().take(3).collect())
+        });
+        let Some(root) = root else { continue };
+        let dir = if c.is_dir() { c.clone() } else { c.parent().map_or(c.clone(), |p| p.to_path_buf()) };
+        let refused = seam.as_ref().is_some_and(|s| c.starts_with(s)) || matches!(std::fs::read_dir(&dir), Err(e) if e.raw_os_error() == Some(libc::EPERM));
+        if !refused {
+            continue;
+        }
+        let me = exe_path(unsafe { libc::getpid() }).unwrap_or_else(|| "sheepdog".into());
+        let bundle = me.find(".app/").map_or(me.clone(), |i| me[..i + 4].to_string());
+        let shown = home.as_ref().and_then(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string());
+        say!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G to paste the path). Or run with --inherit-terminal-permissions (weaker tracking).");
+        crate::note(format!("tcc-warning {}", root.display()));
+        return;
+    }
+}
+
+/// doctor's mechanisms on macOS: the responsibility SPI resolves and answers, and a child
+/// spawned with the disclaim reports itself responsible (probed now, every call).
+pub(crate) fn doctor_mechanisms() -> Vec<crate::doctor::Mech> {
+    let me = unsafe { libc::getpid() };
+    let resolves = sym::<Disclaim>("responsibility_spawnattrs_setdisclaim").is_some() && resp_uniq(me).is_some();
+    let disclaim = probe_child("__doctor-probe").map_or(false, |c| c == 0);
+    vec![
+        crate::doctor::mechanism("responsibility API", resolves, if resolves { "resolved, answers for this process" } else { "missing or not answering: tracking falls back to parent ids" }),
+        crate::doctor::mechanism("disclaim self-check", disclaim, if disclaim { "a disclaimed child is responsible for itself" } else { "a disclaimed child is not responsible for itself: tracking falls back to parent ids" }),
+    ]
+}
+
+pub(crate) fn doctor_notes() -> Vec<String> {
+    Vec::new()
+}
+
+/// `--grants`: can a disclaimed child read ~/Documents? (None: the probe could not run.)
+pub(crate) fn doctor_grant() -> Option<bool> {
+    probe_child("__doctor-grant").and_then(|c| match c {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    })
+}
+
+/// Run this binary with ARG as a disclaimed child; its exit code.
+fn probe_child(arg: &str) -> Option<i32> {
+    let exe = exe_path(unsafe { libc::getpid() })?;
+    let mut mask: libc::sigset_t = unsafe { zeroed() };
+    unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask) };
+    let pid = spawn(&[OsString::from(exe), OsString::from(arg)], true, false, &mask).ok()?;
+    let mut st = 0;
+    (unsafe { libc::waitpid(pid, &mut st, 0) } == pid && libc::WIFEXITED(st)).then(|| libc::WEXITSTATUS(st))
+}
+
+/// The probe children: `__doctor-probe` exits 0 when responsible for itself; `__doctor-grant`
+/// exits 0 when it can read ~/Documents, 1 when refused (EPERM), 2 otherwise.
+pub fn doctor_probe(argv: &[OsString]) -> Option<i32> {
+    match argv.get(1).map(|a| a.as_encoded_bytes()) {
+        Some(b"__doctor-probe") => {
+            let me = unsafe { libc::getpid() };
+            Some(if uniq(me).is_some_and(|u| resp_uniq(me) == Some(u.0)) { 0 } else { 1 })
+        }
+        Some(b"__doctor-grant") => {
+            let docs = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Documents"));
+            Some(match docs.map(std::fs::read_dir) {
+                Some(Ok(_)) => 0,
+                Some(Err(e)) if e.raw_os_error() == Some(libc::EPERM) => 1,
+                _ => 2,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// When `pid` started, in seconds since the epoch.
 pub fn start_secs(pid: pid_t) -> Option<u64> {
     bsd(pid).map(|b| b.pbi_start_tvsec)
@@ -864,7 +958,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     crate::register::register_all(&chain);
                 }
             }
-            let ok = become_responsible(&a.argv, &sig.caller_mask);
+            // --inherit-terminal-permissions: no disclaim (the job keeps the terminal's privacy
+            // permissions; tracking falls back to parent ids, R stays {this supervisor})
+            let ok = if a.inherit { false } else { become_responsible(&a.argv, &sig.caller_mask) };
             std::env::remove_var(REEXEC_MARK);
             let relay = my_relay();
             std::env::remove_var(RELAY_PID);
@@ -875,10 +971,19 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             crate::status::cloexec(); // after the SETEXEC, which the fd had to survive
             crate::status::set_tracking(if ok { "responsibility" } else { "puniq" });
-            if !ok {
-                say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
+            if a.inherit {
+                if !a.quiet {
+                    say!("sheepdog: --inherit-terminal-permissions: this job keeps your terminal's privacy permissions, so tracking falls back to parent ids (fast-escaping processes can be missed).");
+                }
+                crate::trace("degraded".into());
+                crate::status::set_degraded("--inherit-terminal-permissions: tracking by parent ids only");
+            } else if !ok {
+                say!("sheepdog: the macOS responsibility API is not available here, so tracking falls back to parent ids (fast-escaping processes can be missed). Details: sheepdog doctor.");
                 crate::trace("degraded".into());
                 crate::status::set_degraded("the macOS responsibility API is not available");
+            }
+            if !a.inherit {
+                tcc_warning(&a.cmd);
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             // the auto-sweep: once, after the re-exec, before the pre-spawn TERM check

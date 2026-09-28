@@ -20,6 +20,7 @@
 
 mod caps;
 mod journal;
+mod doctor;
 mod kill;
 mod strays;
 #[cfg(target_os = "macos")]
@@ -69,6 +70,9 @@ pub struct Args {
     pub status_fd: Option<i32>,
     /// skip the auto-sweep before the command (PLAN.md §3.5)
     pub no_sweep: bool,
+    /// macOS: no disclaim; the job keeps the terminal's privacy permissions and tracking falls
+    /// back to parent ids (PLAN.md §4.4, DevEx D11). Linux: accepted, no effect.
+    pub inherit: bool,
     /// the caps (PLAN.md §3.4) and the kill deadline (§3.3)
     pub timeout: Option<Duration>,
     pub max_mem: Option<u64>,
@@ -115,7 +119,7 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--inherit-terminal-permissions] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
     125
 }
 
@@ -134,6 +138,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut status_fd = None;
     let (mut timeout, mut max_mem, mut max_procs, mut kill_deadline) = (None, None, None, None);
     let mut no_sweep = false;
+    let mut inherit = false;
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
@@ -179,6 +184,10 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
                 no_sweep = true;
                 i += 1;
             }
+            b"--inherit-terminal-permissions" => {
+                inherit = true;
+                i += 1;
+            }
             b"--quiet" => {
                 quiet = true;
                 i += 1;
@@ -194,7 +203,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, no_sweep, timeout, max_mem, max_procs, kill_deadline })
+    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, no_sweep, inherit, timeout, max_mem, max_procs, kill_deadline })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -1450,6 +1459,13 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 }
 
 fn run(argv: Vec<OsString>) -> i32 {
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"--version") {
+        let _ = writeln!(std::io::stdout(), "sheepdog {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"doctor") {
+        return doctor::main(&argv[2..]);
+    }
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
         return kill::main(&argv[2..]);
     }
@@ -1499,6 +1515,11 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
     #[cfg(target_os = "linux")]
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"__root") {
         return linux::root_shim(&argv);
+    }
+    // doctor's disclaimed probe children (macOS)
+    #[cfg(target_os = "macos")]
+    if let Some(code) = macos::doctor_probe(&argv) {
+        return code;
     }
     // PHASE2.md §0.5: a release build has none of the test walls, so it refuses to run in a test
     // environment rather than act on this machine's real state and processes

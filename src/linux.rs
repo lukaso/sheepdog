@@ -184,6 +184,46 @@ pub fn report_cmd(pid: i32) -> Vec<String> {
         .collect()
 }
 
+/// doctor's mechanisms on Linux: the subreaper flag (set and read back in a child), and a
+/// `/proc` of this pid namespace (probed now, every call).
+pub(crate) fn doctor_mechanisms() -> Vec<crate::doctor::Mech> {
+    let sub = unsafe {
+        match libc::fork() {
+            0 => {
+                let mut v: libc::c_int = 0;
+                let ok = libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0 && libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut v as *mut libc::c_int, 0, 0, 0) == 0 && v == 1;
+                libc::_exit(if ok { 0 } else { 1 })
+            }
+            -1 => false,
+            c => {
+                let mut st = 0;
+                libc::waitpid(c, &mut st, 0) == c && libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
+            }
+        }
+    };
+    let proc_ok = proc_problem();
+    vec![
+        crate::doctor::mechanism("subreaper", sub, if sub { "PR_SET_CHILD_SUBREAPER works" } else { "PR_SET_CHILD_SUBREAPER refused: escapees reparent to PID 1 and are lost" }),
+        crate::doctor::mechanism("/proc", proc_ok.is_none(), proc_ok.unwrap_or("this pid namespace's /proc")),
+    ]
+}
+
+/// doctor's notes on Linux: a missing `pidfd_open` is no degradation (the identity is re-read
+/// before each `kill`), but it is said.
+pub(crate) fn doctor_notes() -> Vec<String> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) } as i32;
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+        Vec::new()
+    } else {
+        vec![format!("pidfd_open unavailable ({}): signals go through kill after an identity re-check", std::io::Error::last_os_error())]
+    }
+}
+
+pub(crate) fn doctor_grant() -> Option<bool> {
+    None
+}
+
 /// Linux has no responsible process.
 pub fn responsible_pid(_pid: i32) -> Option<i32> {
     None

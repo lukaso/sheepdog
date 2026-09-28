@@ -1011,6 +1011,57 @@ fn main() {
         while unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } >= 0 {}
         std::process::exit(0);
     }
+    // P8. `t R PROG ARGS...` (macOS): the test-made terminal T (PHASE2 §0): re-exec itself with
+    // the responsibility disclaim (as `t-run`), so it is responsible for itself; record itself in
+    // R; run PROG ARGS as its child (a "tab"), wait for it and exit with its code. Exit 4 if the
+    // disclaim did not take effect.
+    #[cfg(target_os = "macos")]
+    if mode == "t" && a.len() >= 4 {
+        unsafe { disclaim_reexec_args(&[&["t-run"], &a[2..].iter().map(String::as_str).collect::<Vec<_>>()[..]].concat()) };
+    }
+    #[cfg(target_os = "macos")]
+    if mode == "t-run" && a.len() >= 4 {
+        if !self_responsible() {
+            std::process::exit(4);
+        }
+        record(&a[2], std::process::id() as i32);
+        let code = std::process::Command::new(&a[3]).args(&a[4..]).status().ok().and_then(|s| s.code()).unwrap_or(1);
+        std::process::exit(code);
+    }
+    // `escape-after M R GO`: the root forks C (recorded); C waits for the file GO (bounded, 20 s:
+    // the cell writes it after the supervisor's first scans saw C), then starts a new session,
+    // forks G (`/bin/sleep M`, recorded through a pipe to C, which records it) and exits; the
+    // root waits.
+    if mode == "escape-after" && a.len() == 5 {
+        let m = CString::new(a[2].as_str()).unwrap();
+        let (r, go) = (a[3].clone(), a[4].clone());
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    let mut n = 0;
+                    while !std::path::Path::new(&go).exists() && n < 2000 {
+                        libc::usleep(10_000);
+                        n += 1;
+                    }
+                    libc::setsid();
+                    match libc::fork() {
+                        0 => exec_sleep(&m),
+                        g => {
+                            record(&r, g);
+                            libc::_exit(0);
+                        }
+                    }
+                }
+                c if c > 0 => {
+                    record(&r, c);
+                    loop {
+                        libc::pause();
+                    }
+                }
+                _ => std::process::exit(1),
+            }
+        }
+    }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
     if mode == "after" && a.len() >= 4 {
         let mut n = 0;
