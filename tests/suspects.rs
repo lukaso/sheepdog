@@ -265,24 +265,31 @@ fn ps_text_output_holds_no_control_bytes() {
 }
 
 /// The root of another live `sheepdog run` job in the target's session, started after it, is
-/// that job's member, never a suspect (nor anything in that job).
+/// that job's member, never a suspect; nor is that job's orphan that stays in the session (its
+/// parent exited; on macOS its responsible process is the job's supervisor).
 #[test]
 fn a_live_jobs_root_in_the_session_is_no_suspect() {
     let _serial = serial();
     let d = scratch("jobroot");
     let (t, root) = (d.join("t"), d.join("root"));
-    let script = format!(r#""$0" sigcount "{}" & sleep 0.1; exec "$1" run -- "$0" sigcount "{}""#, t.display(), root.display());
+    let script = format!(
+        r#""$0" sigcount "{}" & sleep 0.1; exec "$1" run -- /bin/sh -c '"$0" stray "$1" js && exec "$0" sigcount "$1/root"' "$0" "{}""#,
+        t.display(),
+        d.display()
+    );
     let mut leader = Command::new(fixture()).args(["new-session", "/bin/sh", "-c", &script, fixture(), sheepdog()]).stdin(Stdio::null()).spawn().unwrap();
-    assert!(wait_until(15, || record(&d, "t").is_some() && record(&d, "root").is_some()), "the tree did not start");
-    let (tp, rp) = (record(&d, "t").unwrap(), record(&d, "root").unwrap());
+    assert!(wait_until(15, || record(&d, "t").is_some() && record(&d, "root").is_some() && record(&d, "js").is_some()), "the tree did not start");
+    let (tp, rp, js) = (record(&d, "t").unwrap(), record(&d, "root").unwrap(), record(&d, "js").unwrap());
     let o = sd(&d, &["ps", "--json", &tp.0.to_string()], &[]);
     let r = rows(&o.out);
     common::send(tp.0, tp.1, libc::SIGKILL);
     common::send_child(&mut leader, libc::SIGTERM);
     let _ = leader.wait();
     common::send(rp.0, rp.1, libc::SIGKILL);
+    common::send(js.0, js.1, libc::SIGKILL);
     assert_eq!(r.get(&tp.0).map(|x| x.0.as_str()), Some("target"), "{}", o.out);
     assert!(!r.contains_key(&rp.0), "a live job's root is listed:\n{}", o.out);
+    assert!(!r.contains_key(&js.0), "a live job's orphan is listed:\n{}", o.out);
     let _ = std::fs::remove_dir_all(&d);
 }
 
