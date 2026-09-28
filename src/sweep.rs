@@ -300,8 +300,7 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
         return Outcome::Skipped(format!("pid {p}, this sweep or one of its ancestors, is a child of one of its members"));
     }
     let mut named: HashSet<(i32, u64)> = j.members.iter().map(|m| (m.pid, m.id)).collect();
-    // every candidate is journaled before its first signal, also one a later scan finds (the
-    // kill scans before it signals, so what the supervisor wait found is journaled there)
+    // every candidate is journaled before its first signal, also one a later scan finds
     let mut journal_new = |j: &mut Journal, found: &[(i32, u64)]| {
         let new: Vec<(i32, u64)> = found.iter().copied().filter(|m| !named.contains(m)).collect();
         j.journal_closure(&new);
@@ -354,6 +353,10 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
             end_supervisors(&sups, opts.deadline, &mut proved);
         }
     }
+    // what the supervisor wait's scans found goes into the kill's initial set: journaled now
+    // (the kill's own scan may no longer return it, e.g. after an exec that changed its euid)
+    let seen: Vec<(i32, u64)> = proved.known.iter().map(|(&p, &id)| (p, id)).collect();
+    journal_new(&mut j, &seen);
     opts.hold = vec![libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
     let initial = proved.known.clone();
     let n = set.len();

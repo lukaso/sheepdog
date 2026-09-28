@@ -548,10 +548,14 @@ fn a_member_born_during_the_supervisor_wait_is_journaled_first() {
     let journaled_all = parent.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p.0) && isup.is_some_and(|i| journaled(&s).contains(&i.0))));
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
-    // the child is born while the sweep waits for the inner supervisor (grace 2 s + the deadline)
-    let g2 = go.clone();
+    // the child is born while the sweep waits for the inner supervisor (grace 2 s + the
+    // deadline): `go` is written once the signal log shows that wait has begun
+    let (g2, l2) = (go.clone(), log.clone());
     let t = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(700));
+        let end = Instant::now() + Duration::from_secs(20);
+        while !std::fs::read_to_string(&l2).unwrap_or_default().lines().any(|l| l.starts_with("supervisor ")) && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         std::fs::write(&g2, b"").unwrap();
     });
     let (code, _) = sweep(&s, &d, &[], &[("SHEEPDOG_TEST_SIGNAL_LOG", log.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "1500")]);
@@ -571,6 +575,9 @@ fn a_member_born_during_the_supervisor_wait_is_journaled_first() {
     });
     assert!(first.is_some(), "the sweep never signalled the late child (code {code:?}):\n{text}");
     assert!(j.is_some() && j < first, "journal at {j:?}, first signal at {first:?}:\n{text}");
+    // born during the wait, not before the sweep's first scan
+    let wait = text.lines().position(|l| l.starts_with("supervisor "));
+    assert!(wait.is_some() && wait < j, "the child was journaled before the supervisor wait (at {j:?}, wait at {wait:?})");
     let _ = std::fs::remove_dir_all(&d);
 }
 
