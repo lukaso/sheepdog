@@ -344,10 +344,15 @@ impl Root {
         }
     }
     /// After the root has exited: did the shim report that its command never ran?
-    pub fn exec_failed(&mut self) -> bool {
+    /// The errno of the command's failed exec, if the shim reported one (`E<errno>`).
+    pub fn exec_failed(&mut self) -> Option<i32> {
         let mut buf = [0u8; 64];
         let n = unsafe { libc::read(self.err, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        n > 0 && buf[0] == b'E'
+        if n <= 0 || buf[0] != b'E' {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&buf[1..n as usize]);
+        Some(text.trim().parse().unwrap_or(0))
     }
 }
 
@@ -953,8 +958,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
-    if status.is_some() && shim.exec_failed() {
+    if let Some(e) = status.and_then(|_| shim.exec_failed()) {
         crate::status::set_root_final("not-started"); // the shim could not exec the command
+        crate::status::set_error(&format!("cannot run {}: {}", a.cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(e)));
     }
     if a.leave_strays && status.is_some() {
         let mut j = journal.into_inner();

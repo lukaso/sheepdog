@@ -144,6 +144,27 @@ fn cell_26_the_status_line_tells_the_125s_apart() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A command that cannot be run: exit 127 (126 when it is not executable), `root`
+/// "not-started" and an `error` that names the failure; the control, a command that runs and
+/// exits 127 by itself, has no error.
+#[test]
+fn a_command_that_cannot_run_names_the_error() {
+    let d = scratch("spawnerr");
+    let missing = run(&d, "missing", "-- /nonexistent/x", &[], |_| {});
+    let noexec = d.join("noexec");
+    std::fs::write(&noexec, "#!/bin/sh\n").unwrap();
+    let denied = run(&d, "denied", &format!("-- {}", noexec.display()), &[], |_| {});
+    let own = run(&d, "own", r#"-- /bin/sh -c 'exit 127'"#, &[], |_| {});
+    for (x, code) in [(&missing, 127), (&denied, 126)] {
+        assert_eq!(x.code, Some(code), "{:?}", x.status);
+        assert_eq!(field(x, "root").and_then(Json::str), Some("not-started"), "{:?}", x.status);
+        assert!(field(x, "error").and_then(Json::str).is_some_and(|e| e.contains("cannot run")), "{:?}", x.status);
+    }
+    assert_eq!(own.code, Some(127));
+    assert_eq!(field(&own, "error"), Some(&Json::Null), "control: {:?}", own.status);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Cell 26: the status fd is set CLOEXEC, so the root does not hold it. The fd is 57, far above
 /// the low fds a translator keeps open (Rosetta holds 3 and up on the emulated leg).
 #[test]
