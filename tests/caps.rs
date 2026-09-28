@@ -199,13 +199,15 @@ fn a_cap_after_the_root_ended_by_itself_is_only_a_note() {
 fn the_roots_exit_comes_before_a_cap_in_one_wake() {
     let d = scratch("exitcap");
     let (r1, r2) = (d.join("rec"), d.join("ctl"));
-    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500")];
-    // two members that outlive the root: the job stays past the cap after the root exits. The
-    // root waits 300 ms first, so the supervisor's first check (right after the start, before
-    // its hold) sees the root alone
-    let body = |r: &Path, end: &str| format!(r#"--max-procs 1 -- /bin/sh -c ': > "{0}"; "$FX" sleep-ms 300; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 2 ]; do sleep 0.01; done; {end}'"#, r.display());
-    let ended = run(&d, "exit", &body(&r1, "exit 7"), &hold, Duration::from_secs(30), || false);
-    let control = run(&d, "ctl", &body(&r2, "while :; do sleep 0.05; done"), &hold, Duration::from_secs(30), || false);
+    // the root forks only once the supervisor holds (the seam writes the ready file after its
+    // first check, which then saw the root and at most one `sleep`: within --max-procs 2); three
+    // members outlive the root, so the job stays past the cap after the root exits
+    let body = |r: &Path, end: &str| format!(r#"--max-procs 2 -- /bin/sh -c ': > "{0}"; while [ ! -e "{0}.ready" ]; do sleep 0.01; done; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 3 ]; do sleep 0.01; done; {end}'"#, r.display());
+    let hold = |r: &Path| [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500".to_string()), ("SHEEPDOG_TEST_READY_FILE", format!("{}.ready", r.display()))];
+    let (h1, h2) = (hold(&r1), hold(&r2));
+    let (e1, e2): (Vec<(&str, &str)>, Vec<(&str, &str)>) = (h1.iter().map(|(k, v)| (*k, v.as_str())).collect(), h2.iter().map(|(k, v)| (*k, v.as_str())).collect());
+    let ended = run(&d, "exit", &body(&r1, "exit 7"), &e1, Duration::from_secs(30), || false);
+    let control = run(&d, "ctl", &body(&r2, "while :; do sleep 0.05; done"), &e2, Duration::from_secs(30), || false);
     for p in records(&r1).into_iter().chain(records(&r2)) {
         common::send(p.0, p.1, libc::SIGKILL);
     }
@@ -222,15 +224,17 @@ fn the_roots_exit_comes_before_a_cap_in_one_wake() {
 fn a_term_comes_before_a_cap_in_one_wake() {
     let d = scratch("termcap");
     let r1 = d.join("rec");
-    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500")];
-    let t0 = Instant::now();
+    let ready = format!("{}.ready", r1.display());
+    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", ready.as_str())];
+    // as above: the root forks past --max-procs 2 once the supervisor holds; the TERM comes
+    // while it holds
     let r = run(
         &d,
         "t",
-        &format!(r#"--max-procs 1 -- /bin/sh -c '"$FX" sleep-ms 300; "$FX" sigcount "{}" & while :; do sleep 0.05; done'"#, r1.display()),
+        &format!(r#"--max-procs 2 -- /bin/sh -c 'while [ ! -e "{0}.ready" ]; do sleep 0.01; done; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while :; do sleep 0.05; done'"#, r1.display()),
         &hold,
         Duration::from_secs(30),
-        || !records(&r1).is_empty() && t0.elapsed() > Duration::from_millis(300),
+        || records(&r1).len() >= 3,
     );
     for p in records(&r1) {
         common::send(p.0, p.1, libc::SIGKILL);
