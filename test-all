@@ -17,6 +17,8 @@
 #   init         sheepdog under `docker run --init`: TERM exits 143 (it dies of TERM)
 #   enosys       the suite under a seccomp profile where pidfd_open fails with ENOSYS; the pidfd
 #                probe must fall back to kill
+#   sh1          `sh` as PID 1 (no --init): strays --kill skips its live child unless named
+#                (cell 29(e))
 #   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
 #                signal
 #   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
@@ -28,7 +30,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
-ALL="macos alpine debian amd64 pid1 init enosys other-user release"
+ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release"
 [ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
@@ -218,6 +220,16 @@ leg_enosys() {
     && record enosys PASS || record enosys "FAIL ($LOGDIR/enosys.log)"
 }
 
+leg_sh1() {
+  build_alpine || { record sh1 "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
+  # no --init: the script's shell is PID 1 (the shape under test)
+  rm -f "$LOGDIR/sh1.cid"
+  bg_wait timeout -k 30 600 docker run --rm --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro rust:1-alpine sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
+  local rc=$?
+  [ -s "$LOGDIR/sh1.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/sh1.cid")" >/dev/null 2>&1
+  [ $rc -eq 0 ] && record sh1 PASS || record sh1 "FAIL ($LOGDIR/sh1.log)"
+}
+
 leg_other_user() {
   # --init: the script's shell must not be PID 1 (BusyBox `timeout` execs the command, so a test
   # binary would be a child of PID 1, which a cell that needs an ancestor above it refuses)
@@ -244,7 +256,7 @@ TXT
 for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
-    pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; other-user) leg_other_user ;;
+    pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
     release) leg_release ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac

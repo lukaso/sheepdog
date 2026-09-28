@@ -145,9 +145,11 @@ fn scan() -> Vec<Row> {
         let n = os::exe_name(1).unwrap_or_default();
         !(REAPERS.contains(&n.as_str()) || n == "init" || n == "sheepdog")
     };
+    let me = unsafe { libc::getpid() };
     let mut rows = Vec::new();
     for p in &procs {
-        if p.uid != uid || p.pid <= 1 {
+        // never this process (its ancestors are rows: `--kill` refuses them by kill's checks)
+        if p.uid != uid || p.pid <= 1 || p.pid == me {
             continue;
         }
         #[cfg(target_os = "macos")]

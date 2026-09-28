@@ -264,10 +264,11 @@ fn strays_kill_refuses_the_callers_ancestor() {
     let sd = sheepdog().to_string();
     let w = c.word.clone();
     c.make(&["stray-run", "{}", "daemon", &sd, "strays", "--kill", "--yes", "--cmd", &w], &["daemon", "daemon.d"]);
-    assert!(wait_until(30, || c.path("daemon.code").exists()), "the daemon's strays did not end");
-    let code = std::fs::read_to_string(c.path("daemon.code")).unwrap_or_default();
     let d = c.rec("daemon.d").unwrap();
+    // the daemon's strays ends (its code), or the daemon itself was killed
+    assert!(wait_until(30, || c.path("daemon.code").exists() || !common::alive(d)), "the daemon's strays did not end");
     assert!(common::alive(d), "the daemon (the caller's ancestor) was killed");
+    let code = std::fs::read_to_string(c.path("daemon.code")).unwrap_or_default();
     assert_eq!(code, "1", "the refusal's exit code");
 }
 
