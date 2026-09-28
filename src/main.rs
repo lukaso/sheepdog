@@ -132,6 +132,7 @@ fn json_flag(sub: &str, args: &[OsString]) -> bool {
     let takes_value: &[&[u8]] = match sub {
         "kill" => &[b"--grace"],
         "strays" => &[b"--min-mem", b"--older-than", b"--cmd", b"--pid"],
+        "sweep" => &[b"--owner"],
         _ => &[],
     };
     let mut it = args.iter();
@@ -148,10 +149,11 @@ fn json_flag(sub: &str, args: &[OsString]) -> bool {
     false
 }
 
-/// `s` as one shell word: as it is when it holds only characters no shell treats specially,
-/// else single-quoted (a `'` inside becomes `'\''`).
+/// `s` as one shell word: as it is when it holds only characters no shell treats specially and
+/// does not start with `=` (zsh expands `=cmd` to its path), else single-quoted (a `'` inside
+/// becomes `'\''`).
 fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:=@%+,".contains(&b)) {
+    if !s.is_empty() && !s.starts_with('=') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:=@%+,".contains(&b)) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -1639,7 +1641,11 @@ fn run(argv: Vec<OsString>) -> i32 {
             let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
             let dash = typed.iter().position(|t| t == "--");
             let sub = typed[..dash.unwrap_or(typed.len())].iter().position(|t| ["run", "kill", "strays", "ps", "sweep", "doctor"].contains(&t.as_str()));
+            // a word shown escaped (a control character, bytes that are not UTF-8) cannot be
+            // pasted back as typed: then no runnable line, only its shape
+            let exact = argv[1..].iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes());
             let fix = match sub {
+                _ if !exact => "sheepdog run -- COMMAND".to_string(),
                 // options, then a subcommand: that subcommand, with the rest as typed
                 Some(i) if typed[0].starts_with('-') => {
                     let mut rest = q.clone();

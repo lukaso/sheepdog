@@ -246,3 +246,45 @@ fn each_duration_flag_keeps_its_cap() {
     let _ = c.wait();
     assert_eq!(ok, Some(0), "control: kill --grace 1d");
 }
+
+/// `sweep --owner` takes a value: in `sweep --owner --json --bogus` the word is the owner, not the
+/// flag, so the usage error is text; the control, `sweep --json --bogus`, is JSON.
+#[test]
+fn sweep_owner_takes_a_value_not_the_json_flag() {
+    assert!(sd(&["sweep", "--owner", "--json", "--bogus"]).out.trim().is_empty(), "--owner's value taken as --json");
+    let c = sd(&["sweep", "--json", "--bogus"]);
+    assert!(json::parse(c.out.trim()).is_ok_and(|j| j.get("error").is_some()), "control: {}", c.out);
+}
+
+/// A word that starts with `=` or `~` is quoted in the suggested fix (zsh expands `=ls` to a path,
+/// a shell expands `~`): the fix, run through `sh -c` (and `zsh -fc` where there is one), prints
+/// the words as typed. An argument that is not printable text gets no runnable line (COMMAND);
+/// the control, printable words, stays runnable.
+#[test]
+fn the_suggested_fix_keeps_every_word_as_typed() {
+    let fix_of = |typed: &[&std::ffi::OsStr]| -> String {
+        let o = Command::new(sheepdog()).args(typed).stdin(Stdio::null()).output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        let l = err.lines().find(|l| l.contains("To run it under sheepdog:")).unwrap_or_else(|| panic!("{typed:?}: {err}")).to_string();
+        l.split("To run it under sheepdog: ").nth(1).unwrap().to_string()
+    };
+    let os = |v: &[&str]| -> Vec<std::ffi::OsString> { v.iter().map(|s| s.into()).collect() };
+    let words = os(&["--", "printf", "%s|", "=ls", "~", "~/x", "plain"]);
+    let fix = fix_of(&words.iter().map(|w| w.as_os_str()).collect::<Vec<_>>());
+    let line = fix.replacen("sheepdog", sheepdog(), 1);
+    for shell in ["/bin/sh", "/bin/zsh"] {
+        if !std::path::Path::new(shell).exists() {
+            continue;
+        }
+        let flag = if shell.ends_with("zsh") { "-fc" } else { "-c" };
+        let o = Command::new(shell).args([flag, &line]).stdin(Stdio::null()).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "=ls|~|~/x|plain|", "{shell}: {fix}");
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let nl = std::ffi::OsStr::new("a\nb");
+    let bad = std::ffi::OsStr::from_bytes(b"\xff");
+    for w in [nl, bad] {
+        let f = fix_of(&[std::ffi::OsStr::new("--"), std::ffi::OsStr::new("printf"), w]);
+        assert!(f.ends_with("-- COMMAND"), "{w:?}: a runnable line for a word it cannot show: {f}");
+    }
+}
