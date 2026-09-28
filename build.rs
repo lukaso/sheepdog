@@ -1,12 +1,20 @@
 // The commit `sheepdog --version` names (PLAN.md §10.5): `git rev-parse --short HEAD` at build
 // time, or "unknown" outside a git checkout of this crate (a crate tarball, or a crate vendored
 // inside another repository, whose HEAD is not this crate's). The watched files come from git
-// itself: in a worktree `.git` is a file, and HEAD and the refs live elsewhere.
+// itself: in a worktree `.git` is a file, and HEAD and the refs live elsewhere. Only this
+// checkout's HEAD and its branch's ref are watched (a commit in another worktree, or a fetch,
+// does not rebuild this one); a branch ref that is packed has no file yet, and a missing watched
+// file makes cargo rebuild every time until it exists (correct, only more work).
 use std::path::{Path, PathBuf};
 
 fn git(args: &[&str]) -> Option<String> {
     std::process::Command::new("git")
         .args(args)
+        // an inherited GIT_DIR would make any directory look like that repository's top level
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -28,7 +36,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", gd.join("HEAD").display());
     }
     if let Some(cd) = git(&["rev-parse", "--git-common-dir"]).map(abs) {
-        for f in ["refs", "packed-refs"] {
+        // the branch HEAD names (none when detached: then HEAD itself changes on a commit)
+        let reftable = cd.join("reftable").exists();
+        if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]).filter(|_| !reftable) {
+            println!("cargo:rerun-if-changed={}", cd.join(r).display());
+        }
+        // packed refs, and the reftable backend (its refs are all under reftable/)
+        for f in ["packed-refs", "reftable"] {
             if cd.join(f).exists() {
                 println!("cargo:rerun-if-changed={}", cd.join(f).display());
             }
