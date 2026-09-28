@@ -7,7 +7,8 @@ set -u
 . "$(dirname "$0")/lib.sh"
 T=$(mktemp -d /private/tmp/sd-p3-crate.XXXXXX) || exit 3
 trap 'rm -rf "$T"' EXIT
-(cd "$SD_ROOT" && git archive HEAD) | tar -x -C "$T" || exit 3
+# the tracked files as they are in the working tree (so a mutant of build.rs is what builds)
+(cd "$SD_ROOT" && git ls-files -z | xargs -0 tar -cf -) | tar -xmf - -C "$T" || exit 3
 [ -e "$T/.git" ] && { echo "the copy is a git checkout"; exit 3; }
 b() { (cd "$T" && env "$@" CARGO_TARGET_DIR="$T/target" timeout 600 cargo build -q --bin sheepdog 2>"$T/err"); }
 ver() { "$SD_ROOT/scripts/lib/exec-guard.sh" exec "$T/target/debug/sheepdog" --version 2>&1; }
