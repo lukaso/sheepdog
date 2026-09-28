@@ -695,6 +695,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
         }
     }
+    // the auto-sweep: once, before the relay fork and before the pre-spawn TERM check
+    if !a.no_sweep {
+        crate::sweep::auto(&a.owner, a.quiet);
+    }
     let relay = match relay_if_needed(sig) {
         Ok(r) => r,
         Err(code) => return code,

@@ -64,6 +64,8 @@ pub struct Args {
     pub owner: String,
     /// `--status-fd N`: the status line goes to this fd at the end
     pub status_fd: Option<i32>,
+    /// skip the auto-sweep before the command (PLAN.md §3.5)
+    pub no_sweep: bool,
     /// the caps (PLAN.md §3.4) and the kill deadline (§3.3)
     pub timeout: Option<Duration>,
     pub max_mem: Option<u64>,
@@ -109,7 +111,7 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
     125
 }
 
@@ -127,6 +129,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut owner = "default".to_string();
     let mut status_fd = None;
     let (mut timeout, mut max_mem, mut max_procs, mut kill_deadline) = (None, None, None, None);
+    let mut no_sweep = false;
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
@@ -167,6 +170,10 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
                 leave_strays = true;
                 i += 1;
             }
+            b"--no-sweep" => {
+                no_sweep = true;
+                i += 1;
+            }
             b"--quiet" => {
                 quiet = true;
                 i += 1;
@@ -182,7 +189,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, timeout, max_mem, max_procs, kill_deadline })
+    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, no_sweep, timeout, max_mem, max_procs, kill_deadline })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -207,6 +214,11 @@ pub fn signal(pid: i32, id: u64, sig: c_int) -> Sent {
     // Test seam (debug builds only): SHEEPDOG_TEST_NOKILL=1 makes every signal fail, as EPERM
     // would after a member's setuid exec (cells 20 and 24-lite).
     if seam("SHEEPDOG_TEST_NOKILL") {
+        return Sent::No;
+    }
+    // Test seam (debug builds only): SHEEPDOG_TEST_UNKILLABLE=<pid>: a SIGKILL to that pid fails
+    // (as EPERM would); its other signals are sent (a STOP lands, so the pass must continue it)
+    if sig == libc::SIGKILL && seam_ms("SHEEPDOG_TEST_UNKILLABLE") == Some(pid as u64) {
         return Sent::No;
     }
     // Test seam (debug builds only): SHEEPDOG_TEST_REUSE_PID=<pid> sends to that pid instead,

@@ -756,6 +756,10 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 crate::status::set_degraded("the macOS responsibility API is not available");
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
+            // the auto-sweep: once, after the re-exec, before the pre-spawn TERM check
+            if !a.no_sweep {
+                crate::sweep::auto(&a.owner, a.quiet);
+            }
             if let Some(code) = crate::term_before_spawn(sig) {
                 return code;
             }

@@ -182,8 +182,53 @@ pub enum Outcome {
     Deadline(i32),
 }
 
-/// Sweep one open journal. `protected`: this process and its ancestors.
-pub fn sweep_job(mut j: Journal, protected: &[(i32, u64)], explicit: bool) -> Outcome {
+/// The members named by a journal, read without its lock (a live job's: the auto-sweep leaves
+/// them alone). Only this user's file, never through a symlink.
+fn peek(path: &Path) -> Vec<(i32, u64)> {
+    let Ok(f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) else { return Vec::new() };
+    if f.metadata().map_or(true, |m| m.uid() != unsafe { libc::geteuid() }) {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    let _ = std::io::Read::read_to_string(&mut &f, &mut text);
+    text.lines().filter_map(|l| json::parse(l).ok()).filter_map(|l| Some((num(&l, "pid")? as i32, num(&l, "id")? as u64))).collect()
+}
+
+/// How a sweep treats live supervisors and live jobs.
+pub enum Mode<'a> {
+    /// `sheepdog sweep`: a candidate supervisor is ended first
+    Explicit,
+    /// the auto-sweep: a live supervisor and its set, and anything a live job's journal names,
+    /// are left for an explicit sweep; no grace; a 500 ms deadline, and what a pass that misses
+    /// it stopped is continued
+    Auto { live_named: &'a HashSet<(i32, u64)> },
+}
+
+/// Is `c` deferred by the auto-sweep: a live supervisor, in one's set (a ppid descendant, or on
+/// macOS responsible to it), or named by a live job's journal?
+fn deferred(c: (i32, u64), sups: &[i32], live_named: &HashSet<(i32, u64)>) -> bool {
+    if live_named.contains(&c) || sups.contains(&c.0) {
+        return true;
+    }
+    let mut p = parent(c.0);
+    let mut n = 0;
+    while let Some(q) = p.filter(|&q| q > 1 && n < 4096) {
+        if sups.contains(&q) {
+            return true;
+        }
+        p = parent(q);
+        n += 1;
+    }
+    #[cfg(target_os = "macos")]
+    if crate::macos::responsible_pid(c.0).is_some_and(|r| sups.contains(&r)) {
+        return true;
+    }
+    false
+}
+
+/// Sweep one open journal in `mode`. `protected`: this process and its ancestors.
+pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Outcome {
+    let explicit = matches!(mode, Mode::Explicit);
     // a job that holds this sweep's own process or an ancestor is never touched
     if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| j.members.iter().any(|m| m.pid == p && m.id == id)) {
         return Outcome::Skipped(format!("it holds pid {p}, this sweep or one of its ancestors"));
@@ -200,6 +245,40 @@ pub fn sweep_job(mut j: Journal, protected: &[(i32, u64)], explicit: bool) -> Ou
     let new: Vec<(i32, u64)> = set.iter().copied().filter(|m| !named.contains(m)).collect();
     j.journal_closure(&new);
     let mut opts = KillOpts::from_env();
+    if let Mode::Auto { live_named } = mode {
+        // a pass is bounded (500 ms, unless the debug deadline seam is set)
+        if crate::seam_ms("SHEEPDOG_TEST_DEADLINE_MS").is_none() {
+            opts.deadline = std::time::Duration::from_millis(500);
+        }
+        let sups: Vec<i32> = set.iter().filter(|&&(p, _)| is_sheepdog(p)).map(|&(p, _)| p).collect();
+        let held: Vec<(i32, u64)> = set.iter().copied().filter(|&c| deferred(c, &sups, live_named)).collect();
+        let n = set.len() - held.len();
+        let mut scan = || proved.scan().into_iter().filter(|&c| !deferred(c, &sups, live_named)).collect::<Vec<_>>();
+        let initial: HashMap<i32, u64> = scan().into_iter().collect();
+        let r = kill_tree(&opts, &mut scan, || {}, || None, signal, initial);
+        return match r {
+            Ok(()) if held.is_empty() => {
+                let _ = std::fs::remove_file(&j.path);
+                Outcome::Swept(n)
+            }
+            Ok(()) => {
+                crate::status::add_note(&format!("deferred: job {} holds a live supervisor or a live job's processes; run sheepdog sweep", j.job));
+                crate::note(format!("deferred {}", j.job));
+                Outcome::Swept(n)
+            }
+            Err(crate::KillError::Deadline(alive)) => {
+                // continue what this pass stopped: a partial pass must leave nothing stopped
+                for p in &alive {
+                    if let Some(&id) = proved.known.get(p) {
+                        let _ = signal(*p, id, libc::SIGCONT);
+                    }
+                }
+                crate::status::add_note(&format!("partial: job {} still has {} process(es) alive after its 500 ms pass", j.job, alive.len()));
+                Outcome::Deadline(0)
+            }
+            Err(crate::KillError::Internal) => Outcome::Deadline(125),
+        };
+    }
     if explicit {
         let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
         if !sups.is_empty() {
@@ -215,6 +294,60 @@ pub fn sweep_job(mut j: Journal, protected: &[(i32, u64)], explicit: bool) -> Ou
             Outcome::Swept(n)
         }
         Err(e) => Outcome::Deadline(kill_failed(e)),
+    }
+}
+
+/// The auto-sweep before a `sheepdog run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
+/// silently skipped on any problem (a note), within 200 ms between journals. It takes the wall's
+/// token only when there is a journal to open: an empty state produces no fact.
+pub fn auto(owner: &str, quiet: bool) {
+    let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else { return };
+    let Some(dir) = folder(&state) else { return };
+    if !dir.exists() {
+        return;
+    }
+    for p in [state.clone(), state.join("jobs"), dir.clone()] {
+        if let Err(why) = safe_dir(&p) {
+            crate::status::add_note(&format!("auto-sweep skipped: {why}"));
+            return;
+        }
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "journal")).collect();
+    if files.is_empty() {
+        return;
+    }
+    files.sort();
+    let Some(_token) = crate::wall::gate() else { return };
+    let Ok(protected) = protected() else {
+        crate::status::add_note("auto-sweep skipped: sheepdog cannot follow its own chain of parent processes");
+        return;
+    };
+    let start = std::time::Instant::now();
+    let mut opened = Vec::new();
+    let mut live_named: HashSet<(i32, u64)> = HashSet::new();
+    for f in files {
+        match open(&f) {
+            Ok(j) => opened.push(j),
+            Err(Skip::Live) => live_named.extend(peek(&f)),
+            Err(_) => {}
+        }
+    }
+    let (mut swept, mut killed) = (0usize, 0usize);
+    for j in opened {
+        if start.elapsed() > std::time::Duration::from_millis(200) {
+            crate::status::add_note("partial: the auto-sweep's 200 ms budget ran out; the rest waits for the next run");
+            break;
+        }
+        if Some(j.boot.as_str()) != crate::journal::boot_id().as_deref() || j.pidns != crate::journal::pidns() || j.owner != owner || j.leave_strays {
+            continue;
+        }
+        if let Outcome::Swept(n) = sweep_job_as(j, &protected, Mode::Auto { live_named: &live_named }) {
+            swept += 1;
+            killed += n;
+        }
+    }
+    if swept > 0 && killed > 0 && !quiet {
+        say!("sheepdog: swept {swept} dead job{} before the command ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
     }
 }
 
@@ -293,7 +426,7 @@ pub fn main(args: &[OsString]) -> i32 {
             continue;
         }
         let job = j.job.clone();
-        match sweep_job(j, &protected, true) {
+        match sweep_job_as(j, &protected, Mode::Explicit) {
             Outcome::Swept(n) => {
                 swept += 1;
                 killed += n;
