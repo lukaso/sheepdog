@@ -104,13 +104,15 @@ pub fn cmdline(pid: i32) -> Vec<String> {
 }
 
 /// Whether this process runs under a translator (Rosetta or qemu: the emulated amd64 leg).
+/// Measured under Docker's Rosetta: /proc/self/exe names the binary and `uname -m` says x86_64,
+/// but /proc/self/maps shows the translator mapped (/run/rosetta/rosetta); qemu-user maps itself
+/// the same way.
 fn translated() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
-        std::fs::read_link("/proc/self/exe")
-            .ok()
-            .and_then(|l| l.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .is_some_and(|n| n == "rosetta" || n.starts_with("qemu-"))
+        std::fs::read_to_string("/proc/self/maps")
+            .map(|m| m.lines().any(|l| l.ends_with("/rosetta") || l.contains("/qemu-")))
+            .unwrap_or(false)
     })
 }
 
