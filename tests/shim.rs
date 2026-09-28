@@ -98,7 +98,11 @@ fn the_root_dies_with_its_supervisor() {
     let _ = c.wait();
     let gone = root.is_some_and(|r| gone_within(r, 5));
     // the root's /proc state at the verdict, so a failure says what the root was doing
-    let seen = root.map(|r| std::fs::read_to_string(format!("/proc/{}/stat", r.0)).unwrap_or_default());
+    let seen = root.map(|r| {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", r.0)).unwrap_or_default();
+        let sigs: Vec<&str> = status.lines().filter(|l| l.starts_with("Sig") || l.starts_with("ShdPnd")).collect();
+        (std::fs::read_to_string(format!("/proc/{}/stat", r.0)).unwrap_or_default(), sigs.join(" "))
+    });
     if let Some(r) = root {
         common::send(r.0, r.1, libc::SIGKILL);
     }
