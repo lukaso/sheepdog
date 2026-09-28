@@ -991,21 +991,25 @@ fn main() {
             sigcount_as(&a[2], "app", false);
         }
     }
-    // `reaper NAME PROG ARGS...` (Linux): a subreaper whose command name is NAME (as `tini` is):
-    // it runs PROG ARGS as its child, then reaps every orphan it adopts, until it is killed.
+    // `reaper NAME READY PROG ARGS...` (Linux): a subreaper whose command name is NAME (as `tini`
+    // is): it runs PROG ARGS as its child and creates the file READY once that child has ended
+    // (its orphans are adopted by then), then reaps every orphan it adopts until none is left.
     #[cfg(target_os = "linux")]
-    if mode == "reaper" && a.len() >= 4 {
+    if mode == "reaper" && a.len() >= 5 {
         let name = CString::new(a[2].as_str()).unwrap();
         unsafe {
             libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
             libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
+            // it dies with the test that started it
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
         }
-        let _ = std::process::Command::new(&a[3]).args(&a[4..]).spawn();
-        loop {
-            if unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } < 0 {
-                unsafe { libc::usleep(200_000) };
-            }
+        if let Ok(mut ch) = std::process::Command::new(&a[4]).args(&a[5..]).spawn() {
+            let _ = ch.wait();
         }
+        let _ = std::fs::write(&a[3], b"");
+        // no descendant left: nothing more can be adopted
+        while unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) } >= 0 {}
+        std::process::exit(0);
     }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
     if mode == "after" && a.len() >= 4 {

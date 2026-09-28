@@ -29,6 +29,12 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 const REAPERS: [&str; 6] = ["systemd", "tini", "docker-init", "dumb-init", "catatonit", "s6-svscan"];
 
+/// Of those, the inits that start a program of their own (a container's, a supervision tree's):
+/// a child of one is marked and skipped by `--kill` unless named, whatever its pid (PHASE2.md D9).
+/// Only an adoptee of an OS init (`systemd`, `init`) is an unmarked stray.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const PROGRAM_INITS: [&str; 5] = ["tini", "docker-init", "dumb-init", "catatonit", "s6-svscan"];
+
 /// Linux: is PID 1 (by its command name) an OS init, whose adoptees are strays? In a container,
 /// tini, docker-init and the like start the container's own program, so their children are
 /// marked and skipped unless named (PHASE2.md D9).
@@ -199,10 +205,12 @@ fn scan() -> Vec<Row> {
         let (orphan, pid1_child, app_scope) = (p.ppid == 1 && p.puniq != Some(1) && !app_helper(p.pid), false, false);
         #[cfg(target_os = "linux")]
         let (orphan, pid1_child, app_scope) = {
-            let reaped = p.ppid == 1 || (p.ppid > 1 && os::comm(p.ppid).is_some_and(|n| REAPERS.contains(&n.as_str())));
+            let parent = os::comm(p.ppid).unwrap_or_default();
+            let reaped = p.ppid == 1 || (p.ppid > 1 && REAPERS.contains(&parent.as_str()));
             let kind = std::fs::read_to_string(format!("/proc/{}/cgroup", p.pid)).map_or(Cgroup::Other, |t| cgroup_kind(&t));
             let orphan = reaped && kind != Cgroup::Service;
-            (orphan, orphan && p.ppid == 1 && pid1_app, orphan && kind == Cgroup::AppScope)
+            let program_child = (p.ppid == 1 && pid1_app) || (p.ppid > 1 && PROGRAM_INITS.contains(&parent.as_str()));
+            (orphan, orphan && program_child, orphan && kind == Cgroup::AppScope)
         };
         if !orphan {
             continue;
@@ -238,7 +246,13 @@ fn scan() -> Vec<Row> {
         let job = jobs
             .get(&(p.pid, p.id))
             .cloned()
-            .or_else(|| crate::kill::is_sheepdog(p.pid).then(|| format!("sheepdog {}, a supervisor", p.pid)))
+            .or_else(|| {
+                crate::kill::is_sheepdog(p.pid).then(|| match os::cmdline(p.pid).get(1).map(String::as_str) {
+                    Some("run") => format!("sheepdog {}, a supervisor", p.pid),
+                    Some(sub) => format!("sheepdog {} ({})", p.pid, crate::kill::clean(sub)),
+                    None => format!("sheepdog {}", p.pid),
+                })
+            })
             .or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepdog {s}")))
             .or_else(|| sup_in_tree.map(|s| format!("sheepdog {s} in its tree")));
         let full = os::cmdline(p.pid).join(" ");
@@ -348,7 +362,7 @@ pub fn main(args: &[OsString]) -> i32 {
             continue;
         }
         if r.pid1_child && !named {
-            say!("sheepdog: skipping pid {}: its parent is PID 1, which is not an init here, so it may be that program's own child; name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
+            say!("sheepdog: skipping pid {}: its parent is an init that runs a program of its own (or PID 1, which is not an OS init here), so it may be that program; name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
             continue;
         }
         // as `sheepdog kill PID:ID`: the identity read at the listing, and kill's target checks
@@ -356,6 +370,16 @@ pub fn main(args: &[OsString]) -> i32 {
         worst = worst.max(code);
     }
     worst
+}
+
+/// A shown command line that was cut (at the journal's cap) ends with `…`: `--cmd` matched the
+/// whole one, so the match can be in the part not shown.
+fn shown(cmd: &str, full: &str) -> String {
+    if full.len() > crate::journal::CMD_CAP {
+        format!("{cmd}…")
+    } else {
+        cmd.to_string()
+    }
 }
 
 fn print(rows: &[Row], json: bool) {
@@ -369,7 +393,7 @@ fn print(rows: &[Row], json: bool) {
                 r.mem,
                 r.age.map_or("null".into(), |a| a.to_string()),
                 r.cpu.map_or("null".into(), |c| format!("{c:.2}")),
-                crate::journal::json_str(&r.cmd),
+                crate::journal::json_str(&shown(&r.cmd, &r.full)),
                 origin.join(","),
                 r.tree,
                 r.job.as_deref().map_or("null".into(), crate::journal::json_str),
@@ -396,7 +420,7 @@ fn print(rows: &[Row], json: bool) {
                 crate::kill::human(r.mem),
                 r.age.map_or("?".into(), |a| format!("{a}s")),
                 r.cpu.map_or("?".into(), |c| format!("{c:.1}s")),
-                crate::kill::clean(&r.cmd),
+                crate::kill::clean(&shown(&r.cmd, &r.full)),
                 crate::kill::clean(&r.origin.join("; "))
             )
         };

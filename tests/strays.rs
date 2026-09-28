@@ -6,8 +6,9 @@
 //!
 //! Linux: the legs' containers run `--init`, so an orphan's parent is PID 1, not an OS init, and
 //! every stray would be a `pid1-child` (skipped unless named). So on Linux a cell's strays are
-//! made under a subreaper of its own named `tini` (the `reaper` fixture), which is no PID 1: the
-//! unnamed paths of `--kill` run there too.
+//! made under a subreaper of its own named `systemd` (the `reaper` fixture: an OS init's name,
+//! whose adoptees are unmarked strays): the unnamed paths of `--kill` run there too. A control
+//! cell makes one under a `tini`-named reaper, whose children stay marked.
 
 mod common;
 
@@ -41,6 +42,8 @@ struct Cell {
     word: String,
     recs: Vec<PathBuf>,
     reapers: Vec<std::process::Child>,
+    /// the Linux reaper's command name (`systemd`; the control cell uses `tini`)
+    reaper_name: &'static str,
 }
 
 impl Cell {
@@ -54,7 +57,7 @@ impl Cell {
         let dir = base.join(&word);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Cell { dir, word, recs: Vec::new(), reapers: Vec::new() }
+        Cell { dir, word, recs: Vec::new(), reapers: Vec::new(), reaper_name: "systemd" }
     }
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
@@ -68,8 +71,11 @@ impl Cell {
             self.recs.push(self.path(n));
         }
         if cfg!(target_os = "linux") {
-            let r = Command::new(fixture()).args(["reaper", "tini", prog]).args(&a).stdin(Stdio::null()).spawn().unwrap();
+            // the maker has ended once READY exists: its orphans are the reaper's by then
+            let ready = self.path(&format!("ready{}", self.reapers.len()));
+            let r = Command::new(fixture()).args(["reaper", self.reaper_name, ready.to_str().unwrap(), prog]).args(&a).stdin(Stdio::null()).spawn().unwrap();
             self.reapers.push(r);
+            assert!(wait_until(20, || ready.exists()), "{prog} {a:?} did not end");
         } else {
             let st = Command::new(prog).args(&a).stdin(Stdio::null()).status().unwrap();
             assert!(st.success(), "{prog} {a:?}: {st:?}");
@@ -97,10 +103,8 @@ impl Cell {
 
 impl Drop for Cell {
     fn drop(&mut self) {
-        for r in &mut self.reapers {
-            common::send_child(r, libc::SIGKILL);
-            let _ = r.wait();
-        }
+        // the recorded processes first, then the reapers (a reaper killed first would hand its
+        // adoptees to PID 1)
         for r in &self.recs {
             for suffix in ["", ".d"] {
                 let p = PathBuf::from(format!("{}{suffix}", r.display()));
@@ -113,6 +117,10 @@ impl Drop for Cell {
                     }
                 }
             }
+        }
+        for r in &mut self.reapers {
+            common::send_child(r, libc::SIGKILL);
+            let _ = r.wait();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -401,9 +409,10 @@ fn strays_kill_skips_an_orphaned_supervisor() {
         }
     }
     let _k = Kill(sup);
-    // its caller (the shell) is gone: the supervisor is an orphan now
-    assert!(wait_until(10, || String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &sup.0.to_string()]).output().unwrap().stdout).trim() != ""), "no supervisor");
-    std::thread::sleep(Duration::from_millis(1500));
+    // its caller (the shell) is gone: the supervisor's parent is PID 1 (macOS) or the reaper
+    let ppid = || String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &sup.0.to_string()]).output().unwrap().stdout).trim().to_string();
+    let adopters: Vec<String> = std::iter::once("1".to_string()).chain(c.reapers.iter().map(|r| r.id().to_string())).collect();
+    assert!(wait_until(10, || adopters.contains(&ppid())), "the supervisor was not adopted (parent {})", ppid());
     let l = strays(&["--json", "--cmd", &c.word], &[]);
     let row = rows(&l.out).remove(&sup.0);
     let k = strays(&["--kill", "--yes", "--cmd", &c.word], &[]);
@@ -433,4 +442,26 @@ fn strays_cmd_matches_the_whole_command_line() {
     let r = row.unwrap_or_else(|| panic!("the stray is not found by a word past its first 256 bytes:\n{}", o.out));
     let shown = r.get("cmd").and_then(Json::str).unwrap_or("").to_string();
     assert!(shown.len() <= 300, "control: the shown command line is capped: {} bytes", shown.len());
+    assert!(shown.ends_with('…'), "a cut command line does not say so: {shown}");
+}
+
+/// Linux: a child of a `tini`-named init (whatever its pid) is marked as that init's program and
+/// survives an unnamed `--kill`; named, it is killed.
+#[cfg(target_os = "linux")]
+#[test]
+fn strays_kill_skips_a_program_inits_child() {
+    let _s = serial();
+    let mut c = Cell::new();
+    c.reaper_name = "tini";
+    c.make(&["stray", "{}", "s"], &["s"]);
+    let s = c.rec("s").unwrap();
+    let l = strays(&["--json", "--cmd", &c.word], &[]);
+    let marked = rows(&l.out).remove(&s.0).is_some_and(|r| r.get("pid1_child") == Some(&Json::Bool(true)));
+    let k = strays(&["--kill", "--yes", "--cmd", &c.word], &[]);
+    let kept = c.untouched("s");
+    let named = strays(&["--kill", "--yes", "--pid", &format!("{}:{}", s.0, s.1), "--cmd", &c.word], &[]);
+    let gone = wait_until(5, || !common::alive(s));
+    assert!(marked, "a tini child is not marked:\n{}", l.out);
+    assert!(kept, "a tini child was killed unnamed: {}", k.err);
+    assert!(gone, "control: named, it survived ({:?}): {}", named.code, named.err);
 }

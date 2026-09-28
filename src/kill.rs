@@ -459,7 +459,11 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
         }
         let age = os::start_secs(r.pid).map(|s| now.saturating_sub(s));
         let mem = crate::caps::mem_of(r.pid);
-        let cmd = crate::journal::text(os::cmdline(r.pid).join(" ").as_bytes());
+        let full = os::cmdline(r.pid).join(" ");
+        let mut cmd = crate::journal::text(full.as_bytes());
+        if full.len() > crate::journal::CMD_CAP {
+            cmd.push('…'); // cut at the journal's cap
+        }
         let name = clean(&os::exe_name(r.pid).unwrap_or_else(|| "?".into()));
         let line = if json {
             let ev: Vec<String> = r.evidence.iter().map(|e| crate::journal::json_str(e)).collect();
