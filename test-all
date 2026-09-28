@@ -22,6 +22,8 @@
 #   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
 #                signal
 #   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
+#   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
+#                the commit override, the npm launcher; PHASE3.md §3)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
 #                operator's Developer ID and a click in System Settings; prints the steps
 #
@@ -30,7 +32,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
-ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release"
+ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle"
 [ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
@@ -252,6 +254,11 @@ leg_release() {
     && record release PASS || record release "FAIL ($LOGDIR/release.log)"
 }
 
+leg_bundle() {
+  bg_wait timeout -k 30 3600 sh tests/dist/run.sh > "$LOGDIR/bundle.log" 2>&1 \
+    && record bundle PASS || record bundle "FAIL ($LOGDIR/bundle.log)"
+}
+
 leg_tcc() {
   cat <<'TXT'
 The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
@@ -267,7 +274,7 @@ for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
-    release) leg_release ;; tcc) leg_tcc ;;
+    release) leg_release ;; bundle) leg_bundle ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done
