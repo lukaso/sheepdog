@@ -102,12 +102,33 @@ fn resp_of(pid: i32) -> Option<u64> {
     (v != 0 && v != u64::MAX).then_some(v)
 }
 
+/// Every pid named in the journals under state directory `st` (a supervisor journals what its
+/// scans see: the readiness handshake waits for a line here, never for a fixed time).
+fn journaled(st: &Path) -> Vec<i32> {
+    let mut v = Vec::new();
+    for b in std::fs::read_dir(st.join("jobs")).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
+            for l in std::fs::read_to_string(f.path()).unwrap_or_default().lines() {
+                if let Some(p) = json::parse(l).ok().and_then(|j| j.get("pid").and_then(Json::num)) {
+                    v.push(p as i32);
+                }
+            }
+        }
+    }
+    v
+}
+
 /// Start T (a disclaimed fixture) running PROG ARGS as its child tab; T's (pid, uniqueid), after
 /// the precondition that T is responsible for itself.
 #[cfg(target_os = "macos")]
 fn t_launch(d: &Path, g: &mut Guard, prog: &str, args: &[&str]) -> (i32, u64) {
+    t_launch_env(d, g, prog, args, &[])
+}
+
+#[cfg(target_os = "macos")]
+fn t_launch_env(d: &Path, g: &mut Guard, prog: &str, args: &[&str], env: &[(&str, &Path)]) -> (i32, u64) {
     let tr = d.join("T");
-    let c = Command::new(fixture()).arg("t").arg(&tr).arg(prog).args(args).stdin(Stdio::null()).spawn().unwrap();
+    let c = Command::new(fixture()).arg("t").arg(&tr).arg(prog).args(args).envs(env.iter().copied()).stdin(Stdio::null()).spawn().unwrap();
     g.children.push(c);
     g.recs.push(tr.clone());
     assert!(wait_until(15, || !records(&tr).is_empty()), "T did not start");
@@ -150,12 +171,14 @@ fn cell2_inherit_a_setsid_grandchild_leaves_no_survivor() {
 fn cell3_inherit_an_escapee_seen_by_a_scan_leaves_no_survivor() {
     let d = scratch("c3");
     let (r, go) = (d.join("r"), d.join("go"));
+    let st = state(&d);
     let mut g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
-    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", r.to_str().unwrap(), go.to_str().unwrap()]);
+    let t = t_launch_env(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", r.to_str().unwrap(), go.to_str().unwrap()], &[("SHEEPDOG_TEST_STATE", &st)]);
     assert!(wait_until(15, || !records(&r).is_empty()), "C did not start");
     let sup = supervisor_under_t(t, records(&r)[0]);
-    // the readiness handshake: C escapes only after the supervisor's scans have seen it
-    std::thread::sleep(Duration::from_millis(800));
+    // the readiness handshake: C escapes only after a supervisor scan has seen it (journaled)
+    let c = records(&r)[0];
+    assert!(wait_until(10, || journaled(&st).contains(&c.0)), "the supervisor never journaled C");
     std::fs::write(&go, b"").unwrap();
     let rg = PathBuf::from(format!("{}.g", r.display()));
     assert!(wait_until(15, || !records(&rg).is_empty()), "G did not start");
@@ -171,11 +194,16 @@ fn cell3_inherit_an_escapee_seen_by_a_scan_leaves_no_survivor() {
 #[test]
 fn cell12_inherit_a_clean_exit_with_a_stray_leaves_no_survivor() {
     let d = scratch("c12");
-    let s = d.join("s");
+    let (s, rootf, go) = (d.join("s"), d.join("root"), d.join("go"));
     let mut g = Guard { recs: vec![s.clone()], markers: vec![], children: vec![] };
-    let script = format!(r#""{}" sigcount "{}" & exit 0"#, fixture(), s.display());
-    let c = Command::new(fixture()).arg("t").arg(d.join("T")).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).stdin(Stdio::null()).spawn().unwrap();
-    g.children.push(c);
+    // the root exits by itself, after the test has checked the supervisor's precondition
+    let script = format!(r#"echo $$ > "{}"; "{}" sigcount "{}" & while [ ! -e "{}" ]; do sleep 0.01; done; exit 0"#, rootf.display(), fixture(), s.display(), go.display());
+    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]);
+    assert!(wait_until(15, || std::fs::read_to_string(&rootf).is_ok_and(|x| x.ends_with('\n')) && !records(&s).is_empty()), "the job did not start");
+    let root: i32 = std::fs::read_to_string(&rootf).unwrap().trim().parse().unwrap();
+    let rid = sheepdog::ident::identity(root).expect("the root");
+    supervisor_under_t(t, (root, rid));
+    std::fs::write(&go, b"").unwrap();
     let code = {
         let end = Instant::now() + Duration::from_secs(30);
         loop {
@@ -482,7 +510,9 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     assert!(wait_until(15, || !records(&tr).is_empty() && !records(&r).is_empty() && !records(&rr).is_empty()), "the jobs did not start");
     let t = records(&tr)[0];
     assert_eq!(resp_of(t.0), Some(t.1), "precondition: T is responsible for itself");
-    std::thread::sleep(Duration::from_millis(800));
+    // the handshake: both supervisors' scans have seen C (both journals name it)
+    let c = records(&r)[0];
+    assert!(wait_until(10, || journaled(&s).contains(&c.0) && journaled(&inner_state).contains(&c.0)), "the supervisors never journaled C");
     std::fs::write(&go, b"").unwrap();
     let rg = PathBuf::from(format!("{}.g", r.display()));
     assert!(wait_until(15, || !records(&rg).is_empty()), "the inner job's escapee did not start");
@@ -493,22 +523,7 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     assert_eq!(resp_of(outer.0), Some(t.1), "precondition: the outer supervisor is responsible to T");
     assert_eq!(resp_of(esc.0), Some(t.1), "precondition: the inner job's escapee is responsible to T, not to its supervisor");
     // the outer has journaled the inner supervisor and the escapee (its scans, over a few ticks)
-    let jr = |st: &Path| -> Vec<i32> {
-        let mut v = Vec::new();
-        for b in std::fs::read_dir(st.join("jobs")).into_iter().flatten().flatten() {
-            for f in std::fs::read_dir(b.path()).into_iter().flatten().flatten() {
-                for l in std::fs::read_to_string(f.path()).unwrap_or_default().lines() {
-                    if let Some(j) = json::parse(l).ok() {
-                        if let Some(p) = j.get("pid").and_then(Json::num) {
-                            v.push(p as i32);
-                        }
-                    }
-                }
-            }
-        }
-        v
-    };
-    assert!(wait_until(10, || jr(&s).contains(&esc.0) && jr(&s).contains(&inner)), "the outer did not journal the inner job's escapee {esc:?} (inner {inner}, root {:?}): {:?}; recs {:?}", records(&rr), jr(&s), records(&r));
+    assert!(wait_until(10, || journaled(&s).contains(&esc.0) && journaled(&s).contains(&inner)), "the outer did not journal the inner job's escapee {esc:?} (inner {inner}, root {:?}): {:?}; recs {:?}", records(&rr), journaled(&s), records(&r));
     common::send(outer.0, outer.1, libc::SIGKILL);
     assert!(wait_until(5, || !common::alive(outer)));
     let ran = d.join("ran");
