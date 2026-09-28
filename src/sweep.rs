@@ -218,7 +218,7 @@ pub enum Outcome {
 
 /// The members named by a journal, read without its lock (a live job's: the auto-sweep leaves
 /// them alone). Only this user's file, never through a symlink.
-fn peek(path: &Path) -> Vec<(i32, u64)> {
+pub(crate) fn peek(path: &Path) -> Vec<(i32, u64)> {
     let Ok(f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) else { return Vec::new() };
     if f.metadata().map_or(true, |m| m.uid() != unsafe { libc::geteuid() }) {
         return Vec::new();

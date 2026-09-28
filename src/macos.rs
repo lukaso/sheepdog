@@ -165,6 +165,11 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
 /// can survive, so `kill` reports that supervisor and exits 125.
 pub const ADOPTS_ESCAPEES: bool = false;
 
+/// When `pid` started, in seconds since the epoch.
+pub fn start_secs(pid: pid_t) -> Option<u64> {
+    bsd(pid).map(|b| b.pbi_start_tvsec)
+}
+
 /// Every live (not zombie) process, for `sheepdog kill` (S6).
 pub fn procs() -> Vec<crate::kill::Proc> {
     all_pids()
@@ -173,7 +178,8 @@ pub fn procs() -> Vec<crate::kill::Proc> {
         .filter_map(|p| {
             let b = bsd(p)?; // fails for a zombie or a gone process
             let (id, pu) = uniq(p)?;
-            Some(crate::kill::Proc { pid: p, ppid: b.pbi_ppid as i32, uid: b.pbi_uid, id, puniq: Some(pu) })
+            let sid = unsafe { libc::getsid(p) };
+            Some(crate::kill::Proc { pid: p, ppid: b.pbi_ppid as i32, uid: b.pbi_uid, id, puniq: Some(pu), sid, pgid: b.pbi_pgid as i32, resp: resp_uniq(p) })
         })
         .collect()
 }

@@ -135,9 +135,10 @@ struct Kill {
 }
 
 impl Kill {
-    /// Every whole-word number in stdout's first column (the pids `--dry-run` lists).
+    /// The pids `--dry-run` lists as the target or proved (its first column), not its suspects
+    /// (the third column; phase 2 adds them, PHASE2.md D7).
     fn listed(&self) -> Vec<i32> {
-        self.out.lines().filter_map(|l| l.split_whitespace().next()?.parse().ok()).collect()
+        self.out.lines().filter(|l| l.split('\t').nth(2) != Some("suspect")).filter_map(|l| l.split_whitespace().next()?.parse().ok()).collect()
     }
     /// Every number that appears as a word in stderr.
     fn err_numbers(&self) -> Vec<i32> {

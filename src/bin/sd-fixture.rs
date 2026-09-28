@@ -133,6 +133,73 @@ fn record(path: &str, pid: i32) {
     }
 }
 
+/// Exec this fixture as `sigcount DIR/NAME` (with an empty environment when `bare`).
+unsafe fn sigcount_as(dir: &str, name: &str, bare: bool) -> ! {
+    let me = CString::new(std::env::current_exe().unwrap().as_os_str().as_encoded_bytes()).unwrap();
+    let args = [me.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{dir}/{name}")).unwrap()];
+    let argv = [args[0].as_ptr(), args[1].as_ptr(), args[2].as_ptr(), std::ptr::null()];
+    if bare {
+        let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+        libc::execve(me.as_ptr(), argv.as_ptr(), envp.as_ptr());
+    } else {
+        libc::execv(me.as_ptr(), argv.as_ptr());
+    }
+    libc::_exit(127)
+}
+
+/// Wait (at most 10 s) until DIR/NAME has a line.
+fn wait_record(dir: &str, name: &str) {
+    let p = format!("{dir}/{name}");
+    let mut n = 0;
+    while std::fs::read_to_string(&p).map_or(true, |t| t.is_empty()) && n < 1000 {
+        unsafe { libc::usleep(10_000) };
+        n += 1;
+    }
+}
+
+/// An orphan named NAME: fork C; C forks G (G: setsid first when `apart`, then `body`); C waits
+/// for G's record, then exits; this process reaps C.
+unsafe fn orphan(dir: &str, name: &str, apart: bool, body: impl FnOnce()) {
+    match libc::fork() {
+        0 => {
+            if libc::fork() == 0 {
+                if apart {
+                    libc::setsid();
+                }
+                body();
+                libc::_exit(127);
+            }
+            wait_record(dir, name);
+            libc::_exit(0);
+        }
+        c if c > 0 => {
+            libc::waitpid(c, std::ptr::null_mut(), 0);
+        }
+        _ => libc::_exit(1),
+    }
+}
+
+/// The `suspect-tree` mode's body (see its comment in `main`).
+unsafe fn suspect_tree(dir: &str, untagged: bool) -> ! {
+    orphan(dir, "early", false, || sigcount_as(dir, "early", false));
+    libc::usleep(30_000);
+    if libc::fork() == 0 {
+        libc::usleep(30_000);
+        orphan(dir, "g", false, || sigcount_as(dir, "g", untagged));
+        orphan(dir, "g2", true, || sigcount_as(dir, "g2", false));
+        #[cfg(target_os = "macos")]
+        orphan(dir, "g3", true, || disclaim_reexec_args(&["sigcount", &format!("{dir}/g3")]));
+        sigcount_as(dir, "t", false);
+    }
+    wait_record(dir, "t");
+    libc::usleep(30_000);
+    if libc::fork() == 0 {
+        sigcount_as(dir, "n", false);
+    }
+    wait_record(dir, "n");
+    sigcount_as(dir, "leader", false)
+}
+
 /// Send one registration record over a fresh connection to `path`; the outer's answer: `ack`,
 /// `refused` (closed without a byte), `none` (nothing in 2 s) or `err <why>`.
 fn reg_client(path: &std::path::Path, rec: &[u8], conn: &str) -> String {
@@ -792,6 +859,37 @@ fn main() {
             libc::execvp(ptrs[0], ptrs.as_ptr());
             libc::_exit(127);
         }
+    }
+    // P6 (suspects). `new-session PROG ARGS...`: setsid (a session and group the test made),
+    // then exec PROG ARGS.
+    if mode == "new-session" && a.len() >= 3 {
+        let prog: Vec<CString> = a[2..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+        let mut ptrs: Vec<*const libc::c_char> = prog.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        unsafe {
+            if libc::setsid() < 0 {
+                libc::_exit(4); // already a group leader: the cell would test another shape
+            }
+            libc::execvp(ptrs[0], ptrs.as_ptr());
+            libc::_exit(127);
+        }
+    }
+    // `suspect-tree DIR [untagged]` (run as a session leader, under `new-session`): every
+    // process is `sigcount DIR/<name>` (it records itself and counts its signals):
+    //   early  an orphan in this session, started before the target (its parent exited);
+    //   t      the target; it starts, 30 ms apart (so their start ticks differ on Linux):
+    //     g    an orphan that stays in this session (its parent exited) — without its tag with
+    //          `untagged`;
+    //     g2   an orphan in a session of its own (setsid);
+    //     g3   (macOS) as g2, but responsible for itself (the disclaim);
+    //   n      not an orphan: this leader's child, started after the target;
+    //   leader this process, at the end.
+    // Each orphan's parent waits until the orphan has recorded itself (after its exec), then
+    // exits: the orphan never execs after it is reparented (macOS `puniq` stays its parent's).
+    if mode == "suspect-tree" && (a.len() == 3 || a.len() == 4) {
+        let dir = a[2].clone();
+        let untagged = a.get(3).map(String::as_str) == Some("untagged");
+        unsafe { suspect_tree(&dir, untagged) };
     }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
     if mode == "after" && a.len() >= 4 {

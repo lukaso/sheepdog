@@ -52,6 +52,15 @@ pub const ADOPTS_ESCAPEES: bool = true;
 /// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
 /// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
 /// (`pbi_uid`): a setuid program the user runs is not the user's.
+/// When `pid` started, in seconds since the epoch (its start tick over the clock rate, plus the
+/// boot time).
+pub fn start_secs(pid: i32) -> Option<u64> {
+    let ticks = identity(pid)?;
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    let btime: u64 = std::fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok())?;
+    Some(btime + ticks / hz)
+}
+
 pub fn procs() -> Vec<crate::kill::Proc> {
     let mut v = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
@@ -60,8 +69,9 @@ pub fn procs() -> Vec<crate::kill::Proc> {
             let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
             let Some(rest) = s.rfind(')').and_then(|i| s.get(i + 2..)) else { continue };
             let f: Vec<&str> = rest.split_whitespace().collect();
-            // after "comm)": state (field 3), ppid (4), ..., start time (22)
+            // after "comm)": state (field 3), ppid (4), pgrp (5), session (6), ..., start time (22)
             let (Some(st), Some(ppid), Some(id)) = (f.first(), f.get(1).and_then(|x| x.parse().ok()), f.get(22 - 3).and_then(|x| x.parse().ok())) else { continue };
+            let (pgid, sid) = (f.get(2).and_then(|x| x.parse().ok()).unwrap_or(0), f.get(3).and_then(|x| x.parse().ok()).unwrap_or(0));
             if *st == "Z" {
                 continue;
             }
@@ -70,7 +80,7 @@ pub fn procs() -> Vec<crate::kill::Proc> {
                 .and_then(|t| t.lines().find_map(|l| l.strip_prefix("Uid:").and_then(|u| u.split_whitespace().nth(1)?.parse::<u32>().ok())));
             // a process that ended between the two reads, or whose pid was reused, is left out
             if let (Some(uid), true) = (uid, identity(pid) == Some(id)) {
-                v.push(crate::kill::Proc { pid, ppid, uid, id, puniq: None });
+                v.push(crate::kill::Proc { pid, ppid, uid, id, puniq: None, sid, pgid, resp: None });
             }
         }
     }

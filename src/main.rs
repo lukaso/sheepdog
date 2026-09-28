@@ -1452,6 +1452,9 @@ fn run(argv: Vec<OsString>) -> i32 {
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
         return kill::main(&argv[2..]);
     }
+    if argv.get(1).map(|a| a.as_bytes()) == Some(b"ps") {
+        return kill::ps(&argv[2..]);
+    }
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"sweep") {
         return sweep::main(&argv[2..]);
     }

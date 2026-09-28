@@ -92,7 +92,7 @@ pub fn check(members: &[(i32, u64)]) -> bool {
 
 /// A process's memory in bytes (0 when unreadable).
 #[cfg(target_os = "macos")]
-fn mem_of(pid: i32) -> u64 {
+pub(crate) fn mem_of(pid: i32) -> u64 {
     let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
     let r = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, &mut ri as *mut _ as *mut libc::rusage_info_t) };
     if r == 0 {
@@ -103,7 +103,7 @@ fn mem_of(pid: i32) -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn mem_of(pid: i32) -> u64 {
+pub(crate) fn mem_of(pid: i32) -> u64 {
     if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
         if let Some(kb) = s.lines().find(|l| l.starts_with("Pss:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()) {
             return kb * 1024;

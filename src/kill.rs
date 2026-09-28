@@ -9,6 +9,9 @@
 //! grace plus the kill deadline, so that its own kill reaches escapees that this kill cannot
 //! prove. A supervisor is recognised by its executable's file name, `sheepdog`.
 //!
+//! Suspects (PLAN.md §3.0, PHASE2.md D7) are listed with the proved set and killed only with
+//! `--include-suspects`. `sheepdog ps` lists the same rows and signals nothing (`kill --dry-run`).
+//!
 //! Exit codes: 0 every targeted process is gone (also: the target was already gone); 1 refused,
 //! nothing signalled; 2 usage error; 125 the kill deadline passed with members alive.
 
@@ -32,6 +35,10 @@ pub struct Proc {
     pub id: u64,
     /// macOS: the original parent's uniqueid; Linux: None (no such fact)
     pub puniq: Option<u64>,
+    pub sid: i32,
+    pub pgid: i32,
+    /// macOS: the responsible process's uniqueid; Linux: None
+    pub resp: Option<u64>,
 }
 
 enum Target {
@@ -46,10 +53,13 @@ struct Args {
     target: Target,
     dry_run: bool,
     grace: Duration,
+    include_suspects: bool,
+    json: bool,
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog kill [--dry-run] [--grace DURATION] PID | PID:ID | j-JOBID");
+    say!("usage: sheepdog kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID");
+    say!("       sheepdog ps [--json] PID | PID:ID | j-JOBID");
     2
 }
 
@@ -68,11 +78,15 @@ fn target(a: &[u8]) -> Option<Target> {
 fn parse(args: &[OsString]) -> Option<Args> {
     let mut tgt = None;
     let mut dry_run = false;
+    let mut include_suspects = false;
+    let mut json = false;
     let mut grace = Duration::from_secs(2);
     let mut i = 0;
     while i < args.len() {
         match args[i].as_bytes() {
             b"--dry-run" => dry_run = true,
+            b"--include-suspects" => include_suspects = true,
+            b"--json" => json = true,
             b"--grace" => {
                 i += 1;
                 grace = parse_duration(&args.get(i)?.to_string_lossy())?;
@@ -82,7 +96,7 @@ fn parse(args: &[OsString]) -> Option<Args> {
         }
         i += 1;
     }
-    Some(Args { target: tgt?, dry_run, grace })
+    Some(Args { target: tgt?, dry_run, grace, include_suspects, json })
 }
 
 /// Is `pid` a sheepdog (its executable's file name)?
@@ -201,6 +215,18 @@ fn grace_of(pid: i32) -> Duration {
     it.next().and_then(|g| parse_duration(g)).unwrap_or(Duration::from_secs(2))
 }
 
+/// `sheepdog ps ARGS`: the rows of `kill --dry-run` (it lists; it never signals).
+pub fn ps(args: &[OsString]) -> i32 {
+    let mut a: Vec<OsString> = vec!["--dry-run".into()];
+    for x in args {
+        if matches!(x.as_bytes(), b"--dry-run" | b"--include-suspects" | b"--grace") {
+            return usage();
+        }
+        a.push(x.clone());
+    }
+    main(&a)
+}
+
 pub fn main(args: &[OsString]) -> i32 {
     // signals that would end sheepdog at their default action and that it never uses: blocked
     // for the whole run (a closed stderr is EPIPE, never SIGPIPE; phase-1 review)
@@ -221,6 +247,7 @@ pub fn main(args: &[OsString]) -> i32 {
         return 1;
     }
     let by_job = matches!(a.target, Target::Job(_));
+    let mut job_path: Option<std::path::PathBuf> = None;
     // the identity the target must still have (PID:ID, or a job's supervisor from its journal):
     // checked again below, so a pid reused in between is refused
     let (t, expected) = match &a.target {
@@ -235,8 +262,12 @@ pub fn main(args: &[OsString]) -> i32 {
             (*p, Some(*id))
         }
         Target::Job(prefix) => match job_target(prefix, a.dry_run) {
-            Ok(JobTarget::Live(sup, id)) => (sup, Some(id)),
+            Ok(JobTarget::Live(sup, id, path)) => {
+                job_path = Some(path);
+                (sup, Some(id))
+            }
             Ok(JobTarget::Done(code)) => return code,
+            Ok(JobTarget::List(rows)) => return print_rows(&rows, a.json),
             Err(code) => return code,
         },
     };
@@ -293,18 +324,57 @@ pub fn main(args: &[OsString]) -> i32 {
             }
         }
     }
+    // the suspects (PHASE2.md D7): a phase-2 source, none under the phase-1 opt-out
+    let procs = os::procs();
+    let sus = if crate::seam_flag("SHEEPDOG_TEST_PHASE1") { Vec::new() } else { suspects((t, tid), &set, &procs, &proved.protected) };
     if a.dry_run {
-        let mut v = set.clone();
-        v.sort();
-        for (p, _) in v {
-            let name = os::exe_name(p).unwrap_or_else(|| "?".into());
-            let note = if sups.iter().any(|&(q, _)| q == p) { "\t(a sheepdog: ended first)" } else { "" };
-            // a reader that has gone gives EPIPE (SIGPIPE is blocked): stop quietly, never panic
-            if writeln!(std::io::stdout(), "{p}\t{name}{note}").is_err() {
-                break;
+        let ever: HashSet<u64> = set.iter().map(|&(_, id)| id).collect();
+        let mut rows: Vec<Row> = set
+            .iter()
+            .map(|&(p, id)| {
+                let mut ev = Vec::new();
+                if p == t {
+                    return Row { pid: p, id, class: "target", evidence: vec!["named".into()] };
+                }
+                if let Some(pr) = procs.iter().find(|x| x.pid == p && x.id == id) {
+                    if set.iter().any(|&(q, _)| q == pr.ppid) {
+                        ev.push("ppid".to_string());
+                    }
+                    if pr.puniq.is_some_and(|u| ever.contains(&u)) {
+                        ev.push("puniq".to_string());
+                    }
+                }
+                if ev.is_empty() {
+                    ev.push("journal".to_string());
+                }
+                if sups.iter().any(|&(q, _)| q == p) {
+                    ev.push("sheepdog: ended first".to_string());
+                }
+                Row { pid: p, id, class: "proved", evidence: ev }
+            })
+            .collect();
+        // a live job: also its journal's live members that `kill` cannot prove (on macOS an
+        // escapee is its job's member by responsibility only)
+        if let Some(path) = &job_path {
+            for (p, id) in crate::sweep::peek(path) {
+                if same(p, id) && !rows.iter().any(|r| r.pid == p && r.id == id) {
+                    rows.push(Row { pid: p, id, class: "proved", evidence: vec!["journal".into()] });
+                }
             }
         }
-        return 0;
+        rows.extend(sus.iter().map(|((p, id), ev)| Row { pid: *p, id: *id, class: "suspect", evidence: ev.clone() }));
+        return print_rows(&rows, a.json);
+    }
+    let mut left = sus.len();
+    if a.include_suspects && !sus.is_empty() {
+        // the first suspect enters the kill set only after the gate (PHASE2.md §0.1)
+        if crate::wall::gate().is_some() {
+            for ((p, id), _) in &sus {
+                proved.known.insert(*p, *id);
+                proved.ever.insert(*id);
+            }
+            left = 0;
+        }
     }
     let mut opts = KillOpts::from_env().with_grace(a.grace);
     let unended = if sups.is_empty() { Vec::new() } else { end_supervisors(&sups, opts.deadline, &mut proved) };
@@ -331,7 +401,112 @@ pub fn main(args: &[OsString]) -> i32 {
         Err(e) => kill_failed(e),
     };
     unsafe { libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) };
+    if left > 0 {
+        let pids: Vec<String> = sus.iter().filter(|((p, id), _)| same(*p, *id)).map(|((p, _), _)| p.to_string()).collect();
+        if !pids.is_empty() {
+            say!("sheepdog: {} suspect(s) left alive: pid {} (sheepdog ps {t} shows why; --include-suspects kills them too).", pids.len(), pids.join(", "));
+        }
+    }
     code
+}
+
+/// One row of `ps` / `kill --dry-run`.
+pub(crate) struct Row {
+    pid: i32,
+    id: u64,
+    class: &'static str,
+    evidence: Vec<String>,
+}
+
+/// Print the rows (pid order within each class: target, proved, suspect); exit code 0. Tab-
+/// separated: pid, program, class, evidence, age, memory, command; or one JSON object per line.
+fn print_rows(rows: &[Row], json: bool) -> i32 {
+    let rank = |c: &str| match c {
+        "target" => 0,
+        "proved" => 1,
+        _ => 2,
+    };
+    let mut v: Vec<&Row> = rows.iter().collect();
+    v.sort_by_key(|r| (rank(r.class), r.pid));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    for r in v {
+        if !same(r.pid, r.id) {
+            continue; // gone since the scan
+        }
+        let age = os::start_secs(r.pid).map(|s| now.saturating_sub(s));
+        let mem = crate::caps::mem_of(r.pid);
+        let cmd = crate::journal::text(os::cmdline(r.pid).join(" ").as_bytes());
+        let name = os::exe_name(r.pid).unwrap_or_else(|| "?".into());
+        let line = if json {
+            let ev: Vec<String> = r.evidence.iter().map(|e| crate::journal::json_str(e)).collect();
+            format!(
+                "{{\"pid\":{},\"id\":{},\"class\":\"{}\",\"evidence\":[{}],\"age_s\":{},\"mem\":{},\"cmd\":{}}}",
+                r.pid,
+                r.id,
+                r.class,
+                ev.join(","),
+                age.map_or("null".into(), |a| a.to_string()),
+                mem,
+                crate::journal::json_str(&cmd)
+            )
+        } else {
+            let age = age.map_or("?".into(), |a| format!("{a}s"));
+            format!("{}\t{name}\t{}\t{}\t{age}\t{}\t{cmd}", r.pid, r.class, r.evidence.join(","), human(mem))
+        };
+        // a reader that has gone gives EPIPE (SIGPIPE is blocked): stop quietly, never panic
+        if writeln!(std::io::stdout(), "{line}").is_err() {
+            break;
+        }
+    }
+    0
+}
+
+fn human(b: u64) -> String {
+    match b {
+        b if b >= 1 << 30 => format!("{:.1}G", b as f64 / (1u64 << 30) as f64),
+        b if b >= 1 << 20 => format!("{}M", b >> 20),
+        b => format!("{}K", b >> 10),
+    }
+}
+
+/// The suspects of target `t` (PLAN.md §3.0, PHASE2.md D7): live, same-uid processes that are
+/// not in `set` (proved), not `protected`, not PID 1 and no `sheepdog`, that are orphaned (their
+/// parent is PID 1 or a `sheepdog`), started after the target (a greater identity), and have a
+/// link: the session or group of the target or a proved member, or (macOS) a `puniq` that is no
+/// live process, greater than the target's uniqueid, with the target's responsible process.
+/// Each with the links that matched.
+fn suspects(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32, u64)]) -> Vec<((i32, u64), Vec<String>)> {
+    let uid = unsafe { libc::getuid() };
+    let Some(tp) = procs.iter().find(|p| p.pid == t.0 && p.id == t.1) else { return Vec::new() };
+    let in_set = |p: &Proc| set.iter().any(|&(q, id)| q == p.pid && id == p.id) || (p.pid == t.0 && p.id == t.1);
+    let known: Vec<&Proc> = procs.iter().filter(|p| in_set(p)).collect();
+    let sessions: HashSet<i32> = known.iter().map(|p| p.sid).filter(|&s| s > 0).collect();
+    let groups: HashSet<i32> = known.iter().map(|p| p.pgid).filter(|&g| g > 0).collect();
+    let live: HashSet<u64> = procs.iter().map(|p| p.id).collect();
+    let mut out = Vec::new();
+    for p in procs {
+        if p.uid != uid || p.pid <= 1 || in_set(p) || protected.iter().any(|&(q, id)| q == p.pid && id == p.id) {
+            continue;
+        }
+        let orphaned = p.ppid == 1 || is_sheepdog(p.ppid);
+        if !orphaned || p.id <= tp.id || is_sheepdog(p.pid) {
+            continue;
+        }
+        let mut ev = Vec::new();
+        if sessions.contains(&p.sid) {
+            ev.push("session".to_string());
+        }
+        if groups.contains(&p.pgid) {
+            ev.push("group".to_string());
+        }
+        if p.puniq.is_some_and(|u| u > tp.id && !live.contains(&u)) && p.resp.is_some() && p.resp == tp.resp {
+            ev.push("puniq".to_string());
+        }
+        if !ev.is_empty() {
+            out.push(((p.pid, p.id), ev));
+        }
+    }
+    out
 }
 
 /// The journals of this boot and pid namespace (none without a state).
@@ -359,8 +534,10 @@ fn live_job_of(sup: i32) -> Option<String> {
 }
 
 enum JobTarget {
+    /// `--dry-run` / `ps` of a dead job: its journal's closure, as rows
+    List(Vec<Row>),
     /// the job's supervisor lives (pid, identity): kill it (the normal path, with its checks)
-    Live(i32, u64),
+    Live(i32, u64, std::path::PathBuf),
     /// the job was handled here (a dead job swept): this exit code
     Done(i32),
 }
@@ -389,18 +566,23 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
         return Err(1);
     };
     if sup.0 > 1 && same(sup.0, sup.1) {
-        return Ok(JobTarget::Live(sup.0, sup.1));
+        return Ok(JobTarget::Live(sup.0, sup.1, path));
     }
     if dry_run {
-        // what a sweep of this dead job would start from: its journaled members still alive
+        // what a sweep of this dead job would reach: its journaled members still alive and
+        // their closure (the sweep's own scan)
+        let mut rows = Vec::new();
         if let Ok(j) = crate::sweep::open_fenced(&path) {
-            for m in j.members.iter().filter(|m| same(m.pid, m.id)) {
-                if writeln!(std::io::stdout(), "{}\t{}", m.pid, os::exe_name(m.pid).unwrap_or_else(|| "?".into())).is_err() {
-                    break;
-                }
+            let known: HashMap<i32, u64> = j.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
+            let ever: HashSet<u64> = j.members.iter().map(|m| m.id).collect();
+            let named: HashSet<(i32, u64)> = known.iter().map(|(&p, &id)| (p, id)).collect();
+            let mut proved = Proved { known, ever, protected: protected().unwrap_or_default() };
+            for (p, id) in proved.scan() {
+                let ev = if named.contains(&(p, id)) { "journal" } else { "closure" };
+                rows.push(Row { pid: p, id, class: "proved", evidence: vec![ev.to_string()] });
             }
         }
-        return Ok(JobTarget::Done(0));
+        return Ok(JobTarget::List(rows));
     }
     // a dead job: the sweep of this one journal
     let Ok(protected) = protected() else {
