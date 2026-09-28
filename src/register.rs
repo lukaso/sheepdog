@@ -18,7 +18,7 @@ use std::io::Write as _;
 pub const BUDGET: Duration = Duration::from_secs(2);
 /// A connection's deadline for its whole record.
 const READ_DEADLINE: Duration = Duration::from_millis(100);
-/// Pending connections at most; one more is accepted and closed at once.
+/// Pending connections at most; past it, new ones wait in the listen backlog (64).
 const MAX_PENDING: usize = 32;
 /// `sun_path` holds 104 bytes on macOS; a longer `$TMPDIR` path goes under /tmp.
 const PATH_MAX: usize = 100;
@@ -209,24 +209,44 @@ impl Listener {
         self.pending.iter().map(|c| c.deadline).min()
     }
 
-    /// Accept what is waiting, read what has come, answer every complete record and drop every
-    /// connection past its deadline. Never blocks. Returns the new fds to watch.
+    /// The listening socket's fd, for the wait loop's watch.
+    pub fn listen_fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// At the cap: the wait loop stops watching the listener until a connection is done.
+    pub fn full(&self) -> bool {
+        self.pending.len() >= MAX_PENDING
+    }
+
+    /// Accept what is waiting (up to the cap: the rest stays in the listen backlog), read what has
+    /// come, answer every complete record and drop every connection past its deadline; again while
+    /// that made room. Never blocks. Returns the new fds to watch: only connections still pending.
     pub fn service(&mut self, admit: &mut Admit) -> Vec<RawFd> {
         let mut new = Vec::new();
         loop {
-            let c = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-            if c < 0 {
-                break; // EAGAIN: nothing more waiting (any other error: try again next wake)
+            let mut accepted = false;
+            while self.pending.len() < MAX_PENDING {
+                let c = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+                if c < 0 {
+                    break; // EAGAIN: nothing more waiting (any other error: try again next wake)
+                }
+                set_flags(c);
+                self.pending.push(Conn { fd: c, buf: Vec::with_capacity(regwire::RECORD), deadline: Instant::now() + READ_DEADLINE });
+                new.push(c);
+                accepted = true;
             }
-            set_flags(c);
-            if self.pending.len() >= MAX_PENDING {
-                unsafe { libc::close(c) };
-                crate::note("registration refused: too many pending".into());
-                continue;
+            self.serve_pending(admit);
+            if !accepted || self.full() {
+                break;
             }
-            self.pending.push(Conn { fd: c, buf: Vec::with_capacity(regwire::RECORD), deadline: Instant::now() + READ_DEADLINE });
-            new.push(c);
         }
+        // an fd closed in this call (and perhaps reused since) is never handed back
+        new.retain(|fd| self.pending.iter().any(|c| c.fd == *fd));
+        new
+    }
+
+    fn serve_pending(&mut self, admit: &mut Admit) {
         let now = Instant::now();
         let mut keep = Vec::with_capacity(self.pending.len());
         for mut c in std::mem::take(&mut self.pending) {
@@ -251,7 +271,6 @@ impl Listener {
             }
         }
         self.pending = keep;
-        new
     }
 
     /// Check one complete record. The peer is the kernel's, taken now (after the record); the
@@ -303,6 +322,27 @@ impl Listener {
         }
         crate::note(format!("registration accepted: {pid}"));
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A record complete at its first read is answered and closed in the same call: `service`
+    /// never hands back an fd it has closed (the wait loop would watch whatever reuses it).
+    #[test]
+    fn service_returns_only_pending_connections() {
+        let mut l = Listener::open().expect("a listener");
+        let mut done = std::os::unix::net::UnixStream::connect(&l.path).unwrap();
+        done.write_all(&regwire::record(&[0; 16], 1)).unwrap(); // wrong nonce: answered at once
+        let _quiet = std::os::unix::net::UnixStream::connect(&l.path).unwrap(); // stays pending
+        let mut no = |_: u64, _: bool| false;
+        let back = l.service(&mut no);
+        let watched = l.fds();
+        assert_eq!(back.len(), 1, "{back:?}");
+        assert!(back.iter().all(|fd| watched.contains(fd)), "returned {back:?}, pending {watched:?}");
     }
 }
 

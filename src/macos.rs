@@ -669,6 +669,16 @@ fn wait(
                 }
             }
         }
+        // at the pending cap the listener is not watched (its backlog would wake the loop at once,
+        // every pass, until a connection is done); watched again once there is room
+        let mut listener_off = false;
+        let watch_listener = |fd: i32, on: bool| {
+            let mut ev: libc::kevent = zeroed();
+            ev.ident = fd as usize;
+            ev.filter = libc::EVFILT_READ;
+            ev.flags = libc::EV_ADD | if on { libc::EV_ENABLE } else { libc::EV_DISABLE };
+            libc::kevent(kq, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null());
+        };
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
         let mut exited: Option<i32> = None;
@@ -752,6 +762,10 @@ fn wait(
             if let Some((l, admit)) = reg.as_mut() {
                 for fd in l.service(&mut **admit) {
                     watch_fd(fd);
+                }
+                if l.full() != listener_off {
+                    listener_off = l.full();
+                    watch_listener(l.listen_fd(), !listener_off);
                 }
             }
             if r > 0 && ev.filter == libc::EVFILT_PROC && relay.is_some_and(|x| ev.ident == x as usize) {

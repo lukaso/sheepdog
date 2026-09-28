@@ -85,7 +85,7 @@ fn finished(c: &mut Child, secs: u64) -> Option<std::process::ExitStatus> {
 /// Kill every recorded process of these record files (and their `.g` / `.root` forms).
 fn cleanup(recs: &[&Path]) {
     for r in recs {
-        for suffix in ["", ".g", ".root"] {
+        for suffix in ["", ".g", ".root", ".kid", ".hold"] {
             for p in records(&PathBuf::from(format!("{}{suffix}", r.display()))) {
                 common::send(p.0, p.1, libc::SIGKILL);
             }
@@ -138,6 +138,24 @@ impl Drop for Outer {
             common::send_child(&mut self.0, libc::SIGKILL);
             let _ = self.0.wait();
         }
+    }
+}
+
+/// Record files whose processes are SIGKILLed (by identity) when the cell ends, a panic too.
+struct Recs(Vec<PathBuf>);
+impl Drop for Recs {
+    fn drop(&mut self) {
+        cleanup(&self.0.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+    }
+}
+
+/// A marker whose processes are SIGKILLed when the cell ends, a panic too.
+#[cfg(target_os = "macos")]
+struct Marked(String);
+#[cfg(target_os = "macos")]
+impl Drop for Marked {
+    fn drop(&mut self) {
+        common::kill_marked(&[&self.0]);
     }
 }
 
@@ -327,17 +345,16 @@ fn a_malformed_or_changed_registration_is_refused() {
 fn silent_clients_do_not_stall_the_timeout() {
     let d = scratch("silent");
     let ready = d.join("ready");
-    let m = marker();
+    let _g = Recs(vec![ready.clone()]);
     let t0 = Instant::now();
     let mut c = Command::new(sheepdog())
-        .args(["run", "--timeout", "1s", "--"])
-        .args([fixture(), "silent", "env", "20", &m, ready.to_str().unwrap()])
+        .args(["run", "--timeout", "1s", "--grace", "0", "--"])
+        .args([fixture(), "silent", "env", "20", ready.to_str().unwrap()])
         .stdin(Stdio::null())
         .spawn()
         .unwrap();
     let st = finished(&mut c, 30);
     let took = t0.elapsed();
-    common::kill_marked(&[&m]);
     assert_eq!(read(&ready), "20", "the clients did not all connect");
     assert_eq!(st.and_then(|s| s.code()), Some(124));
     assert!(took < Duration::from_millis(2500), "the timeout fired after {took:?}");
@@ -353,6 +370,7 @@ fn a_registration_for_another_process_is_refused() {
     let d = scratch("spoof");
     let dr = d.join("decoy");
     let head = format!("{}.head", dr.display());
+    let _g = Recs(vec![dr.clone(), PathBuf::from(&head)]);
     let mut decoy = Command::new(fixture()).args(["disclaim-exec", dr.to_str().unwrap(), fixture(), "sigcount", &head]).spawn().unwrap();
     let kidr = PathBuf::from(format!("{}.kid", dr.display()));
     assert!(wait_until(10, || !records(&dr).is_empty() && !records(&kidr).is_empty()), "the decoy did not start");
@@ -378,14 +396,19 @@ fn a_registration_for_another_process_is_refused() {
 fn a_non_member_with_the_nonce_is_refused() {
     let d = scratch("stolen");
     let chain = d.join("chain");
-    let mut o = Command::new(sheepdog())
-        .args(["run", "--", fixture(), "print-env", "SHEEPDOG_OUTER", chain.to_str().unwrap(), &marker()])
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
+    let m0 = marker();
+    let _m = Marked(m0.clone());
+    let mut o = Outer(
+        Command::new(sheepdog())
+            .args(["run", "--", fixture(), "print-env", "SHEEPDOG_OUTER", chain.to_str().unwrap(), &m0])
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
     assert!(wait_until(10, || !read(&chain).is_empty()), "the root did not write its chain");
     let out = d.join("out");
     let or = d.join("outsider");
+    let _g = Recs(vec![or.clone()]);
     let kidr = PathBuf::from(format!("{}.kid", or.display()));
     let mut outsider = Command::new(fixture())
         .args(["disclaim-exec", or.to_str().unwrap(), fixture(), "register", chain.to_str().unwrap(), "0", "self", "good", out.to_str().unwrap(), &marker()])
@@ -393,8 +416,8 @@ fn a_non_member_with_the_nonce_is_refused() {
         .unwrap();
     assert!(wait_until(10, || !read(&out).is_empty() && !records(&kidr).is_empty()), "the outsider did not answer");
     let kid = records(&kidr)[0];
-    common::send_child(&mut o, libc::SIGTERM);
-    let ended = finished(&mut o, 20).is_some();
+    common::send_child(&mut o.0, libc::SIGTERM);
+    let ended = finished(&mut o.0, 20).is_some();
     let (alive, sigs) = (common::alive(kid), read(&PathBuf::from(format!("{}.kid.sig", or.display()))).lines().count());
     common::send_child(&mut outsider, libc::SIGKILL);
     let _ = outsider.wait();
@@ -416,19 +439,20 @@ fn registration_turns_the_latch_on() {
     let d = scratch("latch");
     let (chain, out, sink) = (d.join("chain"), d.join("out"), d.join("sink"));
     let m = marker();
+    let _m = Marked(m.clone());
     let root = format!(r#""$FX" print-env SHEEPDOG_OUTER "{}"; exec /usr/bin/env -i "$FX" register "{}" 0 self good "{}" {m}"#, chain.display(), chain.display(), out.display());
     let mut c = Command::new(sheepdog());
     c.args(["run", "--", "/bin/sh", "-c", &root]).env("FX", fixture()).env("SHEEPDOG_TEST_DEADLINE_MS", "500").env_remove("SHEEPDOG_TEST_STATE").stdin(Stdio::null());
     common::cell_sink(&mut c, &sink);
-    let mut o = c.spawn().unwrap();
+    let mut o = Outer(c.spawn().unwrap());
     assert!(wait_until(10, || !read(&out).is_empty()), "the registrant did not answer");
     // the registrant is the root; after its answer it runs `/bin/sleep <marker>` (the same pid)
     // (the marker is also in O's and the shell's argv: only the sleep itself counts)
     let sleeping = |w: &[&str]| w.get(1) == Some(&"/bin/sleep");
     assert!(wait_until(10, || common::scan(&m, sleeping).is_ok_and(|v| v.len() == 1)), "the registrant is not sleeping");
     let reg = common::scan(&m, sleeping).unwrap_or_default();
-    common::send_child(&mut o, libc::SIGTERM);
-    let _ = finished(&mut o, 20);
+    common::send_child(&mut o.0, libc::SIGTERM);
+    let _ = finished(&mut o.0, 20);
     let lines = read(&sink);
     let alive: Vec<(i32, u64)> = reg.iter().copied().filter(|&p| common::alive(p)).collect();
     for p in &reg {
@@ -448,6 +472,7 @@ fn registration_turns_the_latch_on() {
 fn an_inner_run_whose_responsible_process_died_still_disclaims() {
     let d = scratch("orphaned");
     let (go, rec, itrace) = (d.join("go"), d.join("esc"), d.join("itrace"));
+    let _g = Recs(vec![rec.clone()]);
     let mut o = Outer(
         Command::new(sheepdog())
             .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepdog(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
@@ -476,3 +501,87 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+
+/// A burst: 40 members register with one outer at once (the outer is stopped while they
+/// connect, so all 40 wait in its listen backlog); every one gets its ack: the outer takes at most
+/// 32 pending connections and leaves the rest in the backlog, never refusing a member for that.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_burst_of_registrations_is_served() {
+    let d = scratch("burst");
+    let (go, trace) = (d.join("go"), d.join("trace"));
+    let root = format!(r#"until [ -e "{}" ]; do sleep 0.02; done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#, go.display(), d.display());
+    let mut o = Outer(
+        Command::new(sheepdog())
+            .args(["run", "--", "/bin/sh", "-c", &root])
+            .env("FX", fixture())
+            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_until(10, || read(&trace).lines().any(|l| l.starts_with("listening "))));
+    let sup = (o.0.id() as i32, sheepdog::ident::identity(o.0.id() as i32).unwrap_or(0));
+    common::send(sup.0, sup.1, libc::SIGSTOP);
+    std::fs::write(&go, b"").unwrap();
+    std::thread::sleep(Duration::from_millis(700)); // the 40 connect and wait (their budget is 2 s)
+    common::send(sup.0, sup.1, libc::SIGCONT);
+    let code = finished(&mut o.0, 30).and_then(|s| s.code());
+    let trace = read(&trace);
+    let answers: Vec<String> = (1..=40).map(|i| read(&d.join(format!("out{i}")))).collect();
+    let acked = answers.iter().filter(|a| a.as_str() == "ack").count();
+    assert_eq!(code, Some(0));
+    assert_eq!(acked, 40, "answers {answers:?}; trace:\n{trace}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Silent clients past the cap do not lock registration out: 40 connect and send nothing (32 are
+/// taken, each dropped after its 100 ms deadline); a member that registers 0.5 s later gets its
+/// ack.
+#[cfg(target_os = "macos")]
+#[test]
+fn silent_clients_past_the_cap_do_not_lock_registration_out() {
+    let d = scratch("capdeadline");
+    let (ready, out) = (d.join("ready"), d.join("out"));
+    let _g = Recs(vec![ready.clone()]);
+    let root = format!(
+        r#""$FX" silent env 40 "{r}" & until [ -s "{r}" ]; do sleep 0.05; done; sleep 0.5; "$FX" register env 0 self good "{o}"; true"#,
+        r = ready.display(),
+        o = out.display()
+    );
+    let (code, trace, _) = outer(&d, &root, &[("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
+    assert_eq!(read(&ready), "40", "the silent clients did not all connect");
+    assert_eq!(read(&out), "ack", "trace:\n{trace}");
+    assert_eq!(code, Some(0));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Each supervisor of the chain holds the jobs nested in it, not only the outermost: O -> A -> B
+/// (fast double forks); B's supervisor is SIGKILLed, then A ends while O still runs: B's escapee
+/// is gone at A's end.
+#[test]
+fn a_middle_run_holds_the_jobs_nested_in_it() {
+    let d = scratch("holds");
+    let (esc, a, b) = (d.join("esc"), d.join("a"), d.join("b"));
+    let _g = Recs(vec![esc.clone(), a.clone(), b.clone()]);
+    let launch = [
+        fx(), "dfork-exec".into(), a.display().to_string(), sd(), "run".into(), "--".into(),
+        fx(), "dfork-exec".into(), b.display().to_string(), sd(), "run".into(), "--".into(),
+        fx(), "escapee-and-wait".into(), esc.display().to_string(),
+    ];
+    let mut o = Outer(Command::new(sheepdog()).args(["run", "--"]).args(&launch).stdin(Stdio::null()).spawn().unwrap());
+    assert!(wait_until(20, || !records(&esc).is_empty() && !records(&a).is_empty() && !records(&b).is_empty()), "the job did not start");
+    let (g, pa, pb) = (records(&esc)[0], records(&a)[0], records(&b)[0]);
+    std::thread::sleep(Duration::from_millis(800)); // past the loss window (see `trial`)
+    common::send(pb.0, pb.1, libc::SIGKILL);
+    assert!(wait_until(5, || !common::alive(pb)));
+    common::send(pa.0, pa.1, libc::SIGTERM);
+    let a_ended = wait_until(20, || !common::alive(pa));
+    let gone = wait_until(5, || !common::alive(g));
+    let o_running = o.0.try_wait().ok().flatten().is_none();
+    common::send_child(&mut o.0, libc::SIGTERM);
+    let _ = finished(&mut o.0, 20);
+    assert!(a_ended && o_running, "A ended {a_ended}, O still running {o_running}");
+    assert!(gone, "B's escapee survived A's end");
+    let _ = std::fs::remove_dir_all(&d);
+}

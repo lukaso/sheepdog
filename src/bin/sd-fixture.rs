@@ -842,9 +842,9 @@ fn main() {
         }
         std::process::exit(if res == "ack" { 0 } else { 1 });
     }
-    // `silent SRC N M READY`: open N connections to entry 0 of the chain and send nothing; write
-    // READY; then run `/bin/sleep M`, which keeps them open.
-    if mode == "silent" && a.len() == 6 {
+    // `silent SRC N READY`: open N connections to entry 0 of the chain and send nothing; write
+    // the count to READY; then become `sigcount READY.hold`, which keeps them open.
+    if mode == "silent" && a.len() == 5 {
         let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
         let (chain, _) = sheepdog::regwire::parse(&text);
         let n: usize = a[3].parse().unwrap_or(0);
@@ -856,14 +856,20 @@ fn main() {
                 }
             }
         }
-        let _ = std::fs::write(&a[5], format!("{}", held.len()));
+        let _ = std::fs::write(&a[4], format!("{}", held.len()));
         // the connections survive the exec (UnixStream is CLOEXEC: clear it)
         for s in &held {
             use std::os::fd::AsRawFd;
             unsafe { libc::fcntl(s.as_raw_fd(), libc::F_SETFD, 0) };
         }
         std::mem::forget(held);
-        unsafe { exec_sleep(&CString::new(a[4].as_str()).unwrap()) };
+        let me = CString::new(std::env::current_exe().unwrap().as_os_str().as_encoded_bytes()).unwrap();
+        let args = [me.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{}.hold", a[4])).unwrap()];
+        let argv = [args[0].as_ptr(), args[1].as_ptr(), args[2].as_ptr(), std::ptr::null()];
+        unsafe {
+            libc::execv(me.as_ptr(), argv.as_ptr());
+            libc::_exit(127);
+        }
     }
     #[cfg(target_os = "macos")]
     if mode == "redisclaim-c" && a.len() == 4 {
