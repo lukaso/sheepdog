@@ -147,6 +147,7 @@ pub fn members(t: &mut crate::Tracker) -> Vec<(pid_t, u64)> {
             let (u, pu) = uniq(p)?;
             Some(Info { pid: p, uniq: u, puniq: pu, resp: resp_uniq(p) })
         })
+        .filter(|i| !t.never.contains(&i.uniq))
         .collect();
     loop {
         let mut changed = false;
@@ -977,6 +978,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             crate::status::cloexec(); // after the SETEXEC, which the fd had to survive
             crate::status::set_tracking(if ok { "responsibility" } else { "puniq" });
             if a.inherit {
+                // a phase-2 source (PHASE2.md D1): the job is tracked by `puniq` and ever-seen
+                // facts only, so the test wall's latch comes on (a no-op in a release build)
+                let _ = crate::wall::gate();
                 if !a.quiet {
                     say!("sheepdog: --inherit-terminal-permissions: this job keeps your terminal's privacy permissions, so tracking falls back to parent ids (fast-escaping processes can be missed).");
                 }
@@ -1021,6 +1025,23 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             };
             let tracker = std::cell::RefCell::new(crate::Tracker::default());
             tracker.borrow_mut().r.insert(me);
+            // the supervisor's ancestors are never members (their uniqueids; an unreadable chain
+            // leaves the set short, never wider)
+            let mut p = unsafe { libc::getppid() };
+            let mut n = 0;
+            while p > 1 && n < 4096 {
+                match uniq(p) {
+                    Some((u, _)) => {
+                        tracker.borrow_mut().never.insert(u);
+                    }
+                    None => break,
+                }
+                p = match crate::kill::parent(p) {
+                    Some(q) => q,
+                    None => break,
+                };
+                n += 1;
+            }
             tracker.borrow_mut().ever.insert(me);
             // the root's identity is known from its birth: a child it starts with the disclaim
             // has only `puniq` = the root as its fact, even if the root exits before any scan

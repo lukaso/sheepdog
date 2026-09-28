@@ -1028,6 +1028,33 @@ fn main() {
         let code = std::process::Command::new(&a[3]).args(&a[4..]).status().ok().and_then(|s| s.code()).unwrap_or(1);
         std::process::exit(code);
     }
+    // `setsid-kid-fx R`: cell 2 with fixture processes only (an inherit-mode cell latches the
+    // wall, and a platform binary's environment cannot be read): the root forks C (recorded in
+    // R); C starts a new session, forks G (`sigcount R.g`) and waits; the root waits.
+    if mode == "setsid-kid-fx" && a.len() == 3 {
+        let r = a[2].clone();
+        let (dir, name) = r.rsplit_once('/').map_or((".".to_string(), r.clone()), |(d, n)| (d.to_string(), n.to_string()));
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    libc::setsid();
+                    if libc::fork() == 0 {
+                        sigcount_as(&dir, &format!("{name}.g"), false);
+                    }
+                    loop {
+                        libc::pause();
+                    }
+                }
+                c if c > 0 => {
+                    record(&r, c);
+                    loop {
+                        libc::pause();
+                    }
+                }
+                _ => std::process::exit(1),
+            }
+        }
+    }
     // `escape-after R GO`: the root forks C (recorded in R); C waits for the file GO (bounded,
     // 20 s: the cell writes it after the supervisor's first scans saw C), then starts a new
     // session, forks G (`sigcount R.g`, which records itself after its exec) and exits only once

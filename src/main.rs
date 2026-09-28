@@ -604,6 +604,9 @@ pub struct Tracker {
     pub known: HashMap<i32, u64>,
     pub ever: std::collections::HashSet<u64>,
     pub r: std::collections::HashSet<u64>,
+    /// macOS: the supervisor's ancestors (their uniqueids): never members, whatever a fact says
+    /// (PLAN §3.2; they can share the supervisor's responsible process in inherit mode)
+    pub never: std::collections::HashSet<u64>,
 }
 
 impl Tracker {

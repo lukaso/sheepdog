@@ -33,6 +33,7 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
+#[cfg(target_os = "linux")]
 fn marker() -> String {
     format!("27.{:04}{:03}", std::process::id() % 10_000, SEQ.fetch_add(1, Ordering::SeqCst) % 1000)
 }
@@ -130,14 +131,16 @@ fn supervisor_under_t(t: (i32, u64), first: (i32, u64)) -> (i32, u64) {
 #[test]
 fn cell2_inherit_a_setsid_grandchild_leaves_no_survivor() {
     let d = scratch("c2");
-    let (m, r) = (marker(), d.join("r"));
-    let mut g = Guard { recs: vec![r.clone()], markers: vec![m.clone()], children: vec![] };
-    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "setsid-kid", &m, r.to_str().unwrap()]);
-    assert!(wait_until(15, || records(&r).len() >= 2), "the tree did not start");
+    let r = d.join("r");
+    let rg = PathBuf::from(format!("{}.g", r.display()));
+    let mut g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
+    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "setsid-kid-fx", r.to_str().unwrap()]);
+    assert!(wait_until(15, || !records(&r).is_empty() && !records(&rg).is_empty()), "the tree did not start");
     let sup = supervisor_under_t(t, records(&r)[0]);
+    let all: Vec<(i32, u64)> = records(&r).into_iter().chain(records(&rg)).collect();
     common::send(sup.0, sup.1, libc::SIGTERM);
-    let left = wait_until(20, || records(&r).iter().all(|&p| !common::alive(p)) && common::scan(&m, |_| true).is_ok_and(|v| v.is_empty()));
-    assert!(left, "survivors: {:?}", records(&r).iter().filter(|&&p| common::alive(p)).collect::<Vec<_>>());
+    let left = wait_until(20, || all.iter().all(|&p| !common::alive(p)));
+    assert!(left, "survivors: {:?}", all.iter().filter(|&&p| common::alive(p)).collect::<Vec<_>>());
     drop(g);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -168,9 +171,9 @@ fn cell3_inherit_an_escapee_seen_by_a_scan_leaves_no_survivor() {
 #[test]
 fn cell12_inherit_a_clean_exit_with_a_stray_leaves_no_survivor() {
     let d = scratch("c12");
-    let m = marker();
-    let mut g = Guard { recs: vec![], markers: vec![m.clone()], children: vec![] };
-    let script = format!("/bin/sleep {m} & exit 0");
+    let s = d.join("s");
+    let mut g = Guard { recs: vec![s.clone()], markers: vec![], children: vec![] };
+    let script = format!(r#""{}" sigcount "{}" & exit 0"#, fixture(), s.display());
     let c = Command::new(fixture()).arg("t").arg(d.join("T")).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).stdin(Stdio::null()).spawn().unwrap();
     g.children.push(c);
     let code = {
@@ -184,8 +187,9 @@ fn cell12_inherit_a_clean_exit_with_a_stray_leaves_no_survivor() {
         }
     };
     // (T exits 4 when its disclaim did not take effect: the exit code is the precondition here)
-    let survivors = common::scan(&m, |w| w.get(1) == Some(&"/bin/sleep")).unwrap_or_default();
+    let survivors: Vec<(i32, u64)> = records(&s).into_iter().filter(|&p| common::alive(p)).collect();
     assert_eq!(code, Some(0));
+    assert!(!records(&s).is_empty(), "the stray did not start");
     assert!(survivors.is_empty(), "survivors: {survivors:?}");
     drop(g);
     let _ = std::fs::remove_dir_all(&d);
@@ -210,6 +214,7 @@ fn another_tabs_process_survives_an_inherit_mode_job() {
     let job_gone = wait_until(20, || !common::alive(ap) && !common::alive(sup));
     let sigs = std::fs::read_to_string(format!("{}.sig", decoy.display())).unwrap_or_default().lines().count();
     assert!(job_gone, "the job did not end");
+    assert!(common::alive(t), "T, an ancestor of the supervisor, was killed");
     assert!(common::alive(dp) && sigs == 0, "the other tab's decoy got {sigs} signal(s), alive {}", common::alive(dp));
     drop(g);
     let _ = std::fs::remove_dir_all(&d);
@@ -289,7 +294,16 @@ fn the_privacy_warning_fires_only_for_a_refused_protected_folder() {
     std::fs::create_dir_all(&plain).unwrap();
     let warned = |cwd: &Path, flags: &[&str]| -> bool {
         let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
-        let st = Command::new(sheepdog())
+        // an inherit-mode sheepdog runs only under T (its responsible process is T, never the
+        // operator's terminal)
+        let mut c = if flags.contains(&"--inherit-terminal-permissions") {
+            let mut c = Command::new(fixture());
+            c.arg("t").arg(d.join(format!("T-{}", SEQ.fetch_add(1, Ordering::SeqCst)))).arg(sheepdog());
+            c
+        } else {
+            Command::new(sheepdog())
+        };
+        let st = c
             .arg("run")
             .args(flags)
             .args(["--", "/usr/bin/true"])
@@ -419,6 +433,34 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     assert!(ran.exists(), "the new command ran");
     assert!(kept, "the auto-sweep reached the live inner job's escapee: {sigs} signal(s), alive {}", common::alive(esc));
     assert!(gone, "control: the explicit sweep ended the inner job");
+    drop(g);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The wall control for inherit mode (PHASE2.md §0.1, D1): an inherit-mode run is a phase-2
+/// source (it tracks by `puniq` and ever-seen facts only), so it turns the latch on; under T, an
+/// untagged stray of the job gets `withheld` (its counter stays 0, one `withheld` line names it).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_inherit_mode_run_turns_the_latch_on() {
+    let d = scratch("latch");
+    let (u, sink) = (d.join("u"), d.join("sink"));
+    let mut g = Guard { recs: vec![u.clone()], markers: vec![], children: vec![] };
+    let script = format!(r#"/usr/bin/env -i "{}" sigcount "{}" & exit 0"#, fixture(), u.display());
+    let tr = d.join("T");
+    let mut c = Command::new(fixture());
+    c.arg("t").arg(&tr).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null());
+    common::cell_sink(&mut c, &sink);
+    g.children.push(c.spawn().unwrap());
+    assert!(wait_until(15, || !records(&u).is_empty()), "the stray did not start");
+    let up = records(&u)[0];
+    let ended = wait_until(30, || g.children[0].try_wait().ok().flatten().is_some());
+    let sigs = std::fs::read_to_string(format!("{}.sig", u.display())).unwrap_or_default().lines().count();
+    let lines = std::fs::read_to_string(&sink).unwrap_or_default();
+    assert!(ended, "the job did not end");
+    assert!(common::alive(up) && sigs == 0, "the untagged stray got {sigs} signal(s)");
+    let mine: Vec<&str> = lines.lines().filter(|l| l.starts_with("withheld ")).collect();
+    assert!(!mine.is_empty() && mine.iter().all(|l| l.split_whitespace().nth(1) == Some(&up.0.to_string())), "{lines:?}");
     drop(g);
     let _ = std::fs::remove_dir_all(&d);
 }
