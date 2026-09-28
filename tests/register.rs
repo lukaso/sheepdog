@@ -359,9 +359,10 @@ fn a_registration_for_another_process_is_refused() {
     let (alive, sigs) = (common::alive(dp), read(&PathBuf::from(format!("{}.sig", dr.display()))).lines().count());
     common::send_child(&mut decoy, libc::SIGKILL);
     let _ = decoy.wait();
-    assert_eq!(code, Some(0));
-    assert_eq!(read(&out), "refused");
+    // the harm first: the decoy got no signal (then the answer, then the run)
     assert!(alive && sigs == 0, "the decoy got {sigs} signal(s), alive {alive}");
+    assert_eq!(read(&out), "refused");
+    assert_eq!(code, Some(0));
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -387,9 +388,10 @@ fn a_non_member_with_the_nonce_is_refused() {
     let alive = common::alive(op);
     common::send_child(&mut outsider, libc::SIGKILL);
     let _ = outsider.wait();
-    assert!(ended);
-    assert_eq!(read(&out), "refused");
+    // the harm first: the outsider survived (then the answer, then the run)
     assert!(alive, "the outsider was killed with the job");
+    assert_eq!(read(&out), "refused");
+    assert!(ended);
     let _ = std::fs::remove_dir_all(&d);
 }
 
