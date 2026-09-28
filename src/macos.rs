@@ -927,17 +927,18 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             };
             // a registration: the peer joins R only if it is a member now, by the scan's own
             // function (PLAN.md §3.2 step 3)
-            let mut admit = |_pid: i32, u: u64| -> bool {
+            let mut admit = |u: u64, commit: bool| -> bool {
                 let mut t = tracker.borrow_mut();
-                let found = members(&mut t);
-                if !t.ever.contains(&u) {
-                    return false;
+                if !commit {
+                    let found = members(&mut t);
+                    journal.borrow_mut().record(&found);
+                    return t.ever.contains(&u);
                 }
+                // the first fact of this source enters R only after the gate (PHASE2.md §0.1)
                 if crate::wall::gate().is_none() {
                     return false;
                 }
                 t.r.insert(u);
-                journal.borrow_mut().record(&found);
                 true
             };
             let mut ints = crate::Interrupts::new(a, relay);

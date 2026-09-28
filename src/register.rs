@@ -140,8 +140,9 @@ pub struct Listener {
     pending: Vec<Conn>,
 }
 
-/// What the wait loop's admit function is asked: may this peer (pid, uniqueid) join R?
-pub type Admit<'a> = dyn FnMut(i32, u64) -> bool + 'a;
+/// The wait loop's admit function, called twice for a peer's uniqueid: with `false` it only
+/// answers "is it a member now?"; with `true` (after every other check passed) it adds it to R.
+pub type Admit<'a> = dyn FnMut(u64, bool) -> bool + 'a;
 
 impl Listener {
     /// A listener in a `mkdtemp` directory under `$TMPDIR`, or under /tmp when the socket path
@@ -286,7 +287,7 @@ impl Listener {
             crate::note(format!("registration refused: {pid} changed before the check"));
             return false;
         }
-        let member = admit(pid, uniq);
+        let member = admit(uniq, false);
         let v2 = if crate::seam_flag("SHEEPDOG_TEST_REG_PIDVERSION_CHANGE") { versioned(pid).map(|v| v.1 + 1) } else { versioned(pid).map(|v| v.1) };
         if v2 != Some(pidversion) {
             crate::note(format!("registration refused: {pid} changed during the check"));
@@ -294,6 +295,10 @@ impl Listener {
         }
         if !member {
             crate::note(format!("registration refused: {pid} is not a member"));
+            return false;
+        }
+        if !admit(uniq, true) {
+            crate::note(format!("registration refused: {pid} could not be added"));
             return false;
         }
         crate::note(format!("registration accepted: {pid}"));
