@@ -41,7 +41,8 @@ fn main() {
             // a packed branch has no loose file until its next commit writes one: watch the
             // directory that file will appear in (a missing watched file rebuilds every time)
             let f = cd.join(r);
-            let w = if f.exists() { f.clone() } else { f.parent().map_or(f.clone(), Path::to_path_buf) };
+            // (a branch named a/b loses its empty directory too: the nearest one that exists)
+            let w = f.ancestors().find(|p| p.exists()).map_or(f.clone(), Path::to_path_buf);
             println!("cargo:rerun-if-changed={}", w.display());
         }
         // packed refs, and the reftable backend (its refs are all under reftable/)
