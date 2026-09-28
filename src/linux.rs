@@ -875,11 +875,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let tick = crate::tick_ms() as i32;
     let status = loop {
         tracker.refresh(scan());
-        // the caps, on every tick (a cap that fires ends the job as a TERM would, exit 124)
         let live: Vec<(i32, u64)> = tracker.known.iter().map(|(&p, &id)| (p, id)).collect();
-        if crate::caps::check(&live) {
-            break None;
-        }
         let got: Vec<i32> = if fd >= 0 {
             drain(fd)
         } else {
@@ -920,6 +916,11 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 }
             }
             break Some(st);
+        }
+        // the caps, on every tick, after TERM and the root's exit (a cap that fires ends the job
+        // as a TERM would, exit 124)
+        if crate::caps::check(&live) {
+            break None;
         }
         for s in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
             if got.contains(&s) {

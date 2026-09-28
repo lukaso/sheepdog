@@ -191,6 +191,54 @@ fn a_cap_after_the_root_ended_by_itself_is_only_a_note() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// One order when events meet in one wake, on both OSes: TERM, then the root's exit, then the
+/// caps. A root that exits while the job is past `--max-procs 1` in the same wake (a seam holds
+/// the supervisor before its wait while both happen) ends with its own code (7), the cap a
+/// note; the control, the same job whose root keeps running, is ended by the cap (124).
+#[test]
+fn the_roots_exit_comes_before_a_cap_in_one_wake() {
+    let d = scratch("exitcap");
+    let (r1, r2) = (d.join("rec"), d.join("ctl"));
+    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500")];
+    // two members that outlive the root: the job stays past the cap after the root exits
+    let body = |r: &Path, end: &str| format!(r#"--max-procs 1 -- /bin/sh -c ': > "{0}"; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 2 ]; do sleep 0.01; done; {end}'"#, r.display());
+    let ended = run(&d, "exit", &body(&r1, "exit 7"), &hold, Duration::from_secs(30), || false);
+    let control = run(&d, "ctl", &body(&r2, "while :; do sleep 0.05; done"), &hold, Duration::from_secs(30), || false);
+    for p in records(&r1).into_iter().chain(records(&r2)) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert_eq!(ended.code, Some(7), "the command's own code: {:?} {}", ended.status, ended.err);
+    assert_eq!(field(&ended, "trigger"), Some(&Json::Null));
+    assert_eq!(control.code, Some(124), "control: the cap ends a job whose root runs");
+    assert_eq!(field(&control, "trigger").and_then(Json::str), Some("cap"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A TERM and a cap in one wake: the TERM is the trigger and sheepdog dies of TERM, on both
+/// OSes (the TERM arrives while a seam holds the supervisor and the job is past the cap).
+#[test]
+fn a_term_comes_before_a_cap_in_one_wake() {
+    let d = scratch("termcap");
+    let r1 = d.join("rec");
+    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500")];
+    let t0 = Instant::now();
+    let r = run(
+        &d,
+        "t",
+        &format!(r#"--max-procs 1 -- /bin/sh -c '"$FX" sigcount "{}" & while :; do sleep 0.05; done'"#, r1.display()),
+        &hold,
+        Duration::from_secs(30),
+        || !records(&r1).is_empty() && t0.elapsed() > Duration::from_millis(300),
+    );
+    for p in records(&r1) {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert_eq!(field(&r, "trigger").and_then(Json::str), Some("term"), "{:?} {}", r.status, r.err);
+    assert_eq!(r.code, None, "death by TERM");
+    assert!(r.took < Duration::from_secs(20), "the test's limit ended it ({:?})", r.took);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// `--kill-deadline` shortens the kill deadline: a member that cannot be killed (seam) makes
 /// sheepdog give up after about 0.5 s, not the default 10 s (exit 125, deadline_missed).
 #[test]

@@ -840,6 +840,8 @@ fn wait(
         crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
         let mut st = 0;
         let mut exited: Option<i32> = None;
+        // the members of the last scan, for the caps
+        let mut live: Vec<(pid_t, u64)> = Vec::new();
         let result = loop {
             // polling never reads kqueue events, so it checks the parent pid instead
             if (relay_by_ppid || polling) && relay.is_some_and(|r| libc::getppid() != r) {
@@ -863,13 +865,10 @@ fn wait(
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(st);
             }
-            // the fixed order: TERM (or a cap that fired on the last scan), then the root's exit,
-            // then INT/HUP
+            // the fixed order: TERM, then the root's exit, then the caps (on the last scan's
+            // members; a cap that fires ends the job as a TERM would, exit 124), then INT/HUP
             if term {
                 crate::status::set_trigger("term"); // the trigger from the moment it is taken
-                break None;
-            }
-            if crate::caps::triggered() {
                 break None;
             }
             if let Some(status) = exited {
@@ -880,6 +879,9 @@ fn wait(
                     }
                 }
                 break Some(status);
+            }
+            if crate::caps::check(&live) {
+                break None;
             }
             for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP), (quit, libc::SIGQUIT)] {
                 if got {
@@ -900,7 +902,7 @@ fn wait(
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
             if polling {
                 std::thread::sleep(std::time::Duration::from_millis(50));
-                let _ = members();
+                live = members();
                 if let Some((l, admit)) = reg.as_mut() {
                     l.service(&mut **admit);
                 }
@@ -916,7 +918,7 @@ fn wait(
             // the error now: the membership scan below makes calls of its own that replace errno
             // (an EINTR from a STOP and CONT was then read as a failure; phase-1 review)
             let err = std::io::Error::last_os_error();
-            let _ = members(); // membership while running (a tick or an event)
+            live = members(); // membership while running (a tick or an event)
             if let Some((l, admit)) = reg.as_mut() {
                 for fd in l.service(&mut **admit) {
                     watch_fd(fd);
@@ -1124,9 +1126,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 let found = members(&mut t);
                 journal.borrow_mut().record(&found);
                 t.refresh(found);
-                let live: Vec<(pid_t, u64)> = t.known.iter().map(|(&p, &id)| (p, id)).collect();
-                let _ = crate::caps::check(&live); // wait() ends the job when a cap fired
-                live
+                t.known.iter().map(|(&p, &id)| (p, id)).collect()
             };
             // a registration: the peer joins R only if it is a member now, by the scan's own
             // function (PLAN.md §3.2 step 3)
