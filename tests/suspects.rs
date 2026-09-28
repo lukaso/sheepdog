@@ -2,12 +2,9 @@
 //!
 //! Every tree is built by the fixture in a session and group the test made (`new-session`), so a
 //! suspect rule that widens reaches only this cell's processes, never the test runner's session.
-//! The macOS `puniq` link is not bound to a session: any orphan whose parent is dead, started
-//! after the target, with the same responsible process (every process under one terminal app)
-//! matches it. So the cells run one at a time (their trees would be each other's suspects), a
-//! cell that includes suspects has a sink of its own (a foreign process that matches is
-//! withheld by the wall, which is right, and must not fail the run), and assertions look only at
-//! the cell's own processes.
+//! The cells run one at a time (each builds a tree in a session of its own). A kill with the
+//! suspects uses the run's own sink: a withheld line there (a suspect outside this cell's tree)
+//! fails the run, so a rule that widens past the tree cannot pass unseen.
 //! The tree (`suspect-tree`): an orphan started before the target (`early`), the target (`t`), an
 //! orphan of the target that stays in its session (`g`, a suspect) with a child (`gc`, under a
 //! suspect: listed and killed with it), one in a session of its own (`g2`: no suspect; on macOS
@@ -213,9 +210,8 @@ fn include_suspects_kills_them_and_nothing_else() {
     let _serial = serial();
     let d = scratch("include");
     let t = Tree::build(&d, false);
-    let sink = d.join("sink");
     let listed = rows(&sd(&d, &["ps", "--json", &t.p("t").0.to_string()], &[]).out);
-    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_SINK", sink.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
+    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
     let gone = vec!["t", "g", "gc"];
     // what the kill signalled (of this tree) is what `ps` listed before it
     let signalled: Vec<i32> = o.log.lines().filter_map(|l| {
@@ -226,10 +222,7 @@ fn include_suspects_kills_them_and_nothing_else() {
     let unlisted: Vec<i32> = signalled.iter().copied().filter(|p| mine.contains(p) && !listed.contains_key(p)).collect();
     assert!(unlisted.is_empty(), "signalled but not listed by ps: {unlisted:?}\nlog:\n{}", o.log);
     let all_gone = wait_until(5, || gone.iter().all(|n| !t.alive(n)));
-    // a withheld line names a foreign suspect (the wall kept it); never one of this tree
-    let held: Vec<i32> = std::fs::read_to_string(&sink).unwrap_or_default().lines().filter_map(|l| l.split_whitespace().nth(1)?.parse().ok()).collect();
-    assert!(held.iter().all(|p| !t.procs.values().any(|&(q, _)| q == *p)), "a tree process was withheld: {held:?}");
-    assert!(o.code == Some(0) || (o.code == Some(125) && !held.is_empty()), "exit {:?}, withheld {held:?}", o.code);
+    assert_eq!(o.code, Some(0), "log:\n{}", o.log);
     assert!(all_gone, "alive: {:?}", gone.iter().filter(|n| t.alive(n)).collect::<Vec<_>>());
     // (the leader is the target's parent: it counts the target's SIGCHLD, so only its life is
     // checked)
@@ -328,7 +321,12 @@ fn including_suspects_turns_the_latch_on() {
     let lines = std::fs::read_to_string(&sink).unwrap_or_default();
     let g = t.p("g");
     assert!(t.untouched("g"), "the untagged suspect got {} signal(s)", signals(&d, "g"));
-    assert!(lines.lines().any(|l| l.starts_with("withheld ") && l.split_whitespace().nth(1) == Some(&g.0.to_string())), "{lines:?}");
+    // withheld lines, every one naming this cell's own untagged suspect or its (untagged) child,
+    // which the kill takes with it; none foreign
+    let own = [g.0.to_string(), t.p("gc").0.to_string()];
+    let held: Vec<&str> = lines.lines().filter(|l| l.starts_with("withheld ")).collect();
+    assert!(held.iter().any(|l| l.split_whitespace().nth(1) == Some(own[0].as_str())), "{lines:?}");
+    assert!(held.iter().all(|l| l.split_whitespace().nth(1).is_some_and(|p| own.contains(&p.to_string()))), "{lines:?}");
     drop(t);
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -407,7 +405,7 @@ fn a_supervisor_under_a_suspect_is_ended_first() {
     // the supervisor: gc's parent
     let sup: i32 = String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &gc.0.to_string()]).output().unwrap().stdout).trim().parse().unwrap_or(0);
     let supp = common::found(sup);
-    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_SINK", d.join("sink").to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
+    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
     let root_gone = wait_until(10, || !common::alive(gc));
     if let Some(s) = supp {
         common::send(s.0, s.1, libc::SIGKILL);

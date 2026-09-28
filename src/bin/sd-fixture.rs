@@ -769,6 +769,20 @@ fn test_env(argv: &[String]) -> ! {
         libc::signal(libc::SIGTERM, test_env_forward as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, test_env_forward as *const () as libc::sighandler_t);
     }
+    // the child's exit is observed first without reaping it, and only then is the forwarding
+    // target cleared and the child reaped: a TERM that comes later is never sent to a pid the
+    // runner has reaped (and that may be another process by then)
+    let pid = child.id() as libc::id_t;
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) } == 0 {
+            break;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+    }
+    TEST_ENV_CHILD.store(0, std::sync::atomic::Ordering::SeqCst);
     let status = child.wait();
     let mut rc = match status {
         Ok(s) => s.code().unwrap_or_else(|| 128 + std::os::unix::process::ExitStatusExt::signal(&s).unwrap_or(0)),

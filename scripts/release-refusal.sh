@@ -26,5 +26,10 @@ ok=0
 case_run control 0 yes || ok=1
 case_run tag 125 no SHEEPDOG_TEST_TAG=0123456789abcdef0123456789abcdef || ok=1
 case_run state 125 no SHEEPDOG_TEST_STATE="$tmp/state" || ok=1
+# every entry refuses, doctor's probe children too (one would open $HOME/Documents)
+env -i PATH=/usr/bin:/bin HOME="$tmp/home" SHEEPDOG_TEST_TAG=0123456789abcdef0123456789abcdef "$b" __doctor-grant </dev/null
+rc=$?
+echo "doctor probe: rc=$rc (want 125)"
+[ "$rc" = 125 ] || ok=1
 rm -rf "$tmp"
 exit $ok

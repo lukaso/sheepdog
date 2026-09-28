@@ -1597,16 +1597,16 @@ pub extern "C" fn main(argc: c_int, argv: *const *const std::os::raw::c_char) ->
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"__root") {
         return linux::root_shim(&argv);
     }
-    // doctor's disclaimed probe children (macOS)
-    #[cfg(target_os = "macos")]
-    if let Some(code) = macos::doctor_probe(&argv) {
-        return code;
-    }
     // PHASE2.md §0.5: a release build has none of the test walls, so it refuses to run in a test
     // environment rather than act on this machine's real state and processes
     if !cfg!(debug_assertions) && (std::env::var_os("SHEEPDOG_TEST_TAG").is_some() || std::env::var_os("SHEEPDOG_TEST_STATE").is_some()) {
         say!("sheepdog: a release build does not run in a test environment (SHEEPDOG_TEST_TAG or SHEEPDOG_TEST_STATE is set)");
         return 125;
+    }
+    // doctor's disclaimed probe children (macOS): after the release refusal, like every entry
+    #[cfg(target_os = "macos")]
+    if let Some(code) = macos::doctor_probe(&argv) {
+        return code;
     }
     note(format!("start debug {}", std::process::id()));
     // a panic must not unwind out of an extern "C" fn (undefined behaviour before Rust 1.81)

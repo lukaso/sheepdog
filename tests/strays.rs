@@ -220,11 +220,13 @@ fn strays_kill_needs_a_filter_and_a_yes() {
     let mut b = Cell::new();
     a.make(&["stray", "{}", "s"], &["s"]);
     b.make(&["stray", "{}", "s"], &["s"]);
-    let none = strays(&["--kill"], &[]);
-    let empty = strays(&["--kill", "--yes", "--cmd", ""], &[]);
+    // the refusals run inert: if one broke, its kill would log and send nothing
+    let inert = [("SHEEPDOG_TEST_INERT", "1")];
+    let none = strays(&["--kill"], &inert);
+    let empty = strays(&["--kill", "--yes", "--cmd", ""], &inert);
     assert_eq!(empty.code, Some(2), "an empty --cmd is no filter: {}", empty.err);
-    let zero = strays(&["--kill", "--min-mem", "0", "--older-than", "0"], &[]);
-    let no_yes = strays(&["--kill", "--cmd", &a.word], &[]);
+    let zero = strays(&["--kill", "--min-mem", "0", "--older-than", "0"], &inert);
+    let no_yes = strays(&["--kill", "--cmd", &a.word], &inert);
     assert_eq!(none.code, Some(2), "{}", none.err);
     assert_eq!(zero.code, Some(2), "{}", zero.err);
     assert_eq!(no_yes.code, Some(1), "{}", no_yes.err);
@@ -355,11 +357,16 @@ fn strays_kill_turns_the_latch_on() {
     let named = named_if_pid1_child(&c.word);
     let mut args = vec!["--kill", "--yes", "--cmd", &c.word];
     args.extend(named.iter().map(String::as_str));
-    let o = strays(&args, &[("SHEEPDOG_TEST_SINK", sink.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
+    let mut k = Command::new(sheepdog());
+    k.arg("strays").args(&args).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    common::cell_sink(&mut k, &sink);
+    let out = k.output().unwrap();
     let s = c.rec("s").unwrap();
     let lines = std::fs::read_to_string(&sink).unwrap_or_default();
-    assert!(c.untouched("s"), "the untagged stray got {} signal(s): {}", c.signals("s"), o.err);
-    assert!(lines.lines().any(|l| l.starts_with("withheld ") && l.split_whitespace().nth(1) == Some(&s.0.to_string())), "{lines:?}");
+    assert!(c.untouched("s"), "the untagged stray got {} signal(s): {}", c.signals("s"), String::from_utf8_lossy(&out.stderr));
+    // withheld lines, every one naming this cell's own untagged stray (none foreign)
+    let held: Vec<&str> = lines.lines().filter(|l| l.starts_with("withheld ")).collect();
+    assert!(!held.is_empty() && held.iter().all(|l| l.split_whitespace().nth(1) == Some(&s.0.to_string())), "{lines:?}");
 }
 
 /// A stray's row shows how many processes its kill would take (its proved tree); a stray whose
