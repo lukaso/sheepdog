@@ -141,11 +141,15 @@ fn reg_client(path: &std::path::Path, rec: &[u8], conn: &str) -> String {
         Ok(s) => s,
         Err(e) => return format!("err {e}"),
     };
-    let _ = std::fs::write(conn, b"");
     if let Err(e) = s.write_all(rec) {
         return format!("err {e}");
     }
-    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    // after the record: no file-system call inside the outer's per-connection deadline
+    let _ = std::fs::write(conn, b"");
+    // the answer's timeout: SD_REG_TIMEOUT_MS, default 2000 (a cell that holds the outer back
+    // on purpose gives its clients longer)
+    let ms: u64 = std::env::var("SD_REG_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(ms)));
     let mut b = [0u8; 1];
     match s.read(&mut b) {
         Ok(1) if b[0] == b'1' => "ack".into(),
@@ -818,8 +822,8 @@ fn main() {
     // `register SRC IDX CLAIM KIND OUT [M]`: register with entry IDX of a registration chain
     // (SRC: `env` for SHEEPDOG_OUTER, else a file holding the chain's text), claiming pid CLAIM
     // (`self` for its own), sending a well-formed record (`good`) or one with a bad magic
-    // (`bad`). Creates OUT.conn once connected. Writes `ack`, `refused`, `none` (no answer in
-    // 2 s) or `err <why>` to OUT (via a rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
+    // (`bad`). Creates OUT.conn once connected and sent. Writes `ack`, `refused`, `none` (no answer in
+    // 2 s, or SD_REG_TIMEOUT_MS) or `err <why>` to OUT (via a rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
     if mode == "register" && (a.len() == 7 || a.len() == 8) {
         let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
         let (chain, _) = sheepdog::regwire::parse(&text);

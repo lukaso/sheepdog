@@ -141,6 +141,8 @@ pub struct Listener {
     path: PathBuf,
     nonce: [u8; 16],
     pending: Vec<Conn>,
+    /// Accepts in the last `service` call (for its cell).
+    last_accepts: usize,
 }
 
 /// The wait loop's admit function, called twice for a peer's uniqueid: with `false` it only
@@ -195,7 +197,7 @@ impl Listener {
             return fail(format!("listen: {}", std::io::Error::last_os_error()), fd);
         }
         crate::note(format!("listening {}", path.display()));
-        Some(Listener { fd, dir, path, nonce, pending: Vec::new() })
+        Some(Listener { fd, dir, path, nonce, pending: Vec::new(), last_accepts: 0 })
     }
 
     pub fn entry(&self) -> Entry {
@@ -247,6 +249,7 @@ impl Listener {
                 break;
             }
         }
+        self.last_accepts = accepts;
         // an fd closed in this call (and perhaps reused since) is never handed back
         new.retain(|fd| self.pending.iter().any(|c| c.fd == *fd));
         new
@@ -376,10 +379,14 @@ mod tests {
         let t0 = Instant::now();
         let _ = l.service(&mut no);
         let took = t0.elapsed();
+        let accepts = l.last_accepts;
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         for f in floods {
             let _ = f.join();
         }
+        // the bound is what ended the call: exactly MAX_ACCEPTS accepts (an unbounded call can also
+        // return early, when the flooders do not refill the backlog in time)
+        assert_eq!(accepts, MAX_ACCEPTS, "service made {accepts} accepts in {took:?}");
         assert!(took < std::time::Duration::from_secs(1), "service ran {took:?} under a flood");
     }
 }

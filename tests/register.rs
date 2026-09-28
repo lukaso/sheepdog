@@ -517,6 +517,7 @@ fn a_burst_of_registrations_is_served() {
             .args(["run", "--", "/bin/sh", "-c", &root])
             .env("FX", fixture())
             .env("SHEEPDOG_TEST_TRACE", &trace)
+            .env("SD_REG_TIMEOUT_MS", "15000")
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
@@ -525,10 +526,11 @@ fn a_burst_of_registrations_is_served() {
     let sup = (o.0.id() as i32, sheepdog::ident::identity(o.0.id() as i32).unwrap_or(0));
     common::send(sup.0, sup.1, libc::SIGSTOP);
     std::fs::write(&go, b"").unwrap();
-    // all 40 are connected (queued in the stopped outer's backlog) before it runs again; their
-    // budget for the answer is 2 s
+    // all 40 have connected and sent (queued in the stopped outer's backlog) before it runs
+    // again; the clients wait 15 s for their answer (SD_REG_TIMEOUT_MS), so a slow start under
+    // load (up to this wait's 10 s) still leaves them time
     let conn = || (1..=40).filter(|i| d.join(format!("out{i}.conn")).exists()).count();
-    let queued = wait_until(2, || conn() == 40);
+    let queued = wait_until(10, || conn() == 40);
     let n = conn();
     common::send(sup.0, sup.1, libc::SIGCONT);
     assert!(queued, "only {n} of 40 clients connected before the outer ran again");
