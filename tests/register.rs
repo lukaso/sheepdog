@@ -344,30 +344,35 @@ fn silent_clients_do_not_stall_the_timeout() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The spoof: a member registers claiming a decoy's pid (a process outside the job). The outer
-/// takes the sender from the kernel, refuses the claim, and the decoy gets no signal.
+/// The spoof: a member registers claiming a decoy's pid (a process outside the job that is
+/// responsible for itself, with a kid responsible to it, as a terminal app is). The outer takes the
+/// sender from the kernel and refuses the claim: the decoy's kid gets no signal.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_registration_for_another_process_is_refused() {
     let d = scratch("spoof");
     let dr = d.join("decoy");
-    let mut decoy = Command::new(fixture()).args(["sigcount", dr.to_str().unwrap()]).spawn().unwrap();
-    assert!(wait_until(10, || !records(&dr).is_empty()));
-    let dp = records(&dr)[0];
+    let head = format!("{}.head", dr.display());
+    let mut decoy = Command::new(fixture()).args(["disclaim-exec", dr.to_str().unwrap(), fixture(), "sigcount", &head]).spawn().unwrap();
+    let kidr = PathBuf::from(format!("{}.kid", dr.display()));
+    assert!(wait_until(10, || !records(&dr).is_empty() && !records(&kidr).is_empty()), "the decoy did not start");
+    let (dp, kid) = (records(&dr)[0], records(&kidr)[0]);
     let out = d.join("out");
     let (code, _, _) = outer(&d, &format!(r#""$FX" register env 0 {} good "{}"; true"#, dp.0, out.display()), &[]);
-    let (alive, sigs) = (common::alive(dp), read(&PathBuf::from(format!("{}.sig", dr.display()))).lines().count());
+    let (alive, sigs) = (common::alive(kid), read(&PathBuf::from(format!("{}.kid.sig", dr.display()))).lines().count());
     common::send_child(&mut decoy, libc::SIGKILL);
     let _ = decoy.wait();
-    // the harm first: the decoy got no signal (then the answer, then the run)
-    assert!(alive && sigs == 0, "the decoy got {sigs} signal(s), alive {alive}");
+    common::send(kid.0, kid.1, libc::SIGKILL);
+    // the harm first: the decoy's kid got no signal (then the answer, then the run)
+    assert!(alive && sigs == 0, "the decoy's kid got {sigs} signal(s), alive {alive}");
     assert_eq!(read(&out), "refused");
     assert_eq!(code, Some(0));
     let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A process outside the job that has the socket path and nonce (read from the root's env)
-/// registers: it is not a member, so it is refused, and it survives the outer's end.
+/// registers: it is not a member, so it is refused. It is responsible for itself with a kid
+/// responsible to it; the kid survives the outer's end.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_non_member_with_the_nonce_is_refused() {
@@ -380,16 +385,22 @@ fn a_non_member_with_the_nonce_is_refused() {
         .unwrap();
     assert!(wait_until(10, || !read(&chain).is_empty()), "the root did not write its chain");
     let out = d.join("out");
-    let mut outsider = Command::new(fixture()).args(["register", chain.to_str().unwrap(), "0", "self", "good", out.to_str().unwrap(), &marker()]).spawn().unwrap();
-    let op = (outsider.id() as i32, sheepdog::ident::identity(outsider.id() as i32).unwrap_or(0));
-    assert!(wait_until(10, || !read(&out).is_empty()));
+    let or = d.join("outsider");
+    let kidr = PathBuf::from(format!("{}.kid", or.display()));
+    let mut outsider = Command::new(fixture())
+        .args(["disclaim-exec", or.to_str().unwrap(), fixture(), "register", chain.to_str().unwrap(), "0", "self", "good", out.to_str().unwrap(), &marker()])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(10, || !read(&out).is_empty() && !records(&kidr).is_empty()), "the outsider did not answer");
+    let kid = records(&kidr)[0];
     common::send_child(&mut o, libc::SIGTERM);
     let ended = finished(&mut o, 20).is_some();
-    let alive = common::alive(op);
+    let (alive, sigs) = (common::alive(kid), read(&PathBuf::from(format!("{}.kid.sig", or.display()))).lines().count());
     common::send_child(&mut outsider, libc::SIGKILL);
     let _ = outsider.wait();
-    // the harm first: the outsider survived (then the answer, then the run)
-    assert!(alive, "the outsider was killed with the job");
+    common::send(kid.0, kid.1, libc::SIGKILL);
+    // the harm first: the outsider's kid got no signal (then the answer, then the run)
+    assert!(alive && sigs == 0, "the outsider's kid got {sigs} signal(s), alive {alive}");
     assert_eq!(read(&out), "refused");
     assert!(ended);
     let _ = std::fs::remove_dir_all(&d);

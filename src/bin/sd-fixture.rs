@@ -545,6 +545,35 @@ fn parent_is_sheepdog() -> bool {
 /// Re-exec this fixture as `mode M R` with the responsibility disclaim (macOS), so the new
 /// image is responsible for itself.
 #[cfg(target_os = "macos")]
+/// Re-exec this fixture with the responsibility disclaim, with these arguments.
+#[cfg(target_os = "macos")]
+unsafe fn disclaim_reexec_args(rest: &[&str]) -> ! {
+    type Disclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
+    extern "C" {
+        fn _NSGetEnviron() -> *mut *const *const libc::c_char;
+    }
+    let name = CString::new("responsibility_spawnattrs_setdisclaim").unwrap();
+    let f = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr());
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = libc::proc_pidpath(libc::getpid(), path.as_mut_ptr() as *mut libc::c_void, path.len() as u32);
+    path.truncate(n.max(0) as usize);
+    let path = CString::new(path).unwrap();
+    let mut args: Vec<CString> = vec![path.clone()];
+    args.extend(rest.iter().map(|s| CString::new(*s).unwrap()));
+    let mut ptrs: Vec<*mut libc::c_char> = args.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
+    ptrs.push(std::ptr::null_mut());
+    let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+    libc::posix_spawnattr_init(&mut attr);
+    if f.is_null() {
+        libc::_exit(3);
+    }
+    let d: Disclaim = std::mem::transmute(f);
+    d(&mut attr, 1);
+    libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETEXEC as i16);
+    libc::posix_spawn(std::ptr::null_mut(), path.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), *_NSGetEnviron() as *const *mut libc::c_char);
+    libc::_exit(3)
+}
+
 unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     type Disclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
     extern "C" {
@@ -719,6 +748,43 @@ fn main() {
                     libc::_exit(127);
                 }
             }
+        }
+    }
+    // `disclaim-exec R PROG ARGS...` (macOS): re-exec itself with the responsibility disclaim
+    // (as `disclaim-head`), so it is responsible for itself; start a kid, `sigcount R.kid`, which
+    // is then responsible to it; record itself in R; exec PROG ARGS (same pid, still responsible
+    // for itself). Exit 4 if the disclaim did not take effect.
+    #[cfg(target_os = "macos")]
+    if mode == "disclaim-exec" && a.len() >= 4 {
+        unsafe { disclaim_reexec_args(&[&["disclaim-head"], &a[2..].iter().map(String::as_str).collect::<Vec<_>>()[..]].concat()) };
+    }
+    #[cfg(target_os = "macos")]
+    if mode == "disclaim-head" && a.len() >= 4 {
+        if !self_responsible() {
+            std::process::exit(4);
+        }
+        let r = a[2].clone();
+        let me = CString::new(std::env::current_exe().unwrap().as_os_str().as_encoded_bytes()).unwrap();
+        unsafe {
+            if libc::fork() == 0 {
+                let args = [me.clone(), CString::new("sigcount").unwrap(), CString::new(format!("{r}.kid")).unwrap()];
+                let argv = [args[0].as_ptr(), args[1].as_ptr(), args[2].as_ptr(), std::ptr::null()];
+                libc::execv(me.as_ptr(), argv.as_ptr());
+                libc::_exit(127);
+            }
+            // the kid is recorded (by itself) before the head goes on
+            let kid = format!("{r}.kid");
+            let mut n = 0;
+            while std::fs::read_to_string(&kid).map_or(true, |t| t.is_empty()) && n < 1000 {
+                libc::usleep(10_000);
+                n += 1;
+            }
+            record(&r, libc::getpid());
+            let prog: Vec<CString> = a[3..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();
+            let mut ptrs: Vec<*const libc::c_char> = prog.iter().map(|c| c.as_ptr()).collect();
+            ptrs.push(std::ptr::null());
+            libc::execvp(ptrs[0], ptrs.as_ptr());
+            libc::_exit(127);
         }
     }
     // `after GO PROG ARGS...`: wait until the file GO exists (bounded, 60 s), then exec PROG ARGS.
