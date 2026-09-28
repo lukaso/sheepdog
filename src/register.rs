@@ -111,7 +111,7 @@ pub fn register_all(chain: &[Entry]) -> usize {
             }
             Err(why) => {
                 crate::note(format!("unregistered {}: {why}", e.path.display()));
-                say!("sheepdog: could not register with the sheepdog that runs this one ({why}); it finds this job at its next scan");
+                say!("sheepdog: could not register with the sheepdog that runs this one ({why}); the outer adds this job only if its next scan still finds this process in its tree");
             }
         }
     }
