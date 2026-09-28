@@ -124,8 +124,8 @@ fn version_names_version_commit_and_platform() {
 /// unknown unit is `run`'s usage error (125) and `strays`' (2).
 #[test]
 fn the_help_durations_parse() {
-    assert_eq!(sd(&["run", "--timeout", "5m", "--", "/usr/bin/true"]).code, Some(0));
-    assert_eq!(sd(&["run", "--timeout", "5x", "--", "/usr/bin/true"]).code, Some(125));
+    assert_eq!(sd(&["run", "--timeout", "5m", "--", "true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "5x", "--", "true"]).code, Some(125));
     let strays = |v: &str| Command::new(sheepdog()).args(["strays", "--older-than", v]).env("SHEEPDOG_TEST_INERT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code();
     assert_eq!(strays("1h"), Some(0));
     assert_eq!(strays("2d"), Some(0));
@@ -144,13 +144,13 @@ fn the_json_error_message_is_the_error_line() {
 }
 
 /// A call that starts with `--` or an option is a usage error whose fix puts `run` in front
-/// and keeps what was typed runnable: `sheepdog -- /usr/bin/true` suggests
-/// `sheepdog run -- /usr/bin/true` (never `run -- --`), and the suggestion, run, works.
+/// and keeps what was typed runnable: `sheepdog -- true` suggests `sheepdog run -- true` (never
+/// `run -- --`), and the suggestion, run, works.
 #[test]
 fn a_flag_first_call_suggests_a_fix_that_runs() {
     for (typed, fix) in [
-        (&["--", "/usr/bin/true"][..], "sheepdog run -- /usr/bin/true"),
-        (&["--timeout", "5m", "--", "/usr/bin/true"][..], "sheepdog run --timeout 5m -- /usr/bin/true"),
+        (&["--", "true"][..], "sheepdog run -- true"),
+        (&["--timeout", "5m", "--", "true"][..], "sheepdog run --timeout 5m -- true"),
     ] {
         let o = sd(typed);
         assert_eq!(o.code, Some(2), "{typed:?}");

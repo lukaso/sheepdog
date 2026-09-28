@@ -200,8 +200,10 @@ fn the_roots_exit_comes_before_a_cap_in_one_wake() {
     let d = scratch("exitcap");
     let (r1, r2) = (d.join("rec"), d.join("ctl"));
     let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500")];
-    // two members that outlive the root: the job stays past the cap after the root exits
-    let body = |r: &Path, end: &str| format!(r#"--max-procs 1 -- /bin/sh -c ': > "{0}"; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 2 ]; do sleep 0.01; done; {end}'"#, r.display());
+    // two members that outlive the root: the job stays past the cap after the root exits. The
+    // root waits 300 ms first, so the supervisor's first check (right after the start, before
+    // its hold) sees the root alone
+    let body = |r: &Path, end: &str| format!(r#"--max-procs 1 -- /bin/sh -c ': > "{0}"; "$FX" sleep-ms 300; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 2 ]; do sleep 0.01; done; {end}'"#, r.display());
     let ended = run(&d, "exit", &body(&r1, "exit 7"), &hold, Duration::from_secs(30), || false);
     let control = run(&d, "ctl", &body(&r2, "while :; do sleep 0.05; done"), &hold, Duration::from_secs(30), || false);
     for p in records(&r1).into_iter().chain(records(&r2)) {
@@ -225,7 +227,7 @@ fn a_term_comes_before_a_cap_in_one_wake() {
     let r = run(
         &d,
         "t",
-        &format!(r#"--max-procs 1 -- /bin/sh -c '"$FX" sigcount "{}" & while :; do sleep 0.05; done'"#, r1.display()),
+        &format!(r#"--max-procs 1 -- /bin/sh -c '"$FX" sleep-ms 300; "$FX" sigcount "{}" & while :; do sleep 0.05; done'"#, r1.display()),
         &hold,
         Duration::from_secs(30),
         || !records(&r1).is_empty() && t0.elapsed() > Duration::from_millis(300),
