@@ -746,9 +746,12 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             if relay.is_some_and(relay_exited) {
                 return crate::die_by_term(143);
             }
+            crate::status::cloexec(); // after the SETEXEC, which the fd had to survive
+            crate::status::set_tracking(if ok { "responsibility" } else { "puniq" });
             if !ok {
                 say!("sheepdog: the macOS responsibility API is not available; tracking is degraded");
                 crate::trace("degraded".into());
+                crate::status::set_degraded("the macOS responsibility API is not available");
             }
             let me = uniq(unsafe { libc::getpid() }).map(|u| u.0).unwrap_or(0);
             if let Some(code) = crate::term_before_spawn(sig) {
@@ -793,6 +796,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                     return code;
                 }
             };
+            crate::status::set_root_pid(root);
             crate::status::set_root("signaled"); // until the root's own end is known
             crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS");
             if let Some((u, _)) = uniq(root) {

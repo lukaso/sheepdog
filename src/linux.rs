@@ -679,10 +679,13 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             return 125;
         }
     };
+    crate::status::cloexec();
     let is_subreaper = subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
+    crate::status::set_tracking(if is_subreaper { "subreaper" } else { "none" });
     if subreaper && !is_subreaper {
         say!("sheepdog: cannot become a subreaper; tracking is degraded");
         crate::trace("degraded".into());
+        crate::status::set_degraded("cannot become a subreaper");
     }
     let me = unsafe { libc::getpid() };
     if let Some(code) = crate::term_before_spawn(sig) {
@@ -697,6 +700,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         }
     };
     let root = shim.pid;
+    crate::status::set_root_pid(root);
     crate::status::set_root("signaled"); // until the root's own end is known
     // the root is journaled before it runs: the shim waits for the go byte
     if let Some(id) = sheepdog::ident::identity(root) {

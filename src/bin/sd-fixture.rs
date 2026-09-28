@@ -89,6 +89,9 @@
 //!   process (its environment readable on macOS), records each, and exits. Even children exit
 //!   on TERM after a short delay (i*100 µs), so some members are exiting while the kill runs;
 //!   odd children ignore TERM and die only of SIGKILL. SIGALRM ends each after 60 s at most.
+//! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
+//!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
+//!   and exits. G escaped by reparenting only.
 //! - `sigcount R`: S8 (another-user leg). Records itself, then counts every catchable signal as a
 //!   line `SIG <n>` in `R.sig` and keeps running (SIGALRM ends it after 1800 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
@@ -1030,6 +1033,38 @@ fn main() {
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
+    }
+    if mode == "doublefork" && a.len() == 4 {
+        let m = CString::new(a[2].as_str()).unwrap();
+        unsafe {
+            match libc::fork() {
+                0 => {
+                    if libc::fork() == 0 {
+                        // wait until C is gone, so G is reparented before it records itself
+                        let c = libc::getppid();
+                        let mut n = 0;
+                        while libc::getppid() == c && n < 2000 {
+                            libc::usleep(1000);
+                            n += 1;
+                        }
+                        record(&a[3], libc::getpid());
+                        exec_sleep(&m);
+                    }
+                    libc::_exit(0);
+                }
+                -1 => std::process::exit(1),
+                c => {
+                    let mut st = 0;
+                    libc::waitpid(c, &mut st, 0);
+                }
+            }
+            let mut n = 0;
+            while std::fs::metadata(&a[3]).map_or(true, |m| m.len() == 0) && n < 1000 {
+                libc::usleep(10_000);
+                n += 1;
+            }
+        }
+        std::process::exit(0);
     }
     if mode == "spawnp" && a.len() >= 3 {
         let argv: Vec<CString> = a[2..].iter().map(|s| CString::new(s.as_str()).unwrap()).collect();

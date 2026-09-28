@@ -682,7 +682,7 @@ fn an_int_during_the_kill_still_counts() {
 #[test]
 fn the_pid_only_hint_is_printed_once_with_the_group() {
     let job = Job::new();
-    let (c, id) = direct(&[], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300")]);
+    let (c, id) = direct(&[], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300"), ("SHEEPDOG_TEST_NO_REPORT", "1")]);
     job.ready();
     let pg = c.id() as i32;
     assert!(send(pg, id, libc::SIGINT));
@@ -699,7 +699,7 @@ fn the_pid_only_hint_is_printed_once_with_the_group() {
 #[test]
 fn quiet_suppresses_the_hint() {
     let job = Job::new();
-    let (c, id) = direct(&["--quiet"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300")]);
+    let (c, id) = direct(&["--quiet"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300"), ("SHEEPDOG_TEST_NO_REPORT", "1")]);
     job.ready();
     assert!(send(c.id() as i32, id, libc::SIGINT));
     std::thread::sleep(Duration::from_millis(900));
@@ -712,7 +712,7 @@ fn quiet_suppresses_the_hint() {
 #[test]
 fn forward_int_to_root_reaches_the_root_and_prints_no_hint() {
     let job = Job::new();
-    let (c, id) = direct(&["--forward-int-to-root"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300")]);
+    let (c, id) = direct(&["--forward-int-to-root"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300"), ("SHEEPDOG_TEST_NO_REPORT", "1")]);
     let ((esc, _), (root, _)) = job.ready();
     assert!(send(c.id() as i32, id, libc::SIGINT));
     let (r, e) = job.settle(root, esc, |r, e| r.0 >= 1 && e.0 >= 1);
@@ -767,7 +767,7 @@ fn death_by_signal_needs_the_same_signal() {
 #[test]
 fn forward_int_to_root_does_not_forward_hup_to_the_root() {
     let job = Job::new();
-    let (c, id) = direct(&["--forward-int-to-root"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300")]);
+    let (c, id) = direct(&["--forward-int-to-root"], &job.args(), &[("SHEEPDOG_TEST_HINT_MS", "300"), ("SHEEPDOG_TEST_NO_REPORT", "1")]);
     let ((esc, _), (root, _)) = job.ready();
     assert!(send(c.id() as i32, id, libc::SIGHUP));
     let (r, e) = job.settle(root, esc, |_, e| e.1 >= 1);
@@ -786,7 +786,7 @@ fn the_hint_does_not_name_the_callers_group() {
     let job = Job::new();
     let mut c = Command::new("/bin/sh");
     let script = "\"$0\" run -- \"$@\"; exit 0";
-    c.args(["-c", script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    c.args(["-c", script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").env("SHEEPDOG_TEST_NO_REPORT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
@@ -893,7 +893,7 @@ fn the_hint_is_printed_for_a_background_job() {
 /// group led by the relay, stderr piped, the hint due after 300 ms. Returns the relay.
 fn relay_job(mode: &str, bg: &str, job: &Job) -> (Child, u64) {
     let mut c = Command::new(fixture());
-    c.args([mode, bg]).args(run_args(&[], &job.args())).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    c.args([mode, bg]).args(run_args(&[], &job.args())).env("SHEEPDOG_TEST_HINT_MS", "300").env("SHEEPDOG_TEST_NO_REPORT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
@@ -980,7 +980,7 @@ fn the_hint_names_no_group_that_holds_the_callers_orphan() {
     let bg = new_marker();
     let script = format!("(/bin/sleep {bg} >/dev/null 2>&1 &); exec \"$0\" run -- \"$@\"");
     let mut c = Command::new("/bin/sh");
-    c.args(["-c", &script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    c.args(["-c", &script, sheepdog()]).args(job.args()).env("SHEEPDOG_TEST_HINT_MS", "300").env("SHEEPDOG_TEST_NO_REPORT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     unsafe {
         c.pre_exec(|| {
             for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {

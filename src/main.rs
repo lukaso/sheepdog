@@ -90,6 +90,17 @@ pub fn cstrings(v: &[OsString]) -> Result<Vec<CString>, String> {
         .collect()
 }
 
+/// `--status-fd N` among `run`'s options (before `--`), if N is a valid fd number.
+fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
+    let args = &argv[1.min(argv.len())..];
+    if args.first().map(|a| a.as_bytes()) != Some(b"run") {
+        return None;
+    }
+    let end = args.iter().position(|a| a.as_bytes() == b"--").unwrap_or(args.len());
+    let i = args[..end].iter().position(|a| a.as_bytes() == b"--status-fd")?;
+    args.get(i + 1).filter(|_| i + 1 < end)?.to_str()?.parse().ok().filter(|&n: &i32| n >= 0)
+}
+
 fn usage() -> i32 {
     say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
     125
@@ -495,8 +506,42 @@ pub enum KillError {
 /// Exit code for a kill that did not end clean (PLAN.md §3.3 step 6: 125).
 pub fn kill_failed(e: KillError) -> i32 {
     match e {
-        KillError::Deadline(alive) => deadline_missed(&alive),
-        KillError::Internal => 125,
+        KillError::Deadline(alive) => {
+            status::set_deadline(&alive);
+            deadline_missed(&alive)
+        }
+        KillError::Internal => {
+            status::set_error("internal error while killing the tree");
+            125
+        }
+    }
+}
+
+/// The session, parent and command of a member, read at its first signal, for `killed[]`.
+fn member_info(pid: i32) -> (Option<i32>, Option<i32>, String) {
+    let sid = unsafe { libc::getsid(pid) };
+    #[cfg(target_os = "macos")]
+    let (ppid, argv) = (macos::parent(pid), macos::cmdline(pid));
+    #[cfg(target_os = "linux")]
+    let (ppid, argv) = (linux::parent(pid), linux::cmdline(pid));
+    ((sid > 0).then_some(sid), ppid, journal::text(argv.join(" ").as_bytes()))
+}
+
+/// How a killed member escaped (PLAN.md §3.1 `killed[].escaped`): `setsid` if it is in another
+/// session than the supervisor's; else `reparented` if its parent at its first signal was not a
+/// process of the job (the supervisor as subreaper, or pid 1); the root never escaped.
+fn escaped_how(pid: i32, sid: Option<i32>, ppid: Option<i32>) -> Option<&'static str> {
+    let me = unsafe { libc::getpid() };
+    if pid == status::root_pid() {
+        return None;
+    }
+    if sid.is_some_and(|s| s != unsafe { libc::getsid(0) }) {
+        return Some("setsid");
+    }
+    match ppid {
+        Some(p) if p == me || p == 1 => Some("reparented"),
+        None => Some("reparented"),
+        _ => None,
     }
 }
 
@@ -520,12 +565,35 @@ pub fn kill_tree(
     members: impl FnMut() -> Vec<(i32, u64)>,
     reap: impl FnMut(),
     tree_empty: impl FnMut() -> Option<bool>,
-    send: impl FnMut(i32, u64, c_int) -> Sent,
+    mut send: impl FnMut(i32, u64, c_int) -> Sent,
     initial: HashMap<i32, u64>,
 ) -> Result<(), KillError> {
     let known: std::cell::RefCell<HashMap<i32, u64>> = std::cell::RefCell::new(initial);
+    // each member's session, parent and command, read at its first signal (for killed[])
+    let captured: std::cell::RefCell<HashMap<(i32, u64), (Option<i32>, Option<i32>, String)>> = Default::default();
+    let send = |p: i32, id: u64, sig: c_int| {
+        captured.borrow_mut().entry((p, id)).or_insert_with(|| member_info(p));
+        send(p, id, sig)
+    };
+    let result = kill_tree_inner(opts, members, reap, tree_empty, send, &known);
+    for (&(p, id), (sid, ppid, cmd)) in captured.borrow().iter() {
+        if id != 0 && !same(p, id) {
+            status::add_killed(status::Killed { pid: p, cmd: cmd.clone(), escaped: escaped_how(p, *sid, *ppid) });
+        }
+    }
+    result
+}
+
+fn kill_tree_inner(
+    opts: &KillOpts,
+    members: impl FnMut() -> Vec<(i32, u64)>,
+    reap: impl FnMut(),
+    tree_empty: impl FnMut() -> Option<bool>,
+    send: impl FnMut(i32, u64, c_int) -> Sent,
+    known: &std::cell::RefCell<HashMap<i32, u64>>,
+) -> Result<(), KillError> {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        kill_loop(opts, members, reap, tree_empty, send, &known)
+        kill_loop(opts, members, reap, tree_empty, send, known)
     }));
     match r {
         Ok(result) => result.map_err(KillError::Deadline),
@@ -1232,9 +1300,11 @@ pub fn self_stop(sig: c_int) {
 /// root's exit code. `status` is the root's wait status, None when TERM ended the job.
 pub fn finish(status: Option<c_int>, result: Result<(), KillError>, ints: &mut Interrupts, sig: &Signals) -> i32 {
     ints.drain_pending(sig);
-    if let Some(st) = status {
-        status::set_root(if libc::WIFSIGNALED(st) { "signaled" } else { "exited" });
+    match status {
+        Some(st) => status::set_root(if libc::WIFSIGNALED(st) { "signaled" } else { "exited" }),
+        None => status::set_trigger("term"), // the job was ended by a TERM from outside
     }
+    status::report(status, result.is_ok());
     match (status, result) {
         (_, Err(e)) => kill_failed(e),
         (None, Ok(())) => die_by_term(143),
@@ -1303,13 +1373,20 @@ fn run(argv: Vec<OsString>) -> i32 {
     if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
         return kill::main(&argv[2..]);
     }
-    let args = match parse(argv) {
-        Ok(a) => a,
-        Err(code) => return code,
-    };
-    if let Some(fd) = args.status_fd {
+    status::start();
+    // read --status-fd before the rest, so a usage error elsewhere still gets its status line
+    // (a usage error in --status-fd itself writes nothing: PHASE2.md decision 8)
+    if let Some(fd) = prescan_status_fd(&argv) {
         status::set_fd(fd);
     }
+    let args = match parse(argv) {
+        Ok(a) => a,
+        Err(code) => {
+            status::set_error("usage");
+            return status::write(code);
+        }
+    };
+    status::set_quiet(args.quiet);
     if seam("SHEEPDOG_TEST_PANIC_IN_RUN") {
         panic!("test seam: panic in run");
     }
