@@ -135,12 +135,13 @@ fn record(path: &str, pid: i32) {
 
 /// Send one registration record over a fresh connection to `path`; the outer's answer: `ack`,
 /// `refused` (closed without a byte), `none` (nothing in 2 s) or `err <why>`.
-fn reg_client(path: &std::path::Path, rec: &[u8]) -> String {
+fn reg_client(path: &std::path::Path, rec: &[u8], conn: &str) -> String {
     use std::io::Read;
     let mut s = match std::os::unix::net::UnixStream::connect(path) {
         Ok(s) => s,
         Err(e) => return format!("err {e}"),
     };
+    let _ = std::fs::write(conn, b"");
     if let Err(e) = s.write_all(rec) {
         return format!("err {e}");
     }
@@ -817,8 +818,8 @@ fn main() {
     // `register SRC IDX CLAIM KIND OUT [M]`: register with entry IDX of a registration chain
     // (SRC: `env` for SHEEPDOG_OUTER, else a file holding the chain's text), claiming pid CLAIM
     // (`self` for its own), sending a well-formed record (`good`) or one with a bad magic
-    // (`bad`). Writes `ack`, `refused`, `none` (no answer in 2 s) or `err <why>` to OUT (via a
-    // rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
+    // (`bad`). Creates OUT.conn once connected. Writes `ack`, `refused`, `none` (no answer in
+    // 2 s) or `err <why>` to OUT (via a rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
     if mode == "register" && (a.len() == 7 || a.len() == 8) {
         let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
         let (chain, _) = sheepdog::regwire::parse(&text);
@@ -831,7 +832,7 @@ fn main() {
                 if a[5] == "bad" {
                     rec[0] = b'X';
                 }
-                reg_client(&e.path, &rec)
+                reg_client(&e.path, &rec, &format!("{}.conn", a[6]))
             }
         };
         let tmp = format!("{}.tmp", a[6]);

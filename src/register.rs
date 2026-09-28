@@ -20,6 +20,9 @@ pub const BUDGET: Duration = Duration::from_secs(2);
 const READ_DEADLINE: Duration = Duration::from_millis(100);
 /// Pending connections at most; past it, new ones wait in the listen backlog (64).
 const MAX_PENDING: usize = 32;
+/// Accepts in one `service` call at most, so a client that connects and closes without end
+/// cannot keep the wait loop from its own checks (the rest waits in the backlog).
+const MAX_ACCEPTS: usize = 2 * MAX_PENDING;
 /// `sun_path` holds 104 bytes on macOS; a longer `$TMPDIR` path goes under /tmp.
 const PATH_MAX: usize = 100;
 
@@ -221,12 +224,14 @@ impl Listener {
 
     /// Accept what is waiting (up to the cap: the rest stays in the listen backlog), read what has
     /// come, answer every complete record and drop every connection past its deadline; again while
-    /// that made room. Never blocks. Returns the new fds to watch: only connections still pending.
+    /// that made room, up to MAX_ACCEPTS accepts. Never blocks. Returns the new fds to watch: only
+    /// connections still pending.
     pub fn service(&mut self, admit: &mut Admit) -> Vec<RawFd> {
         let mut new = Vec::new();
+        let mut accepts = 0;
         loop {
             let mut accepted = false;
-            while self.pending.len() < MAX_PENDING {
+            while self.pending.len() < MAX_PENDING && accepts < MAX_ACCEPTS {
                 let c = unsafe { libc::accept(self.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
                 if c < 0 {
                     break; // EAGAIN: nothing more waiting (any other error: try again next wake)
@@ -235,9 +240,10 @@ impl Listener {
                 self.pending.push(Conn { fd: c, buf: Vec::with_capacity(regwire::RECORD), deadline: Instant::now() + READ_DEADLINE });
                 new.push(c);
                 accepted = true;
+                accepts += 1;
             }
             self.serve_pending(admit);
-            if !accepted || self.full() {
+            if !accepted || self.full() || accepts >= MAX_ACCEPTS {
                 break;
             }
         }
@@ -343,6 +349,38 @@ mod tests {
         let watched = l.fds();
         assert_eq!(back.len(), 1, "{back:?}");
         assert!(back.iter().all(|fd| watched.contains(fd)), "returned {back:?}, pending {watched:?}");
+    }
+
+    /// A same-uid process that connects and closes without end cannot keep the wait loop inside
+    /// one `service` call: it returns within a bounded number of accepts (the rest waits in the
+    /// backlog for the next pass).
+    #[test]
+    fn service_returns_while_a_flooder_runs() {
+        let mut l = Listener::open().expect("a listener");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let floods: Vec<_> = (0..8)
+            .map(|_| {
+                let (p, stop) = (l.path.clone(), stop.clone());
+                // each flooder ends by itself after 3 s, so an unbounded `service` ends too (and
+                // the cell fails instead of hanging)
+                let end = Instant::now() + std::time::Duration::from_secs(3);
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < end {
+                        let _ = std::os::unix::net::UnixStream::connect(&p);
+                    }
+                })
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut no = |_: u64, _: bool| false;
+        let t0 = Instant::now();
+        let _ = l.service(&mut no);
+        let took = t0.elapsed();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        for f in floods {
+            let _ = f.join();
+        }
+        assert!(took < std::time::Duration::from_secs(1), "service ran {took:?} under a flood");
     }
 }
 

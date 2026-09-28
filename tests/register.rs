@@ -510,7 +510,8 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
 fn a_burst_of_registrations_is_served() {
     let d = scratch("burst");
     let (go, trace) = (d.join("go"), d.join("trace"));
-    let root = format!(r#"until [ -e "{}" ]; do sleep 0.02; done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#, go.display(), d.display());
+    // (the wait for GO is bounded: 10 s)
+    let root = format!(r#"n=0; until [ -e "{}" ] || [ $n -ge 500 ]; do sleep 0.02; n=$((n+1)); done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#, go.display(), d.display());
     let mut o = Outer(
         Command::new(sheepdog())
             .args(["run", "--", "/bin/sh", "-c", &root])
@@ -520,12 +521,17 @@ fn a_burst_of_registrations_is_served() {
             .spawn()
             .unwrap(),
     );
-    assert!(wait_until(10, || read(&trace).lines().any(|l| l.starts_with("listening "))));
+    assert!(wait_until(10, || read(&trace).lines().any(|l| l.starts_with("listening "))), "the outer is not listening");
     let sup = (o.0.id() as i32, sheepdog::ident::identity(o.0.id() as i32).unwrap_or(0));
     common::send(sup.0, sup.1, libc::SIGSTOP);
     std::fs::write(&go, b"").unwrap();
-    std::thread::sleep(Duration::from_millis(700)); // the 40 connect and wait (their budget is 2 s)
+    // all 40 are connected (queued in the stopped outer's backlog) before it runs again; their
+    // budget for the answer is 2 s
+    let conn = || (1..=40).filter(|i| d.join(format!("out{i}.conn")).exists()).count();
+    let queued = wait_until(2, || conn() == 40);
+    let n = conn();
     common::send(sup.0, sup.1, libc::SIGCONT);
+    assert!(queued, "only {n} of 40 clients connected before the outer ran again");
     let code = finished(&mut o.0, 30).and_then(|s| s.code());
     let trace = read(&trace);
     let answers: Vec<String> = (1..=40).map(|i| read(&d.join(format!("out{i}")))).collect();
