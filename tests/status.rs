@@ -150,12 +150,21 @@ fn cell_26_the_status_line_tells_the_125s_apart() {
 fn the_root_does_not_hold_the_status_fd() {
     let d = scratch("cloexec");
     let (flag, out) = (d.join("open"), d.join("status57"));
-    let code = Command::new("/bin/sh")
-        .args(["-c", &format!(r#"exec "$SD" run --status-fd 57 -- /bin/sh -c 'if [ -e /dev/fd/57 ]; then touch "{}"; fi' 57>"{}""#, flag.display(), out.display())])
-        .env("SD", sheepdog())
-        .status()
-        .unwrap()
-        .code();
+    // fd 57 is set up here, not by a shell: dash redirects single-digit fds only
+    let file = std::fs::File::create(&out).unwrap();
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&file);
+    let mut cmd = Command::new(sheepdog());
+    cmd.args(["run", "--status-fd", "57", "--", "/bin/sh", "-c", &format!(r#"if [ -e /dev/fd/57 ]; then touch "{}"; fi"#, flag.display())]);
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
+            if libc::dup2(raw, 57) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let code = cmd.status().unwrap().code();
+    drop(file);
     assert_eq!(code, Some(0));
     assert_eq!(std::fs::read_to_string(&out).unwrap_or_default().lines().count(), 1, "control: sheepdog wrote its line to fd 57");
     assert!(!flag.exists(), "the root holds the status fd");
