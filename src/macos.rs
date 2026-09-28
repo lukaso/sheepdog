@@ -297,20 +297,34 @@ fn tcc_warning(cmd: &[OsString]) {
 pub(crate) fn doctor_mechanisms() -> Vec<crate::doctor::Mech> {
     let me = unsafe { libc::getpid() };
     let resolves = sym::<Disclaim>("responsibility_spawnattrs_setdisclaim").is_some() && resp_uniq(me).is_some();
-    let disclaim = probe_child("__doctor-probe").map_or(false, |c| c == 0);
-    vec![
-        crate::doctor::mechanism("responsibility API", resolves, if resolves { "resolved, answers for this process" } else { "missing or not answering: tracking falls back to parent ids" }),
-        crate::doctor::mechanism("disclaim self-check", disclaim, if disclaim { "a disclaimed child is responsible for itself" } else { "a disclaimed child is not responsible for itself: tracking falls back to parent ids" }),
-    ]
+    let disclaim = probe_child("__doctor-probe", true).map_or(false, |c| c == 0);
+    // the control (D6): a child spawned without the disclaim must not read as responsible for
+    // itself; it does when this doctor's responsible process has exited, and then the check
+    // proves nothing
+    let control = probe_child("__doctor-probe", false) == Some(0);
+    let mut m = vec![crate::doctor::mechanism("responsibility API", resolves, if resolves { "resolved, answers for this process" } else { "missing or not answering: tracking falls back to parent ids" })];
+    if control {
+        CANNOT_TELL.store(true, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        m.push(crate::doctor::mechanism("disclaim self-check", disclaim, if disclaim { "a disclaimed child is responsible for itself" } else { "a disclaimed child is not responsible for itself: tracking falls back to parent ids" }));
+    }
+    m
 }
 
+/// Set by `doctor_mechanisms` when its disclaim self-check could not tell.
+static CANNOT_TELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(crate) fn doctor_notes() -> Vec<String> {
-    Vec::new()
+    let mut n = Vec::new();
+    if CANNOT_TELL.load(std::sync::atomic::Ordering::SeqCst) {
+        n.push("disclaim self-check: cannot tell (a child spawned without the disclaim is also responsible for itself: the process this doctor was started from has exited). Run sheepdog doctor from a terminal.".to_string());
+    }
+    n
 }
 
 /// `--grants`: can a disclaimed child read ~/Documents? (None: the probe could not run.)
 pub(crate) fn doctor_grant() -> Option<bool> {
-    probe_child("__doctor-grant").and_then(|c| match c {
+    probe_child("__doctor-grant", true).and_then(|c| match c {
         0 => Some(true),
         1 => Some(false),
         _ => None,
@@ -318,11 +332,11 @@ pub(crate) fn doctor_grant() -> Option<bool> {
 }
 
 /// Run this binary with ARG as a disclaimed child; its exit code.
-fn probe_child(arg: &str) -> Option<i32> {
+fn probe_child(arg: &str, disclaim: bool) -> Option<i32> {
     let exe = exe_path(unsafe { libc::getpid() })?;
     let mut mask: libc::sigset_t = unsafe { zeroed() };
     unsafe { libc::sigprocmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask) };
-    let pid = spawn(&[OsString::from(exe), OsString::from(arg)], true, false, &mask).ok()?;
+    let pid = spawn(&[OsString::from(exe), OsString::from(arg)], disclaim, false, &mask).ok()?;
     let mut st = 0;
     (unsafe { libc::waitpid(pid, &mut st, 0) } == pid && libc::WIFEXITED(st)).then(|| libc::WEXITSTATUS(st))
 }

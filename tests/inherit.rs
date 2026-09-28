@@ -283,6 +283,40 @@ fn doctor_reports_what_is_degraded_now() {
     assert!(plain.get("mechanisms").and_then(Json::arr).is_some_and(|a| !a.is_empty()), "{plain:?}");
 }
 
+/// The doctor's disclaim self-check needs a control (D6): a process whose responsible process
+/// died reads as responsible for itself, so a disclaimed probe child proves nothing unless a
+/// child spawned WITHOUT the disclaim is not. A doctor whose responsible process (T) has exited
+/// says it cannot tell (a note, and no "ok" for the check); the control, a doctor under a live
+/// T, reports the check ok.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_doctor_disclaim_check_has_a_control() {
+    let d = scratch("docctl");
+    let check = |j: &Json| -> (Option<bool>, bool) {
+        let ok = j.get("mechanisms").and_then(Json::arr).and_then(|a| a.iter().find(|m| m.get("name").and_then(Json::str) == Some("disclaim self-check"))).and_then(|m| m.get("ok")).and_then(|o| if *o == Json::Bool(true) { Some(true) } else if *o == Json::Bool(false) { Some(false) } else { None });
+        let cannot = j.get("notes").and_then(Json::arr).is_some_and(|a| a.iter().filter_map(Json::str).any(|n| n.starts_with("disclaim self-check: cannot tell")));
+        (ok, cannot)
+    };
+    // control: the doctor is T's tab, T alive
+    let o = Command::new(fixture()).arg("t").arg(d.join("T1")).args([sheepdog(), "doctor", "--json"]).output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let live = json::parse(String::from_utf8_lossy(&o.stdout).trim()).expect("one JSON object");
+    // the doctor starts only after T (its responsible process) has exited
+    let (go, out) = (d.join("go"), d.join("orphan.json"));
+    let tab = format!(r#""$FX" after "{}" "$SD" doctor --json > "{}" 2>/dev/null & exit 0"#, go.display(), out.display());
+    let t = Command::new(fixture()).arg("t").arg(d.join("T2")).args(["/bin/sh", "-c", &tab]).env("FX", fixture()).env("SD", sheepdog()).status().unwrap();
+    assert_eq!(t.code(), Some(0), "T did not run its tab");
+    let tp = std::fs::read_to_string(d.join("T2")).unwrap_or_default().split_whitespace().next().and_then(|p| p.parse::<i32>().ok());
+    assert!(tp.is_some_and(|p| wait_until(5, || unsafe { libc::kill(p, 0) } != 0)), "T is still alive");
+    std::fs::write(&go, b"").unwrap();
+    assert!(wait_until(20, || std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with('\n'))), "the orphaned doctor did not answer");
+    let orphan = json::parse(std::fs::read_to_string(&out).unwrap().trim()).expect("one JSON object");
+    assert_eq!(check(&live), (Some(true), false), "control: {live:?}");
+    let (ok, cannot) = check(&orphan);
+    assert!(cannot && ok != Some(true), "the orphaned doctor reported the check ok: {orphan:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// D10: the start warning fires for a protected folder whose probe fails (the seam's forced
 /// EPERM), not for a plain folder, and not under `--inherit-terminal-permissions`.
 #[cfg(target_os = "macos")]
