@@ -778,6 +778,11 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let tick = crate::tick_ms() as i32;
     let status = loop {
         tracker.refresh(scan());
+        // the caps, on every tick (a cap that fires ends the job as a TERM would, exit 124)
+        let live: Vec<(i32, u64)> = tracker.known.iter().map(|(&p, &id)| (p, id)).collect();
+        if crate::caps::check(&live) {
+            break None;
+        }
         let got: Vec<i32> = if fd >= 0 {
             drain(fd)
         } else {
@@ -810,6 +815,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             break None;
         }
         if let Some(st) = exited {
+            crate::caps::root_ended();
             for s in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
                 if got.contains(&s) {
                     ints.note(s);
@@ -858,7 +864,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         return crate::finish(status, Ok(()), &mut ints, sig);
     }
     // ECHILD is authoritative only when every orphan comes back here (review round 3, F5)
-    let opts = crate::KillOpts::from_env().with_grace(a.grace);
+    let opts = crate::KillOpts::from_env().with_grace(a.grace).with_deadline(a.kill_deadline);
     let initial = tracker.known;
     let result = if is_subreaper {
         kill_tree(&opts, scan, reap, tree_empty, crate::signal, initial)

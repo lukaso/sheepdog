@@ -89,6 +89,14 @@
 //!   process (its environment readable on macOS), records each, and exits. Even children exit
 //!   on TERM after a short delay (i*100 µs), so some members are exiting while the kill runs;
 //!   odd children ignore TERM and die only of SIGKILL. SIGALRM ends each after 60 s at most.
+//! - `alloc MBPS MAX_MB PROGRESS`: PHASE2.md P3 (cell 13). Allocates MBPS MB per second in 20 ms
+//!   steps, writing a varied byte into every page (so resident memory really grows and no
+//!   compressor flattens it), and writes the MB reached so far to PROGRESS; at MAX_MB it stops
+//!   growing and waits (60 s at most).
+//! - `alloc-on-term MB PROGRESS`: P3. Ignores nothing but catches TERM: on TERM it allocates MB at
+//!   once (pages touched), writes MB to PROGRESS, and keeps running (60 s at most).
+//! - `forker N INTERVAL_MS R`: P3 (`--max-procs`). Forks N children, one every INTERVAL_MS, each
+//!   recording itself and waiting (60 s at most); then waits itself.
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
 //!   session) and exits; G records itself and runs `/bin/sleep M`; the root waits for the record
 //!   and exits. G escaped by reparenting only.
@@ -526,6 +534,14 @@ unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETEXEC as i16);
     libc::posix_spawn(std::ptr::null_mut(), path.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), *_NSGetEnviron() as *const *mut libc::c_char);
     libc::_exit(3) // SETEXEC returns only on failure
+}
+
+/// `alloc-on-term`: how much to allocate when TERM comes, and whether it came.
+static ALLOC_ON_TERM_MB: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ALLOC_ON_TERM_GOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn alloc_on_term(_: libc::c_int) {
+    ALLOC_ON_TERM_GOT.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// `swarm`: how long an even child waits after TERM before it exits.
@@ -1033,6 +1049,82 @@ fn main() {
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
         eprintln!("sd-fixture: exec failed: {e}");
         std::process::exit(127);
+    }
+    if mode == "alloc" && a.len() == 5 {
+        let mbps: usize = a[2].parse().unwrap_or_else(|_| usage());
+        let max: usize = a[3].parse().unwrap_or_else(|_| usage());
+        let progress = a[4].clone();
+        unsafe { libc::alarm(60) };
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        let step = (mbps * 1024 * 1024 / 50).max(4096);
+        let mut total = 0usize;
+        let mut seed: u8 = 1;
+        while total < max * 1024 * 1024 {
+            let mut v = vec![0u8; step];
+            for i in (0..step).step_by(4096) {
+                seed = seed.wrapping_mul(31).wrapping_add(7);
+                v[i] = seed;
+            }
+            total += step;
+            held.push(v);
+            let _ = std::fs::write(&progress, format!("{}\n", total / (1024 * 1024)));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+    if mode == "alloc-on-term" && a.len() == 4 {
+        let mb: usize = a[2].parse().unwrap_or_else(|_| usage());
+        ALLOC_ON_TERM_MB.store(mb, std::sync::atomic::Ordering::SeqCst);
+        let p = a[3].as_bytes();
+        unsafe {
+            std::ptr::copy_nonoverlapping(p.as_ptr(), std::ptr::addr_of_mut!(TERM_REC) as *mut u8, p.len().min(511));
+            libc::alarm(60);
+            on(libc::SIGTERM, alloc_on_term as *const () as usize, true);
+            unblock_all();
+        }
+        let _ = std::fs::write(&a[3], "0\n");
+        loop {
+            unsafe { libc::pause() };
+            if ALLOC_ON_TERM_GOT.load(std::sync::atomic::Ordering::SeqCst) {
+                let n = mb * 1024 * 1024;
+                let mut v = vec![0u8; n];
+                let mut seed: u8 = 3;
+                for i in (0..n).step_by(4096) {
+                    seed = seed.wrapping_mul(31).wrapping_add(7);
+                    v[i] = seed;
+                }
+                let _ = std::fs::write(&a[3], format!("{mb}\n"));
+                std::mem::forget(v);
+                ALLOC_ON_TERM_GOT.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+    if mode == "forker" && a.len() == 5 {
+        let n: u32 = a[2].parse().unwrap_or_else(|_| usage());
+        let every: u32 = a[3].parse().unwrap_or_else(|_| usage());
+        unsafe {
+            libc::alarm(60);
+            for _ in 0..n {
+                match libc::fork() {
+                    0 => {
+                        record(&a[4], libc::getpid());
+                        libc::alarm(60);
+                        loop {
+                            libc::pause();
+                        }
+                    }
+                    -1 => std::process::exit(3),
+                    _ => {
+                        libc::usleep(every * 1000);
+                    }
+                }
+            }
+            loop {
+                libc::pause();
+            }
+        }
     }
     if mode == "doublefork" && a.len() == 4 {
         let m = CString::new(a[2].as_str()).unwrap();

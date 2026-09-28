@@ -670,11 +670,13 @@ fn wait(
             if exited.is_none() && libc::waitpid(pid, &mut st, libc::WNOHANG) == pid {
                 exited = Some(st);
             }
-            // the fixed order: TERM, then the root's exit, then INT/HUP
-            if term {
+            // the fixed order: TERM (or a cap that fired on the last scan), then the root's exit,
+            // then INT/HUP
+            if term || crate::caps::triggered() {
                 break None;
             }
             if let Some(status) = exited {
+                crate::caps::root_ended();
                 for (got, s) in [(int, libc::SIGINT), (hup, libc::SIGHUP), (quit, libc::SIGQUIT)] {
                     if got {
                         ints.note(s);
@@ -843,7 +845,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
                 let found = members(&mut t);
                 journal.borrow_mut().record(&found);
                 t.refresh(found);
-                t.known.iter().map(|(&p, &id)| (p, id)).collect()
+                let live: Vec<(pid_t, u64)> = t.known.iter().map(|(&p, &id)| (p, id)).collect();
+                let _ = crate::caps::check(&live); // wait() ends the job when a cap fired
+                live
             };
             let mut ints = crate::Interrupts::new(a, relay);
             let mut ours = |pg: i32| crate::only_ours(&group_pids(pg), relay, &tracker.borrow().known);
@@ -857,7 +861,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             }
             let initial = tracker.borrow().known.clone();
             let result = kill_tree(
-                &crate::KillOpts::from_env().with_grace(a.grace),
+                &crate::KillOpts::from_env().with_grace(a.grace).with_deadline(a.kill_deadline),
                 || {
                     let mut t = tracker.borrow_mut();
                     let found = members(&mut t);

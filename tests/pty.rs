@@ -2384,3 +2384,72 @@ fn no_signal_that_ends_by_default_ends_sheepdog_without_its_kill() {
     }
     assert_eq!(ended, vec![], "(signal, sheepdog survived it, the escapee is gone)");
 }
+
+/// P3: `--timeout` counts running time only. A 2.5 s ctrl-Z inside a 2 s timeout (0.5 s after
+/// the start): the job is ended by the timeout (124) only after it ran 2 s, so no sooner than
+/// 0.5 + 2.5 + 1.5 = 4.5 s after the start (asserted: 4 s); counting the stop would end it at
+/// the `fg`, about 3 s.
+#[test]
+fn a_ctrl_z_does_not_count_against_the_timeout() {
+    let start = std::time::Instant::now();
+    let mut pty = Pty::shell(&[], &run_args(&["--quiet", "--timeout", "2s"], &["/bin/sleep".to_string(), "30".to_string()]));
+    pty.started();
+    std::thread::sleep(Duration::from_millis(500));
+    pty.write(b"\x1a");
+    let stopped = pty.wait_line("stopped", Duration::from_secs(10), |l| l.starts_with("stopped "));
+    std::thread::sleep(Duration::from_millis(2500));
+    fg(&mut pty, 1);
+    let end = pty.outcome(Duration::from_secs(20));
+    let took = start.elapsed();
+    assert!(stopped.is_some(), "the job did not stop");
+    assert_eq!(end, Some("exited 124".to_string()), "the timeout ends the job");
+    assert!(took >= Duration::from_secs(4), "ended after {took:?}: the stopped time was counted");
+    assert!(took < Duration::from_secs(15), "took {took:?}");
+}
+
+/// Cell 21(e) with `--timeout`: in an orphaned group (sheepdog leads its own session, no
+/// terminal) the kernel discards sheepdog's own stop, so a TSTP costs no running time: the 2 s
+/// timeout fires at about 2 s (trigger_at under 2.8 s), not 1 s later for the stop's wait.
+#[test]
+fn cell21e_a_discarded_stop_counts_all_time() {
+    let dir = std::env::temp_dir().join(format!("sd-p3-21e-{}", new_marker()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let status = std::fs::File::create(dir.join("status")).unwrap();
+    let sfd = std::os::fd::AsRawFd::as_raw_fd(&status);
+    let mut c = Command::new(sheepdog());
+    c.args(["run", "--quiet", "--timeout", "2s", "--status-fd", "3", "--", "/bin/sleep", "5"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    unsafe {
+        c.pre_exec(move || {
+            for sig in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM, libc::SIGTSTP, libc::SIGCONT] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            // dup2(3, 3) would keep the fd close-on-exec: then clear the flag instead
+            if sfd == 3 {
+                libc::fcntl(3, libc::F_SETFD, 0);
+            } else {
+                libc::dup2(sfd, 3);
+            }
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut c = c.spawn().unwrap();
+    let id = identity(c.id() as i32).expect("sheepdog's identity");
+    let (root, root_id) = wait_for("the root", Duration::from_secs(15), || child_of(c.id() as i32, "sleep"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(send_group(c.id() as i32, id, libc::SIGTSTP));
+    let st = wait_bounded(&mut c, Duration::from_secs(15));
+    if st.is_none() {
+        common::send_child(&mut c, libc::SIGKILL);
+        let _ = c.wait();
+    }
+    send(root, root_id, libc::SIGKILL);
+    let text = std::fs::read_to_string(dir.join("status")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    let j = common::json::parse(text.trim_end()).expect("a status line");
+    assert_eq!(st.and_then(|s| s.code()), Some(124), "{text}");
+    assert_eq!(j.get("trigger").and_then(common::json::Json::str), Some("timeout"));
+    let at = j.get("trigger_at").and_then(common::json::Json::num).unwrap_or(0.0);
+    assert!((2000.0..2800.0).contains(&at), "the timeout fired at {at} ms: the discarded stop was not counted as running time");
+}
+

@@ -18,6 +18,7 @@
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
 
+mod caps;
 mod journal;
 mod kill;
 mod state;
@@ -62,6 +63,11 @@ pub struct Args {
     pub owner: String,
     /// `--status-fd N`: the status line goes to this fd at the end
     pub status_fd: Option<i32>,
+    /// the caps (PLAN.md §3.4) and the kill deadline (§3.3)
+    pub timeout: Option<Duration>,
+    pub max_mem: Option<u64>,
+    pub max_procs: Option<usize>,
+    pub kill_deadline: Option<Duration>,
 }
 
 /// A duration: "0", "2" (seconds), "2s", "500ms".
@@ -102,7 +108,7 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--grace DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
+    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
     125
 }
 
@@ -119,11 +125,28 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut forward_int_to_root = false;
     let mut owner = "default".to_string();
     let mut status_fd = None;
+    let (mut timeout, mut max_mem, mut max_procs, mut kill_deadline) = (None, None, None, None);
     let mut i = 1;
     while i < sep {
         match args[i].as_bytes() {
             b"--mode" if i + 1 < sep => {
                 mode = Some(args[i + 1].to_string_lossy().into_owned());
+                i += 2;
+            }
+            b"--timeout" if i + 1 < sep => {
+                timeout = Some(parse_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
+                i += 2;
+            }
+            b"--kill-deadline" if i + 1 < sep => {
+                kill_deadline = Some(parse_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
+                i += 2;
+            }
+            b"--max-mem" if i + 1 < sep => {
+                max_mem = Some(caps::parse_size(&args[i + 1].to_string_lossy()).ok_or_else(usage)?);
+                i += 2;
+            }
+            b"--max-procs" if i + 1 < sep => {
+                max_procs = Some(args[i + 1].to_str().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(usage)?);
                 i += 2;
             }
             b"--owner" if i + 1 < sep => {
@@ -158,7 +181,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     if cmd.is_empty() {
         return Err(usage());
     }
-    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd })
+    Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, timeout, max_mem, max_procs, kill_deadline })
 }
 
 /// Exit code for a wait status: the command's code, or 128+signal.
@@ -448,6 +471,16 @@ impl KillOpts {
         self
     }
 
+    /// `--kill-deadline` (the debug seam SHEEPDOG_TEST_DEADLINE_MS still wins in a debug build).
+    pub fn with_deadline(mut self, d: Option<Duration>) -> Self {
+        if let Some(d) = d {
+            if seam_ms("SHEEPDOG_TEST_DEADLINE_MS").is_none() {
+                self.deadline = d;
+            }
+        }
+        self
+    }
+
     pub fn from_env() -> Self {
         KillOpts {
             grace: Duration::ZERO,
@@ -574,6 +607,13 @@ pub fn kill_tree(
     let send = |p: i32, id: u64, sig: c_int| {
         captured.borrow_mut().entry((p, id)).or_insert_with(|| member_info(p));
         send(p, id, sig)
+    };
+    // the caps are evaluated on every scan while the job is being ended, too (a later one is a note)
+    let mut members = members;
+    let members = move || {
+        let f = members();
+        let _ = caps::check(&f);
+        f
     };
     let result = kill_tree_inner(opts, members, reap, tree_empty, send, &known);
     for (&(p, id), (sid, ppid, cmd)) in captured.borrow().iter() {
@@ -1289,7 +1329,12 @@ pub fn self_stop(sig: c_int) {
         libc::sigemptyset(&mut one);
         libc::sigaddset(&mut one, sig);
         libc::raise(sig); // raw signal site: this process (PHASE2.md §0.3)
+        // sheepdog is stopped from the unblock until a CONT: that span does not run the job, so it
+        // does not count against --timeout; a stop the kernel discards (an orphaned group) takes
+        // no time here, so then all time counts
+        let t0 = Instant::now();
         libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
+        caps::exclude(t0.elapsed());
         libc::sigprocmask(libc::SIG_BLOCK, &one, std::ptr::null_mut());
     }
 }
@@ -1302,9 +1347,17 @@ pub fn finish(status: Option<c_int>, result: Result<(), KillError>, ints: &mut I
     ints.drain_pending(sig);
     match status {
         Some(st) => status::set_root(if libc::WIFSIGNALED(st) { "signaled" } else { "exited" }),
-        None => status::set_trigger("term"), // the job was ended by a TERM from outside
+        None if !caps::triggered() => status::set_trigger("term"), // ended by a TERM from outside
+        None => {}
     }
     status::report(status, result.is_ok());
+    // a cap or the timeout ended the job: 124 (below 125, above the command's own code)
+    if status.is_none() && caps::triggered() {
+        return match result {
+            Err(e) => kill_failed(e),
+            Ok(()) => 124,
+        };
+    }
     match (status, result) {
         (_, Err(e)) => kill_failed(e),
         (None, Ok(())) => die_by_term(143),
@@ -1387,6 +1440,7 @@ fn run(argv: Vec<OsString>) -> i32 {
         }
     };
     status::set_quiet(args.quiet);
+    caps::set(args.timeout, args.max_mem, args.max_procs);
     if seam("SHEEPDOG_TEST_PANIC_IN_RUN") {
         panic!("test seam: panic in run");
     }
