@@ -455,15 +455,17 @@ fn s6_another_users_process_is_refused() {
         let _ = c.wait();
     } else {
         let out = Command::new("ps").args(["-Ao", "pid=,uid="]).output().unwrap();
-        let other = String::from_utf8_lossy(&out.stdout)
+        // the first candidate that is still there when its identity is read (a short-lived
+        // process of another user can end between `ps` and the read)
+        let (p, id) = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter_map(|l| {
                 let mut w = l.split_whitespace();
                 Some((w.next()?.parse::<i32>().ok()?, w.next()?.parse::<u32>().ok()?))
             })
-            .find(|&(p, u)| p > 1 && u != me)
-            .expect("no process of another user");
-        let (p, id) = found(other.0).unwrap();
+            .filter(|&(p, u)| p > 1 && u != me)
+            .find_map(|(p, _)| found(p))
+            .expect("no live process of another user");
         refused(&j, p);
         assert!(same(p, id), "the other user's process died");
     }
