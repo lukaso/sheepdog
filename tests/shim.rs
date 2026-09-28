@@ -97,11 +97,14 @@ fn the_root_dies_with_its_supervisor() {
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
     let gone = root.is_some_and(|r| gone_within(r, 5));
+    // the root's /proc state at the verdict, so a failure says what the root was doing
+    let seen = root.map(|r| std::fs::read_to_string(format!("/proc/{}/stat", r.0)).unwrap_or_default());
     if let Some(r) = root {
         common::send(r.0, r.1, libc::SIGKILL);
     }
-    assert!(started && root.is_some());
-    assert!(gone, "the root outlived its SIGKILLed supervisor");
+    assert!(started, "the command never ran");
+    assert!(root.is_some(), "the root was not journaled");
+    assert!(gone, "the root outlived its SIGKILLed supervisor; its stat then: {seen:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 

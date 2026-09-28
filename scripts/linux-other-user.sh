@@ -35,6 +35,7 @@ mkdir -p /tmp/planted && chown sd:sd /tmp/planted
 /bin/setpriv --reuid=sd --regid=sd --clear-groups env SHEEPDOG_TEST_TAG="$LEGTAG" /tgt/debug/sd-fixture sigcount /tmp/planted/decoy &
 i=0; while [ ! -s /tmp/planted/decoy ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done
 dpid=$(cut -d' ' -f1 /tmp/planted/decoy); did=$(cut -d' ' -f2 /tmp/planted/decoy)
+[ -n "$dpid" ] && [ -n "$did" ] || { echo "the planted decoy did not start"; exit 3; }
 sduid=$(id -u sd)
 for which in foreign own; do
   st=/tmp/planted/$which
@@ -62,8 +63,14 @@ sigs=$(cat /tmp/decoy/rec.sig 2>/dev/null | wc -l)
 echo "decoy: state=${st:-gone} signals=$sigs (1 is the control)"
 kill -KILL "$decoy" 2>/dev/null
 # the planted decoy: the control sweep must have ended it; SIGKILL only if it is still that very
-# process (field 22 of its stat, the identity the journal named), never a reused pid
-if [ "$(cut -d')' -f2 /proc/$dpid/stat 2>/dev/null | awk '{print $20}')" = "$did" ]; then
+# process, by the rule of sheepdog's own identity(): the fields after the LAST ')', a zombie is
+# gone, else field 22 (the start time) must be the identity the journal named
+same_decoy() {
+  fields=$(sed 's/.*)//' "/proc/$dpid/stat" 2>/dev/null) || return 1
+  set -- $fields
+  [ $# -ge 20 ] && [ "$1" != Z ] && [ "${20}" = "$did" ]
+}
+if same_decoy; then
   echo "planted decoy: ALIVE (the control sweep did not end it)"; kill -KILL "$dpid"; rc=1
 else
   echo "planted decoy: gone (the control sweep ended it)"
