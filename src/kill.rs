@@ -28,6 +28,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::time::{Duration, Instant};
 
 /// A live (not zombie) process, as the platform lists it.
+#[derive(Clone)]
 pub struct Proc {
     pub pid: i32,
     pub ppid: i32,
@@ -327,6 +328,15 @@ pub fn main(args: &[OsString]) -> i32 {
     // the suspects (PHASE2.md D7): a phase-2 source, none under the phase-1 opt-out
     let procs = os::procs();
     let sus = if crate::seam_flag("SHEEPDOG_TEST_PHASE1") { Vec::new() } else { suspects((t, tid), &set, &procs, &proved.protected) };
+    // what a kill with the suspects would also take: their proved trees (ps lists it)
+    let under: Vec<(i32, u64)> = if sus.is_empty() {
+        Vec::new()
+    } else {
+        let known: HashMap<i32, u64> = sus.iter().map(|((p, id), _)| (*p, *id)).collect();
+        let ever: HashSet<u64> = known.values().copied().collect();
+        let mut s2 = Proved { known, ever, protected: proved.protected.clone() };
+        s2.scan().into_iter().filter(|m| !set.contains(m) && !sus.iter().any(|(x, _)| x == m)).collect()
+    };
     if a.dry_run {
         let ever: HashSet<u64> = set.iter().map(|&(_, id)| id).collect();
         let mut rows: Vec<Row> = set
@@ -363,9 +373,11 @@ pub fn main(args: &[OsString]) -> i32 {
             }
         }
         rows.extend(sus.iter().map(|((p, id), ev)| Row { pid: *p, id: *id, class: "suspect", evidence: ev.clone() }));
+        rows.extend(under.iter().map(|&(p, id)| Row { pid: p, id, class: "suspect", evidence: vec!["under a suspect".into()] }));
         return print_rows(&rows, a.json);
     }
     let mut left = sus.len();
+    let mut sups = sups;
     if a.include_suspects && !sus.is_empty() {
         // the first suspect enters the kill set only after the gate (PHASE2.md §0.1)
         if crate::wall::gate().is_some() {
@@ -374,6 +386,12 @@ pub fn main(args: &[OsString]) -> i32 {
                 proved.ever.insert(*id);
             }
             left = 0;
+            // a supervisor under a suspect is ended first too (its own kill reaches its job)
+            for m in proved.scan() {
+                if is_sheepdog(m.0) && !sups.contains(&m) {
+                    sups.push(m);
+                }
+            }
         }
     }
     let mut opts = KillOpts::from_env().with_grace(a.grace);
@@ -436,7 +454,7 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
         let age = os::start_secs(r.pid).map(|s| now.saturating_sub(s));
         let mem = crate::caps::mem_of(r.pid);
         let cmd = crate::journal::text(os::cmdline(r.pid).join(" ").as_bytes());
-        let name = os::exe_name(r.pid).unwrap_or_else(|| "?".into());
+        let name = clean(&os::exe_name(r.pid).unwrap_or_else(|| "?".into()));
         let line = if json {
             let ev: Vec<String> = r.evidence.iter().map(|e| crate::journal::json_str(e)).collect();
             format!(
@@ -451,7 +469,7 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
             )
         } else {
             let age = age.map_or("?".into(), |a| format!("{a}s"));
-            format!("{}\t{name}\t{}\t{}\t{age}\t{}\t{cmd}", r.pid, r.class, r.evidence.join(","), human(mem))
+            format!("{}\t{name}\t{}\t{}\t{age}\t{}\t{}", r.pid, r.class, clean(&r.evidence.join(",")), human(mem), clean(&cmd))
         };
         // a reader that has gone gives EPIPE (SIGPIPE is blocked): stop quietly, never panic
         if writeln!(std::io::stdout(), "{line}").is_err() {
@@ -477,19 +495,27 @@ pub(crate) fn human(b: u64) -> String {
 /// Each with the links that matched.
 fn suspects(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32, u64)]) -> Vec<((i32, u64), Vec<String>)> {
     let uid = unsafe { libc::getuid() };
+    suspects_with(t, set, procs, protected, uid, |p| is_sheepdog(p) || job_of(p).is_some())
+}
+
+/// The rules of `suspects`, with the uid and "is a sheepdog or a live job's member" given (for
+/// its unit cells). PHASE2.md D9 narrowed PLAN §3.0: orphaned means parent PID 1 (a child of a
+/// sheepdog is its job's); a session or group led by PID 1 is no link (in a container it holds
+/// almost everything); `puniq` is evidence beside a session or group link, never a link alone
+/// (every process under one terminal app shares the responsible process).
+fn suspects_with(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32, u64)], uid: u32, in_a_job: impl Fn(i32) -> bool) -> Vec<((i32, u64), Vec<String>)> {
     let Some(tp) = procs.iter().find(|p| p.pid == t.0 && p.id == t.1) else { return Vec::new() };
     let in_set = |p: &Proc| set.iter().any(|&(q, id)| q == p.pid && id == p.id) || (p.pid == t.0 && p.id == t.1);
     let known: Vec<&Proc> = procs.iter().filter(|p| in_set(p)).collect();
-    let sessions: HashSet<i32> = known.iter().map(|p| p.sid).filter(|&s| s > 0).collect();
-    let groups: HashSet<i32> = known.iter().map(|p| p.pgid).filter(|&g| g > 0).collect();
+    let sessions: HashSet<i32> = known.iter().map(|p| p.sid).filter(|&s| s > 1).collect();
+    let groups: HashSet<i32> = known.iter().map(|p| p.pgid).filter(|&g| g > 1).collect();
     let live: HashSet<u64> = procs.iter().map(|p| p.id).collect();
     let mut out = Vec::new();
     for p in procs {
         if p.uid != uid || p.pid <= 1 || in_set(p) || protected.iter().any(|&(q, id)| q == p.pid && id == p.id) {
             continue;
         }
-        let orphaned = p.ppid == 1 || is_sheepdog(p.ppid);
-        if !orphaned || p.id <= tp.id || is_sheepdog(p.pid) {
+        if p.ppid != 1 || p.id <= tp.id || in_a_job(p.pid) {
             continue;
         }
         let mut ev = Vec::new();
@@ -499,14 +525,67 @@ fn suspects(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32
         if groups.contains(&p.pgid) {
             ev.push("group".to_string());
         }
+        if ev.is_empty() {
+            continue;
+        }
         if p.puniq.is_some_and(|u| u > tp.id && !live.contains(&u)) && p.resp.is_some() && p.resp == tp.resp {
             ev.push("puniq".to_string());
         }
-        if !ev.is_empty() {
-            out.push(((p.pid, p.id), ev));
-        }
+        out.push(((p.pid, p.id), ev));
     }
     out
+}
+
+/// Text for a terminal: every control character (C0, DEL, C1) as `\xHH`, so a process's
+/// command line cannot forge rows or reach the terminal.
+pub(crate) fn clean(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if (ch as u32) < 0x20 || ch == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&ch) {
+            o.push_str(&format!("\\x{:02x}", ch as u32));
+        } else {
+            o.push(ch);
+        }
+    }
+    o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pr(pid: i32, ppid: i32, id: u64, sid: i32, pgid: i32, puniq: Option<u64>, resp: Option<u64>) -> Proc {
+        Proc { pid, ppid, uid: 501, id, puniq, sid, pgid, resp }
+    }
+
+    #[test]
+    fn the_suspect_rules() {
+        let t = pr(100, 50, 1000, 90, 90, Some(900), Some(5));
+        let procs = vec![
+            t.clone(),
+            pr(101, 1, 1001, 90, 90, Some(9999), Some(5)), // a suspect: session and group
+            pr(102, 60, 1002, 90, 90, None, Some(5)),      // parent alive: no orphan
+            pr(103, 1, 999, 90, 90, None, Some(5)),        // started before the target
+            pr(104, 1, 1004, 1, 1, None, Some(5)),         // only PID 1's session and group
+            pr(105, 1, 1005, 77, 77, Some(9998), Some(5)), // only puniq: dead, after, same responsible
+            pr(106, 1, 1006, 90, 90, None, Some(5)),       // a live job's member
+            pr(107, 1, 1007, 90, 91, None, Some(5)),       // session only
+        ];
+        let got = suspects_with((100, 1000), &[], &procs, &[], 501, |p| p == 106);
+        let pids: Vec<i32> = got.iter().map(|((p, _), _)| *p).collect();
+        assert_eq!(pids, vec![101, 107]);
+        assert_eq!(got[0].1, vec!["session", "group", "puniq"]);
+        assert_eq!(got[1].1, vec!["session"]);
+        // a target in PID 1's session links nothing
+        let t1 = pr(200, 50, 2000, 1, 1, None, None);
+        let procs1 = vec![t1, pr(201, 1, 2001, 1, 1, None, None)];
+        assert!(suspects_with((200, 2000), &[], &procs1, &[], 501, |_| false).is_empty());
+    }
+
+    #[test]
+    fn clean_escapes_every_control_character() {
+        assert_eq!(clean("a\nb\tc\u{1b}[2K\u{7f}\u{9b}é"), "a\\x0ab\\x09c\\x1b[2K\\x7f\\x9bé");
+    }
 }
 
 /// The journals of this boot and pid namespace (none without a state).

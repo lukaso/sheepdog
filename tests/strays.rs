@@ -38,7 +38,8 @@ struct Cell {
 
 impl Cell {
     fn new() -> Cell {
-        let word = format!("sdstr{}x{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst));
+        // ends with `z`, so no word is a prefix of another (x1z, x10z)
+        let word = format!("sdstr{}x{}z", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst));
         let dir = std::env::temp_dir().join(&word);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -117,6 +118,20 @@ fn strays(args: &[&str], env: &[(&str, &str)]) -> Out {
     Out { code: o.status.code(), out: String::from_utf8_lossy(&o.stdout).into_owned(), err: String::from_utf8_lossy(&o.stderr).into_owned() }
 }
 
+/// The `--pid PID:ID` arguments that name this cell's rows marked `pid1-child` (a Linux container
+/// whose PID 1 is not an OS init: `--kill` skips them unless named, PHASE2.md D9).
+fn named_if_pid1_child(word: &str) -> Vec<String> {
+    let o = strays(&["--json", "--cmd", word], &[]);
+    let mut v = Vec::new();
+    for j in rows(&o.out).values() {
+        if j.get("pid1_child") == Some(&Json::Bool(true)) {
+            v.push("--pid".to_string());
+            v.push(format!("{}:{}", j.get("pid").and_then(Json::num).unwrap_or(0.0) as i64, j.get("id").and_then(Json::num).unwrap_or(0.0) as u64));
+        }
+    }
+    v
+}
+
 /// `--json` rows by pid.
 fn rows(out: &str) -> HashMap<i32, Json> {
     out.lines().filter_map(|l| json::parse(l).ok()).filter_map(|j| Some((j.get("pid")?.num()? as i32, j))).collect()
@@ -170,13 +185,18 @@ fn strays_kill_needs_a_filter_and_a_yes() {
     a.make(&["stray", "{}", "s"], &["s"]);
     b.make(&["stray", "{}", "s"], &["s"]);
     let none = strays(&["--kill"], &[]);
+    let empty = strays(&["--kill", "--yes", "--cmd", ""], &[]);
+    assert_eq!(empty.code, Some(2), "an empty --cmd is no filter: {}", empty.err);
     let zero = strays(&["--kill", "--min-mem", "0", "--older-than", "0"], &[]);
     let no_yes = strays(&["--kill", "--cmd", &a.word], &[]);
     assert_eq!(none.code, Some(2), "{}", none.err);
     assert_eq!(zero.code, Some(2), "{}", zero.err);
     assert_eq!(no_yes.code, Some(1), "{}", no_yes.err);
     assert!(a.untouched("s"), "a refused --kill signalled the stray");
-    let yes = strays(&["--kill", "--yes", "--cmd", &a.word], &[]);
+    let named = named_if_pid1_child(&a.word);
+    let mut args = vec!["--kill", "--yes", "--cmd", &a.word];
+    args.extend(named.iter().map(String::as_str));
+    let yes = strays(&args, &[]);
     assert_eq!(yes.code, Some(0), "{}", yes.err);
     assert!(wait_until(5, || !a.rec("s").is_some_and(common::alive)), "the matching stray survived");
     assert!(b.untouched("s"), "a stray that does not match was signalled");
@@ -256,7 +276,9 @@ fn strays_skips_a_live_apps_helper() {
 }
 
 /// A stray that is an ancestor of the `strays --kill` that names it (a daemon that runs it) is
-/// refused by `kill`'s target checks, and survives.
+/// refused by `kill`'s target checks, and survives. (macOS: in the Linux legs' containers the
+/// daemon is a child of PID 1, skipped before `kill`'s checks are reached.)
+#[cfg(target_os = "macos")]
 #[test]
 fn strays_kill_refuses_the_callers_ancestor() {
     let _s = serial();
@@ -279,7 +301,10 @@ fn strays_kill_checks_the_identity_it_listed() {
     let _s = serial();
     let mut c = Cell::new();
     c.make(&["stray", "{}", "s"], &["s"]);
-    let o = strays(&["--kill", "--yes", "--cmd", &c.word], &[("SHEEPDOG_TEST_STRAYS_WRONG_ID", "1")]);
+    let named = named_if_pid1_child(&c.word);
+    let mut args = vec!["--kill", "--yes", "--cmd", &c.word];
+    args.extend(named.iter().map(String::as_str));
+    let o = strays(&args, &[("SHEEPDOG_TEST_STRAYS_WRONG_ID", "1")]);
     assert!(c.untouched("s"), "a row whose identity changed was killed: {}", o.err);
     assert_eq!(o.code, Some(1), "{}", o.err);
 }
@@ -292,9 +317,38 @@ fn strays_kill_turns_the_latch_on() {
     let mut c = Cell::new();
     c.make(&["stray", "{}", "s", "bare"], &["s"]);
     let sink = c.path("sink");
-    let o = strays(&["--kill", "--yes", "--cmd", &c.word], &[("SHEEPDOG_TEST_SINK", sink.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
+    let named = named_if_pid1_child(&c.word);
+    let mut args = vec!["--kill", "--yes", "--cmd", &c.word];
+    args.extend(named.iter().map(String::as_str));
+    let o = strays(&args, &[("SHEEPDOG_TEST_SINK", sink.to_str().unwrap()), ("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
     let s = c.rec("s").unwrap();
     let lines = std::fs::read_to_string(&sink).unwrap_or_default();
     assert!(c.untouched("s"), "the untagged stray got {} signal(s): {}", c.signals("s"), o.err);
     assert!(lines.lines().any(|l| l.starts_with("withheld ") && l.split_whitespace().nth(1) == Some(&s.0.to_string())), "{lines:?}");
+}
+
+/// A stray's row shows how many processes its kill would take (its proved tree); a stray whose
+/// tree holds a live `sheepdog run` supervisor is skipped by `--kill` unless named, and named, it
+/// is killed with its tree.
+#[test]
+fn strays_kill_skips_a_tree_that_holds_a_supervisor() {
+    let _s = serial();
+    let mut c = Cell::new();
+    let sd = sheepdog().to_string();
+    let fx = fixture().to_string();
+    let inner = c.path("inner").to_str().unwrap().to_string();
+    c.make(&["stray-run", "{}", "daemon", &sd, "run", "--", &fx, "sigcount", &inner], &["daemon", "daemon.d", "inner"]);
+    assert!(wait_until(15, || c.rec("inner").is_some()), "the inner job did not start");
+    let d = c.rec("daemon.d").unwrap();
+    let l = strays(&["--json", "--cmd", &c.word], &[]);
+    let row = rows(&l.out).remove(&d.0);
+    let tree = row.as_ref().and_then(|r| r.get("tree")).and_then(Json::num).unwrap_or(0.0);
+    let k = strays(&["--kill", "--yes", "--cmd", &c.word], &[]);
+    let kept = common::alive(d) && c.rec("inner").is_some_and(common::alive);
+    let named = strays(&["--kill", "--yes", "--pid", &format!("{}:{}", d.0, d.1), "--cmd", &c.word], &[]);
+    let gone = wait_until(15, || !common::alive(d) && !c.rec("inner").is_some_and(common::alive));
+    assert!(row.is_some(), "the daemon is not listed:\n{}", l.out);
+    assert!(tree >= 2.0, "its tree (the supervisor and the job's root) is not counted: {tree}\n{}", l.out);
+    assert!(kept, "a stray whose tree holds a live supervisor was killed unnamed: {}", k.err);
+    assert!(gone, "control: named, the stray and its tree survived ({:?}): {}", named.code, named.err);
 }

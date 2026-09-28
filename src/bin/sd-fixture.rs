@@ -185,7 +185,22 @@ unsafe fn suspect_tree(dir: &str, untagged: bool) -> ! {
     libc::usleep(30_000);
     if libc::fork() == 0 {
         libc::usleep(30_000);
-        orphan(dir, "g", false, || sigcount_as(dir, "g", untagged));
+        orphan(dir, "g", false, || {
+            if libc::fork() == 0 {
+                // with SD_SUP (a sheepdog): gc is a supervisor whose job's root is `sigcount gc`
+                if let Ok(sd) = std::env::var("SD_SUP") {
+                    let me = std::env::current_exe().unwrap();
+                    let args: Vec<CString> = [sd.as_str(), "run", "--", me.to_str().unwrap(), "sigcount", &format!("{dir}/gc")].iter().map(|s| CString::new(*s).unwrap()).collect();
+                    let mut p: Vec<*const libc::c_char> = args.iter().map(|c| c.as_ptr()).collect();
+                    p.push(std::ptr::null());
+                    libc::execv(args[0].as_ptr(), p.as_ptr());
+                    libc::_exit(127);
+                }
+                sigcount_as(dir, "gc", untagged);
+            }
+            wait_record(dir, "gc");
+            sigcount_as(dir, "g", untagged)
+        });
         orphan(dir, "g2", true, || sigcount_as(dir, "g2", false));
         #[cfg(target_os = "macos")]
         orphan(dir, "g3", true, || disclaim_reexec_args(&["sigcount", &format!("{dir}/g3")]));
@@ -879,7 +894,7 @@ fn main() {
     //   early  an orphan in this session, started before the target (its parent exited);
     //   t      the target; it starts, 30 ms apart (so their start ticks differ on Linux):
     //     g    an orphan that stays in this session (its parent exited) — without its tag with
-    //          `untagged`;
+    //          `untagged`; it keeps a child, `gc` (no orphan: under a suspect);
     //     g2   an orphan in a session of its own (setsid);
     //     g3   (macOS) as g2, but responsible for itself (the disclaim);
     //   n      not an orphan: this leader's child, started after the target;

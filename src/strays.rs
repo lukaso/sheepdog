@@ -29,6 +29,25 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 const REAPERS: [&str; 6] = ["systemd", "tini", "docker-init", "dumb-init", "catatonit", "s6-svscan"];
 
+/// Linux: is PID 1 (by its command name) an OS init, whose adoptees are strays? In a container,
+/// tini, docker-init and the like start the container's own program, so their children are
+/// marked and skipped unless named (PHASE2.md D9).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn pid1_is_os_init(name: &str) -> bool {
+    name == "systemd" || name == "init"
+}
+
+/// Linux: a cgroup file (`/proc/<pid>/cgroup`) that places the process in a systemd service or
+/// in systemd's own scope (`*.service` or `init.scope` leaf, v2 or the v1 name=systemd line): it
+/// is a unit's process, adopted on purpose, never a stray (PHASE2.md D9).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn service_cgroup(text: &str) -> bool {
+    let line = text.lines().find(|l| l.starts_with("0::")).or_else(|| text.lines().find(|l| l.contains(":name=systemd:")));
+    let Some(path) = line.and_then(|l| l.splitn(3, ':').nth(2)) else { return false };
+    let leaf = path.rsplit('/').next().unwrap_or("");
+    leaf.ends_with(".service") || leaf == "init.scope"
+}
+
 struct Args {
     min_mem: u64,
     older_than: Duration,
@@ -107,6 +126,10 @@ struct Row {
     cpu: Option<f64>,
     cmd: String,
     origin: Vec<String>,
+    /// how many processes its kill would take besides itself (its proved tree)
+    tree: usize,
+    /// named with --pid (read before the debug seam changes identities)
+    named: bool,
     /// the running job it belongs to ("j-..." or "sheepdog PID")
     job: Option<String>,
     pid1_child: bool,
@@ -140,11 +163,11 @@ fn scan() -> Vec<Row> {
     let by_pid: HashMap<i32, &crate::kill::Proc> = procs.iter().map(|p| (p.pid, p)).collect();
     let jobs = live_journal_members();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // a child of PID 1 is marked (skipped unless named) unless PID 1 is an OS init: in a
+    // container, tini, docker-init and the like start the container's own program (D9)
     #[cfg(target_os = "linux")]
-    let pid1_app = {
-        let n = os::exe_name(1).unwrap_or_default();
-        !(REAPERS.contains(&n.as_str()) || n == "init" || n == "sheepdog")
-    };
+    let pid1_app = !pid1_is_os_init(&os::comm(1).unwrap_or_default());
+    let protected = crate::kill::protected().unwrap_or_default();
     let me = unsafe { libc::getpid() };
     let mut rows = Vec::new();
     for p in &procs {
@@ -156,8 +179,9 @@ fn scan() -> Vec<Row> {
         let (orphan, pid1_child) = (p.ppid == 1 && p.puniq != Some(1) && !app_helper(p.pid), false);
         #[cfg(target_os = "linux")]
         let (orphan, pid1_child) = {
-            let reaped = p.ppid == 1 || (p.ppid > 1 && os::exe_name(p.ppid).is_some_and(|n| REAPERS.contains(&n.as_str())));
-            (reaped, reaped && p.ppid == 1 && pid1_app)
+            let reaped = p.ppid == 1 || (p.ppid > 1 && os::comm(p.ppid).is_some_and(|n| REAPERS.contains(&n.as_str())));
+            let unit = std::fs::read_to_string(format!("/proc/{}/cgroup", p.pid)).is_ok_and(|t| service_cgroup(&t));
+            (reaped && !unit, reaped && !unit && p.ppid == 1 && pid1_app)
         };
         if !orphan {
             continue;
@@ -184,7 +208,15 @@ fn scan() -> Vec<Row> {
                 None => origin.push(format!("puniq {u} (dead)")),
             }
         }
-        let job = jobs.get(&(p.pid, p.id)).cloned().or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepdog {s}")));
+        // its proved tree: what `kill PID:ID` would take with it
+        let mut t = crate::kill::Proved { known: HashMap::from([(p.pid, p.id)]), ever: std::collections::HashSet::from([p.id]), protected: protected.clone() };
+        let tree_set = t.scan();
+        let sup_in_tree = tree_set.iter().find(|&&(q, _)| q != p.pid && crate::kill::is_sheepdog(q)).map(|&(q, _)| q);
+        let job = jobs
+            .get(&(p.pid, p.id))
+            .cloned()
+            .or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepdog {s}")))
+            .or_else(|| sup_in_tree.map(|s| format!("sheepdog {s} in its tree")));
         rows.push(Row {
             pid: p.pid,
             id: p.id,
@@ -193,6 +225,8 @@ fn scan() -> Vec<Row> {
             cpu: os::cpu_secs(p.pid),
             cmd: crate::journal::text(os::cmdline(p.pid).join(" ").as_bytes()),
             origin,
+            tree: tree_set.len().saturating_sub(1),
+            named: false,
             job,
             pid1_child,
         });
@@ -222,6 +256,10 @@ pub fn main(args: &[OsString]) -> i32 {
         },
         None => None,
     };
+    if a.cmd.as_deref() == Some("") {
+        say!("sheepdog: an empty --cmd matches every command; give a pattern.");
+        return 2;
+    }
     let filtered = a.min_mem > 0 || !a.older_than.is_zero() || re.is_some() || !a.pids.is_empty();
     if a.kill && !filtered {
         say!("sheepdog: --kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.");
@@ -240,6 +278,9 @@ pub fn main(args: &[OsString]) -> i32 {
         .filter(|r| a.pids.is_empty() || a.pids.contains(&(r.pid, r.id)))
         .collect();
     rows.sort_by(|x, y| y.mem.cmp(&x.mem).then(x.pid.cmp(&y.pid)));
+    for r in &mut rows {
+        r.named = a.pids.contains(&(r.pid, r.id));
+    }
     if crate::seam_flag("SHEEPDOG_TEST_STRAYS_WRONG_ID") {
         for r in &mut rows {
             r.id = r.id.wrapping_add(1 << 40);
@@ -268,7 +309,7 @@ pub fn main(args: &[OsString]) -> i32 {
     }
     let mut worst = 0;
     for r in &rows {
-        let named = a.pids.contains(&(r.pid, r.id));
+        let named = r.named;
         if let Some(j) = &r.job {
             if !named {
                 say!("sheepdog: skipping pid {}: it belongs to a running job ({j}); name it with --pid {}:{} to kill it anyway.", r.pid, r.pid, r.id);
@@ -291,7 +332,7 @@ fn print(rows: &[Row], json: bool) {
         let line = if json {
             let origin: Vec<String> = r.origin.iter().map(|o| crate::journal::json_str(o)).collect();
             format!(
-                "{{\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"job\":{},\"pid1_child\":{}}}",
+                "{{\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"tree\":{},\"job\":{},\"pid1_child\":{}}}",
                 r.pid,
                 r.id,
                 r.mem,
@@ -299,11 +340,15 @@ fn print(rows: &[Row], json: bool) {
                 r.cpu.map_or("null".into(), |c| format!("{c:.2}")),
                 crate::journal::json_str(&r.cmd),
                 origin.join(","),
+                r.tree,
                 r.job.as_deref().map_or("null".into(), crate::journal::json_str),
                 r.pid1_child
             )
         } else {
             let mut flags = String::new();
+            if r.tree > 0 {
+                flags.push_str(&format!(" (+{} in its tree)", r.tree));
+            }
             if let Some(j) = &r.job {
                 flags.push_str(&format!(" (job {j}, running)"));
             }
@@ -316,12 +361,36 @@ fn print(rows: &[Row], json: bool) {
                 crate::kill::human(r.mem),
                 r.age.map_or("?".into(), |a| format!("{a}s")),
                 r.cpu.map_or("?".into(), |c| format!("{c:.1}s")),
-                r.cmd,
-                r.origin.join("; ")
+                crate::kill::clean(&r.cmd),
+                crate::kill::clean(&r.origin.join("; "))
             )
         };
         if writeln!(std::io::stdout(), "{line}").is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_an_os_init_as_pid1_makes_its_children_strays() {
+        assert!(pid1_is_os_init("systemd") && pid1_is_os_init("init"));
+        for n in ["docker-init", "tini", "dumb-init", "catatonit", "sh", "sheepdog", ""] {
+            assert!(!pid1_is_os_init(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn a_service_cgroup_is_never_a_stray() {
+        assert!(service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/pipewire.service\n"));
+        assert!(service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n"));
+        assert!(service_cgroup("12:pids:/x\n1:name=systemd:/system.slice/foo.service\n"));
+        assert!(!service_cgroup("0::/user.slice/user-1000.slice/session-3.scope\n"));
+        assert!(!service_cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-terminal-1234.scope\n"));
+        assert!(!service_cgroup("0::/\n"));
+        assert!(!service_cgroup(""));
     }
 }
