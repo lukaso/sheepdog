@@ -555,7 +555,9 @@ fn an_inherit_mode_run_turns_the_latch_on() {
     let d = scratch("latch");
     let (u, sink) = (d.join("u"), d.join("sink"));
     let mut g = Guard { recs: vec![u.clone()], markers: vec![], children: vec![] };
-    let script = format!(r#"/usr/bin/env -i "{}" sigcount "{}" & exit 0"#, fixture(), u.display());
+    // the root exits only after the stray has exec'd the fixture (it records itself then): an
+    // exec after the stray was reparented would reset its puniq, and it would be no member
+    let script = format!(r#"/usr/bin/env -i "{0}" sigcount "{1}" & while [ ! -s "{1}" ]; do sleep 0.01; done; exit 0"#, fixture(), u.display());
     let tr = d.join("T");
     let mut c = Command::new(fixture());
     c.arg("t").arg(&tr).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null());

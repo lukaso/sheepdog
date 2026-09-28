@@ -180,10 +180,19 @@ pub struct Args {
 }
 
 /// A duration: `500ms`, or a number (fractions allowed) with `s`, `m`, `h`, `d` or no unit
-/// (seconds), at most 365 days. Anything else, including a sign, an exponent, `inf` and `NaN`,
-/// is None (a usage error; `Duration::from_secs_f64` would panic on some of them).
+/// (seconds), at most one day (a grace, a kill deadline). Anything else, including a sign, an
+/// exponent, `inf` and `NaN`, is None (a usage error; `Duration::from_secs_f64` would panic on
+/// some of them).
 fn parse_duration(s: &str) -> Option<Duration> {
-    const MAX: Duration = Duration::from_secs(365 * 86_400);
+    parse_duration_max(s, Duration::from_secs(86_400))
+}
+
+/// A duration of a job's own length (`--timeout`, `strays --older-than`): at most 365 days.
+fn parse_long_duration(s: &str) -> Option<Duration> {
+    parse_duration_max(s, Duration::from_secs(365 * 86_400))
+}
+
+fn parse_duration_max(s: &str, max: Duration) -> Option<Duration> {
     let d = if let Some(ms) = s.strip_suffix("ms") {
         Duration::from_millis(ms.parse().ok()?)
     } else {
@@ -199,12 +208,12 @@ fn parse_duration(s: &str) -> Option<Duration> {
             return None;
         }
         let secs = n.parse::<f64>().ok()? * unit;
-        if !(0.0..=MAX.as_secs_f64()).contains(&secs) {
+        if !(0.0..=max.as_secs_f64()).contains(&secs) {
             return None;
         }
         Duration::from_secs_f64(secs)
     };
-    (d <= MAX).then_some(d)
+    (d <= max).then_some(d)
 }
 
 /// Arguments as C strings, byte for byte (non-UTF-8 arguments pass unchanged). An argument
@@ -257,7 +266,7 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
                 i += 2;
             }
             b"--timeout" if i + 1 < sep => {
-                timeout = Some(parse_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
+                timeout = Some(parse_long_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
                 i += 2;
             }
             b"--kill-deadline" if i + 1 < sep => {
@@ -1687,12 +1696,15 @@ mod tests {
         assert_eq!(d("5m"), Some(Duration::from_secs(300)));
         assert_eq!(d("1.5m"), Some(Duration::from_secs(90)));
         assert_eq!(d("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(d("2d"), Some(Duration::from_secs(2 * 86_400)));
+        assert_eq!(d("1d"), Some(Duration::from_secs(86_400)));
         assert_eq!(d("0"), Some(Duration::ZERO));
-        assert_eq!(d("365d"), Some(Duration::from_secs(365 * 86_400)));
-        for bad in ["", "5x", "m", "-1s", "-5m", "1e999s", "nan", "inf", "366d", "5 m", "5mm", "1.5ms"] {
+        for bad in ["", "5x", "m", "-1s", "-5m", "1e999s", "nan", "inf", "5 m", "5mm", "1.5ms", "86401", "2d"] {
             assert_eq!(d(bad), None, "{bad:?} was accepted");
         }
+        // a job's own length (--timeout, --older-than) may be up to 365 days
+        assert_eq!(parse_long_duration("2d"), Some(Duration::from_secs(2 * 86_400)));
+        assert_eq!(parse_long_duration("365d"), Some(Duration::from_secs(365 * 86_400)));
+        assert_eq!(parse_long_duration("366d"), None);
     }
 
     /// S4 review (A-P1-1, round 2 A-P2-2): the hint names only sheepdog's own group, and

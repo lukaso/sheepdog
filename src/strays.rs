@@ -16,7 +16,7 @@
 use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
-use crate::{parse_duration, say};
+use crate::{parse_long_duration, say};
 use sheepdog::ident::same;
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
@@ -97,7 +97,7 @@ fn parse(args: &[OsString]) -> Option<Args> {
                 i += 1;
             }
             b"--older-than" => {
-                a.older_than = parse_duration(&val(i)?)?;
+                a.older_than = parse_long_duration(&val(i)?)?;
                 i += 1;
             }
             b"--cmd" => {
