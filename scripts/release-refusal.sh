@@ -31,5 +31,12 @@ env -i PATH=/usr/bin:/bin HOME="$tmp/home" SHEEPDOG_TEST_TAG=0123456789abcdef012
 rc=$?
 echo "doctor probe: rc=$rc (want 125)"
 [ "$rc" = 125 ] || ok=1
+# control: without the tag the probe entry is reached and reads the (temporary) Documents: 0
+# (an entry that did not exist would be a usage error, 2)
+mkdir -p "$tmp/home/Documents"
+env -i PATH=/usr/bin:/bin HOME="$tmp/home" "$b" __doctor-grant </dev/null
+rc=$?
+echo "doctor probe control: rc=$rc (want 0)"
+[ "$rc" = 0 ] || ok=1
 rm -rf "$tmp"
 exit $ok
