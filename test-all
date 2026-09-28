@@ -22,6 +22,8 @@
 #   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
 #                signal
 #   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
+#   hardened     the macOS suite against a sheepdog signed ad hoc with the hardened runtime (the
+#                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
 #                the commit override, the npm launcher; PHASE3.md §3)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
@@ -34,7 +36,7 @@ cd "$(dirname "$0")"
 ROOT=$PWD
 # the pinned images (PHASE3.md D7): the same as the release build
 . scripts/release.conf || exit 3
-ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle"
+ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened"
 [ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
@@ -263,6 +265,23 @@ leg_bundle() {
     && record bundle PASS || record bundle "FAIL ($LOGDIR/bundle.log)"
 }
 
+leg_hardened() {
+  [ "$(uname -s)" = Darwin ] || { record hardened "skipped (not macOS)"; return; }
+  local ev="$LOGDIR/hardened.flags" lt left tagged; : > "$ev"
+  lt=$(legtag)
+  SHEEPDOG_LEG_TAG=$lt bg_wait env SD_TEST_HARDENED="$ev" timeout -k 30 5400 cargo test --no-fail-fast > "$LOGDIR/hardened.log" 2>&1
+  local rc=$?
+  # the same leftover checks as the macos leg
+  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
+  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPDOG_TEST_TA[G]=$lt")
+  # the evidence: one line per test binary, each with the runtime flag
+  local n bins
+  n=$(grep -c 'runtime' "$ev"); bins=$(grep -c . "$ev")
+  bins_run=$(grep -c '^     Running ' "$LOGDIR/hardened.log")
+  if [ $rc = 0 ] && [ "$n" -gt 0 ] && [ "$n" = "$bins" ] && [ "$bins" = "$bins_run" ] && [ "$left" -eq 0 ] && [ "$tagged" -eq 0 ]; then record hardened PASS
+  else record hardened "FAIL (rc $rc; $n of $bins signed runs had the runtime flag; $bins_run test binaries; leftovers $left, tagged $tagged; $LOGDIR/hardened.log)"; fi
+}
+
 leg_tcc() {
   cat <<'TXT'
 The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
@@ -278,7 +297,7 @@ for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
-    release) leg_release ;; bundle) leg_bundle ;; tcc) leg_tcc ;;
+    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done

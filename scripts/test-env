@@ -2,8 +2,20 @@
 # The cargo runner (.cargo/config.toml, PHASE2.md §0.4). A test binary (one in a `deps`
 # directory) runs under `sd-fixture test-env`, which sets the test environment and checks the
 # canary and the withheld sink after it; anything else (`cargo run`) runs unchanged.
+#
+# SD_TEST_HARDENED=FILE (macOS; the `hardened` leg, PHASE3.md S1): before each test binary, sign
+# the debug sheepdog ad hoc with the hardened runtime and the .dev ID (cargo relinks it on every
+# `cargo test`, so it is signed here, after the build), and append its signature flags to FILE,
+# the leg's evidence that every test binary ran against a hardened-runtime sheepdog.
 d=$(dirname "$1")
 [ "$(basename "$d")" = deps ] || exec "$@"
 f=$(dirname "$d")/sd-fixture
 [ -x "$f" ] || { echo "sd-test-env: $f is missing (build the fixture first)" >&2; exit 125; }
+if [ -n "${SD_TEST_HARDENED:-}" ]; then
+  s=$(dirname "$d")/sheepdog
+  /usr/bin/codesign -s - -f -o runtime -i com.lukaso.sheepdog.dev "$s" 2>/dev/null \
+    || { echo "sd-test-env: cannot sign $s with the hardened runtime" >&2; exit 125; }
+  flags=$(/usr/bin/codesign -d -v "$s" 2>&1 | sed -n 's/.*flags=[^(]*(\([^)]*\)).*/\1/p')
+  echo "$(basename "$1") $flags" >> "$SD_TEST_HARDENED"
+fi
 exec "$f" test-env "$@"
