@@ -336,9 +336,10 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
             libc::close(er[0]);
         }
         say!("sheepdog: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
-        // phase 1's posix_spawnp reported a spawn without resources (EAGAIN, ENOMEM) as 126; any
-        // other failure is sheepdog's own (it cannot run its own binary)
-        return Err(if rc == libc::EAGAIN || rc == libc::ENOMEM { 126 } else { 125 });
+        // phase 1's posix_spawnp reported a spawn without resources (EAGAIN, ENOMEM) or with too
+        // long arguments (E2BIG) as 126; any other failure is sheepdog's own (it cannot run its
+        // own binary)
+        return Err(if rc == libc::EAGAIN || rc == libc::ENOMEM || rc == libc::E2BIG { 126 } else { 125 });
     }
     // the handshake: the shim is running, is this protocol, and holds its PDEATHSIG and parent
     // (5 s: a cold start under an emulator)

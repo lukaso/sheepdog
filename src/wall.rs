@@ -60,6 +60,14 @@ pub fn gate() -> Option<Token> {
     t
 }
 
+/// The latch, with the debug seam SHEEPDOG_TEST_LATCH=1 applied (in one place, for every reader).
+fn latched() -> bool {
+    if crate::seam_flag("SHEEPDOG_TEST_LATCH") {
+        LATCH.set();
+    }
+    LATCH.on()
+}
+
 fn own_tag() -> Option<&'static str> {
     static TAG: OnceLock<Option<String>> = OnceLock::new();
     TAG.get_or_init(|| std::env::var("SHEEPDOG_TEST_TAG").ok().filter(|t| !t.is_empty())).as_deref()
@@ -134,15 +142,22 @@ fn verdict_for(pid: i32, id: u64, tag: &str) -> TagVerdict {
 /// undoes this supervisor's own STOP), but a rollback that reaches a process without the tag
 /// means that STOP breached the wall, so it is reported to the sink and the test run goes red.
 pub fn rollback_tripwire(pid: i32, id: u64) {
-    if !cfg!(debug_assertions) || !LATCH.on() {
+    if !cfg!(debug_assertions) || !latched() {
         return;
     }
     let v = match own_tag() {
         Some(tag) => verdict_for(pid, id, tag),
         None => TagVerdict::Withheld,
     };
-    if matches!(v, TagVerdict::Withheld | TagVerdict::Unreadable) {
-        let line = format!("rollback-untagged {pid} {}", libc::SIGCONT);
+    // an unreadable process (an Apple platform binary) may carry the tag or not: it is reported
+    // under its own word, and still turns the run red (a breach cannot be ruled out)
+    let word = match v {
+        TagVerdict::Withheld => "rollback-untagged",
+        TagVerdict::Unreadable => "rollback-unreadable",
+        _ => return,
+    };
+    {
+        let line = format!("{word} {pid} {}", libc::SIGCONT);
         crate::trace(line.clone());
         if let Ok(p) = std::env::var("SHEEPDOG_TEST_SINK") {
             crate::trace_to(std::path::Path::new(&p), &line);
@@ -156,10 +171,7 @@ pub fn admit(pid: i32, id: u64, sig: c_int) -> bool {
     if !cfg!(debug_assertions) {
         return true;
     }
-    if crate::seam_flag("SHEEPDOG_TEST_LATCH") {
-        LATCH.set();
-    }
-    if !LATCH.on() {
+    if !latched() {
         return true;
     }
     let v = match own_tag() {
