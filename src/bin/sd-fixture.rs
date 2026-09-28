@@ -544,7 +544,6 @@ fn parent_is_sheepdog() -> bool {
 
 /// Re-exec this fixture as `mode M R` with the responsibility disclaim (macOS), so the new
 /// image is responsible for itself.
-#[cfg(target_os = "macos")]
 /// Re-exec this fixture with the responsibility disclaim, with these arguments.
 #[cfg(target_os = "macos")]
 unsafe fn disclaim_reexec_args(rest: &[&str]) -> ! {
@@ -574,6 +573,7 @@ unsafe fn disclaim_reexec_args(rest: &[&str]) -> ! {
     libc::_exit(3)
 }
 
+#[cfg(target_os = "macos")]
 unsafe fn disclaim_reexec(mode: &str, m: &str, r: &str) -> ! {
     type Disclaim = unsafe extern "C" fn(*mut libc::posix_spawnattr_t, libc::c_int) -> libc::c_int;
     extern "C" {
