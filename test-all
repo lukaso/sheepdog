@@ -7,9 +7,9 @@
 #
 # Legs:
 #   macos        the suite on this Mac (macOS only)
-#   alpine       the suite in rust:1-alpine (arm64 on this host), privileged, plus the pid-reuse
+#   alpine       the suite in the pinned Alpine image, scripts/release.conf (arm64 on this host), privileged, plus the pid-reuse
 #                race cell; the pidfd probe must use pidfds
-#   debian       the suite in rust:1-slim, privileged, plus the pid-reuse race cell
+#   debian       the suite in the pinned slim image, privileged, plus the pid-reuse race cell
 #   amd64        the suite in an emulated amd64 Alpine (image tag sd-amd64-alpine; user space
 #                only, the same arm64 kernel: it does NOT test another kernel)
 #   pid1         sheepdog as PID 1 of a container: TERM exits 143 (the kernel ignores raise for
@@ -32,6 +32,8 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
+# the pinned images (PHASE3.md D7): the same as the release build
+. scripts/release.conf || exit 3
 ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle"
 [ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
 LEGS="${*:-$ALL}"
@@ -113,33 +115,35 @@ leg_macos() {
 }
 
 leg_alpine() {
-  suite_in rust:1-alpine target-linux alpine --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+  suite_in "$SD_IMG_ALPINE" target-linux alpine --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
     && record alpine PASS || record alpine "FAIL ($LOGDIR/alpine.log)"
 }
 
 leg_debian() {
-  suite_in rust:1-slim target-linux-gnu debian --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+  suite_in "$SD_IMG_SLIM" target-linux-gnu debian --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
     && record debian PASS || record debian "FAIL ($LOGDIR/debian.log)"
 }
 
 leg_amd64() {
-  if ! timeout 60 docker image inspect sd-amd64-alpine >/dev/null 2>&1; then
+  # tagged by the pinned base's digest, so a new pin builds a new image
+  local img="sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+  if ! timeout 60 docker image inspect "$img" >/dev/null 2>&1; then
     # the Dockerfile goes in a file, never through stdin: bg_wait runs its command in the
     # background, where a non-interactive bash gives it /dev/null as stdin (and a pipe into
     # bg_wait would run it in a subshell, out of cleanup's reach)
     mkdir -p "$LOGDIR/amd64-context"
-    printf 'FROM --platform=linux/amd64 rust:1-alpine\nRUN apk add -q procps bash util-linux-misc\n' > "$LOGDIR/amd64.Dockerfile"
-    bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t sd-amd64-alpine -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
+    printf 'FROM --platform=linux/amd64 %s\nRUN apk add -q procps bash util-linux-misc\n' "$SD_IMG_ALPINE" > "$LOGDIR/amd64.Dockerfile"
+    bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t "$img" -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
       > "$LOGDIR/amd64-image.log" 2>&1 \
       || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
   fi
-  suite_in sd-amd64-alpine target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
+  suite_in "$img" target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
     && record amd64 PASS || record amd64 "FAIL ($LOGDIR/amd64.log)"
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
-  leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh -c \
+  leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SD_IMG_ALPINE" sh -c \
     'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins'
 }
 
@@ -148,7 +152,7 @@ build_alpine() {
 # cleanup's *.cid glob covers even if the interrupt comes before the caller records it)
 start_job() { # extra docker args...
   local cf="$LOGDIR/job-$RANDOM$RANDOM.cid"
-  timeout 60 docker run -d --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro rust:1-alpine \
+  timeout 60 docker run -d --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" \
     /tgt/debug/sheepdog run --quiet -- /tgt/debug/sd-fixture ticker 29.1 /tmp/r
 }
 
@@ -228,7 +232,7 @@ leg_init() {
 leg_enosys() {
   local prof="$LOGDIR/seccomp-enosys.json"
   echo '{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["pidfd_open"],"action":"SCMP_ACT_ERRNO","errnoRet":38}]}' > "$prof"
-  suite_in rust:1-alpine target-linux enosys --security-opt "seccomp=$prof" -e SD_LEG_PROBE=kill \
+  suite_in "$SD_IMG_ALPINE" target-linux enosys --security-opt "seccomp=$prof" -e SD_LEG_PROBE=kill \
     && record enosys PASS || record enosys "FAIL ($LOGDIR/enosys.log)"
 }
 
@@ -236,7 +240,7 @@ leg_sh1() {
   build_alpine || { record sh1 "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
   # no --init: the script's shell is PID 1 (the shape under test)
   rm -f "$LOGDIR/sh1.cid"
-  bg_wait timeout -k 30 600 docker run --rm --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro rust:1-alpine sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
+  bg_wait timeout -k 30 600 docker run --rm --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/sh1.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/sh1.cid")" >/dev/null 2>&1
   [ $rc -eq 0 ] && record sh1 PASS || record sh1 "FAIL ($LOGDIR/sh1.log)"
@@ -245,7 +249,7 @@ leg_sh1() {
 leg_other_user() {
   # --init: the script's shell must not be PID 1 (BusyBox `timeout` execs the command, so a test
   # binary would be a child of PID 1, which a cell that needs an ancestor above it refuses)
-  leg_run other-user -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt rust:1-alpine sh /src/scripts/linux-other-user.sh \
+  leg_run other-user -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SD_IMG_ALPINE" sh /src/scripts/linux-other-user.sh \
     && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
 }
 

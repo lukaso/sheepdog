@@ -1,0 +1,4 @@
+# One Rust version for every build: the Mac, the Linux legs and the release (PHASE3.md D7).
+# No targets line: it would make rustup download inside the offline release build.
+[toolchain]
+channel = "1.98.1"
