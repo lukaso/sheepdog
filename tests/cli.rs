@@ -243,8 +243,9 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
     // SIGPIPE, which is correct); ignore it explicitly so the write returns EPIPE instead
     use std::os::unix::process::CommandExt;
     let st = unsafe {
+        // a `run` usage error (125; a non-subcommand is 2 since PLAN §10.5, P9)
         Command::new(sheepdog())
-            .arg("bogus")
+            .args(["run", "--bogus", "--", "/usr/bin/true"])
             .stderr(stderr)
             .pre_exec(|| {
                 libc::signal(libc::SIGPIPE, libc::SIG_IGN);

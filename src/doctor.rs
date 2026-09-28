@@ -20,6 +20,8 @@ pub(crate) struct Mechanism {
     detail: String,
 }
 
+pub(crate) const USAGE: &str = "sheepdog doctor [--json] [--grants]";
+
 pub fn main(args: &[OsString]) -> i32 {
     let (mut json, mut grants) = (false, false);
     for a in args {
@@ -27,7 +29,7 @@ pub fn main(args: &[OsString]) -> i32 {
             b"--json" => json = true,
             b"--grants" => grants = true,
             _ => {
-                say!("usage: sheepdog doctor [--json] [--grants]");
+                say!("usage: {USAGE}");
                 return 2;
             }
         }
@@ -50,7 +52,7 @@ pub fn main(args: &[OsString]) -> i32 {
             None => "null".into(),
         };
         format!(
-            "{{\"version\":{},\"platform\":{},\"mechanisms\":[{}],\"degraded\":[{}],\"notes\":[{}],\"journals\":{},\"grant_documents\":{}}}",
+            "{{\"v\":1,\"version\":{},\"platform\":{},\"mechanisms\":[{}],\"degraded\":[{}],\"notes\":[{}],\"journals\":{},\"grant_documents\":{}}}",
             esc(env!("CARGO_PKG_VERSION")),
             esc(std::env::consts::OS),
             ms.join(","),

@@ -217,6 +217,11 @@ pub fn cwd(pid: pid_t) -> Option<String> {
     Some(p.to_string_lossy().into_owned()).filter(|s| !s.is_empty())
 }
 
+/// Is the responsibility API resolved and answering for this process (for `--version`)?
+pub(crate) fn spi_active() -> bool {
+    sym::<Disclaim>("responsibility_spawnattrs_setdisclaim").is_some() && resp_uniq(unsafe { libc::getpid() }).is_some()
+}
+
 /// D10 (PLAN.md §4.4): when the cwd or an argument that names an existing path is under a
 /// privacy-protected folder that this (disclaimed) process cannot read, say how to fix it, once.
 /// Debug seam SHEEPDOG_TEST_TCC_PROTECTED=<dir>: that dir counts as protected and its probe fails.

@@ -58,9 +58,12 @@ struct Args {
     json: bool,
 }
 
+pub(crate) const USAGE_KILL: &str = "sheepdog kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID";
+pub(crate) const USAGE_PS: &str = "sheepdog ps [--json] PID | PID:ID | j-JOBID";
+
 fn usage() -> i32 {
-    say!("usage: sheepdog kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID");
-    say!("       sheepdog ps [--json] PID | PID:ID | j-JOBID");
+    say!("usage: {USAGE_KILL}");
+    say!("       {USAGE_PS}");
     2
 }
 
@@ -464,7 +467,7 @@ fn print_rows(rows: &[Row], json: bool) -> i32 {
         let line = if json {
             let ev: Vec<String> = r.evidence.iter().map(|e| crate::journal::json_str(e)).collect();
             format!(
-                "{{\"pid\":{},\"id\":{},\"class\":\"{}\",\"evidence\":[{}],\"age_s\":{},\"mem\":{},\"cmd\":{}}}",
+                "{{\"v\":1,\"pid\":{},\"id\":{},\"class\":\"{}\",\"evidence\":[{}],\"age_s\":{},\"mem\":{},\"cmd\":{}}}",
                 r.pid,
                 r.id,
                 r.class,

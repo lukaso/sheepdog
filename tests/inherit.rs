@@ -314,7 +314,8 @@ fn the_privacy_warning_fires_only_for_a_refused_protected_folder() {
 fn version_prints_the_build_version() {
     let o = Command::new(sheepdog()).arg("--version").output().unwrap();
     assert_eq!(o.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), format!("sheepdog {}", env!("CARGO_PKG_VERSION")));
+    let line = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    assert!(line == format!("sheepdog {}", env!("CARGO_PKG_VERSION")) || line.starts_with(&format!("sheepdog {} ", env!("CARGO_PKG_VERSION"))), "{line}");
 }
 
 /// Linux: `--inherit-terminal-permissions` is accepted and changes nothing (a stray still dies).

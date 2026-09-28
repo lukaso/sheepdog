@@ -46,10 +46,79 @@ use std::time::{Duration, Instant};
 /// panic must never unwind out of the C `main`).
 macro_rules! say {
     ($($t:tt)*) => {{
-        let _ = writeln!(std::io::stderr(), $($t)*);
+        let __m = format!($($t)*);
+        crate::remember_say(&__m);
+        let _ = writeln!(std::io::stderr(), "{}", __m);
     }};
 }
 pub(crate) use say;
+
+/// The last message `say!` wrote (for a JSON error, PLAN.md §10.5).
+fn last_say() -> &'static std::sync::Mutex<String> {
+    static L: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(String::new()))
+}
+
+pub(crate) fn remember_say(m: &str) {
+    if let Ok(mut l) = last_say().lock() {
+        *l = m.to_string();
+    }
+}
+
+/// The help screen (PLAN.md §10.5): examples first.
+const HELP: &str = "sheepdog: run a command and make sure every process it starts is gone at the end,
+including processes that escaped with setsid, double-forks or reparenting.
+
+  sheepdog run --timeout 5m -- npm test        stop the whole tree after 5 minutes
+  sheepdog run --max-mem 2G -- python3 job.py  stop it if the tree uses more than 2 GB
+  sheepdog strays                              list leaked processes of yours, biggest first
+  sheepdog kill 4242                           kill 4242 and the processes it provably started
+                                               (see first: sheepdog ps 4242)
+
+To stop a running job, send TERM to sheepdog. Exit 124 means a limit fired.
+Commands: run, kill, strays, ps, sweep, doctor. `sheepdog help <command>` for details.";
+
+const USAGE_RUN: &str = "sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--inherit-terminal-permissions] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]";
+
+/// `sheepdog help <command>`: that command's usage (one home: each module's own text).
+fn help(cmd: Option<&OsString>) -> i32 {
+    let (what, usage) = match cmd.map(|c| c.as_bytes()) {
+        None => {
+            let _ = writeln!(std::io::stdout(), "{HELP}");
+            return 0;
+        }
+        Some(b"run") => ("run a command; when it ends, end every process it started", USAGE_RUN),
+        Some(b"kill") => ("kill a process and the processes it provably started", kill::USAGE_KILL),
+        Some(b"ps") => ("list what `kill` would kill, and why (it signals nothing)", kill::USAGE_PS),
+        Some(b"strays") => ("list your leaked processes, biggest first; --kill kills the matching ones", strays::USAGE),
+        Some(b"sweep") => ("end the processes of your dead jobs, from their journals", sweep::USAGE),
+        Some(b"doctor") => ("which mechanisms work on this machine, and what is degraded", doctor::USAGE),
+        Some(_) => {
+            say!("sheepdog: no such command. Commands: run, kill, strays, ps, sweep, doctor.");
+            return 2;
+        }
+    };
+    let _ = writeln!(std::io::stdout(), "{what}\n\nusage: {usage}");
+    0
+}
+
+/// `--json` errors (PLAN.md §10.5): a command given `--json` that ends with a non-zero code
+/// writes one line `{"v":1,"error":{"code","message","fix"}}` to stdout.
+fn json_error(sub: &str, args: &[OsString], code: i32) -> i32 {
+    if code == 0 || !args.iter().any(|a| a.as_bytes() == b"--json") {
+        return code;
+    }
+    let (name, fix) = match code {
+        2 => ("usage", format!("sheepdog help {sub}")),
+        1 => ("refused", String::new()),
+        125 => ("deadline", "sheepdog ps to see what is left; sheepdog sweep to end a dead job's processes".to_string()),
+        _ => ("failed", String::new()),
+    };
+    let message = last_say().lock().map(|m| m.clone()).unwrap_or_default();
+    let j = journal::json_str;
+    let _ = writeln!(std::io::stdout(), "{{\"v\":1,\"error\":{{\"code\":{},\"message\":{},\"fix\":{}}}}}", j(name), j(&message), j(&fix));
+    code
+}
 
 pub struct Args {
     /// argv exactly as received (raw bytes), for the macOS self re-exec
@@ -119,7 +188,7 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
 }
 
 fn usage() -> i32 {
-    say!("usage: sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--inherit-terminal-permissions] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]");
+    say!("usage: {USAGE_RUN}");
     125
 }
 
@@ -1459,24 +1528,33 @@ pub fn deadline_missed(alive: &[i32]) -> i32 {
 }
 
 fn run(argv: Vec<OsString>) -> i32 {
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"--version") {
-        let _ = writeln!(std::io::stdout(), "sheepdog {}", env!("CARGO_PKG_VERSION"));
-        return 0;
-    }
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"doctor") {
-        return doctor::main(&argv[2..]);
-    }
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"kill") {
-        return kill::main(&argv[2..]);
-    }
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"strays") {
-        return strays::main(&argv[2..]);
-    }
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"ps") {
-        return kill::ps(&argv[2..]);
-    }
-    if argv.get(1).map(|a| a.as_bytes()) == Some(b"sweep") {
-        return sweep::main(&argv[2..]);
+    let rest = argv.get(2..).unwrap_or(&[]);
+    match argv.get(1).map(|a| a.as_bytes()) {
+        None => {
+            say!("{HELP}");
+            return 2;
+        }
+        Some(b"--help" | b"-h") => return help(None),
+        Some(b"help") => return help(argv.get(2)),
+        Some(b"--version") => {
+            #[cfg(target_os = "macos")]
+            let api = if macos::spi_active() { ", responsibility API: active" } else { ", responsibility API: MISSING" };
+            #[cfg(target_os = "linux")]
+            let api = "";
+            let _ = writeln!(std::io::stdout(), "sheepdog {} ({}, {}{api})", env!("CARGO_PKG_VERSION"), env!("SHEEPDOG_COMMIT"), std::env::consts::OS);
+            return 0;
+        }
+        Some(b"doctor") => return json_error("doctor", rest, doctor::main(rest)),
+        Some(b"kill") => return json_error("kill", rest, kill::main(rest)),
+        Some(b"strays") => return json_error("strays", rest, strays::main(rest)),
+        Some(b"ps") => return json_error("ps", rest, kill::ps(rest)),
+        Some(b"sweep") => return json_error("sweep", rest, sweep::main(rest)),
+        Some(b"run") => {}
+        Some(_) => {
+            let typed: Vec<String> = argv[1..].iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
+            say!("sheepdog: '{}' is not a sheepdog command. To run it under sheepdog: sheepdog run -- {}", typed[0], typed.join(" "));
+            return 2;
+        }
     }
     status::start();
     // read --status-fd before the rest, so a usage error elsewhere still gets its status line

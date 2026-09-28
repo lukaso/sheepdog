@@ -420,6 +420,8 @@ pub fn folder(state: &Path) -> Option<PathBuf> {
     Some(state.join("jobs").join(format!("{}-{}", crate::journal::boot_id()?, crate::journal::pidns())))
 }
 
+pub(crate) const USAGE: &str = "sheepdog sweep [--owner NAME]";
+
 pub fn main(args: &[OsString]) -> i32 {
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
@@ -438,7 +440,7 @@ pub fn main(args: &[OsString]) -> i32 {
                 i += 2;
             }
             _ => {
-                say!("usage: sheepdog sweep [--owner NAME]");
+                say!("usage: {USAGE}");
                 return 2;
             }
         }

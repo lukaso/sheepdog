@@ -79,8 +79,10 @@ struct Args {
     yes: bool,
 }
 
+pub(crate) const USAGE: &str = "sheepdog strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]";
+
 fn usage() -> i32 {
-    say!("usage: sheepdog strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]");
+    say!("usage: {USAGE}");
     2
 }
 
@@ -377,7 +379,7 @@ fn print(rows: &[Row], json: bool) {
         let line = if json {
             let origin: Vec<String> = r.origin.iter().map(|o| crate::journal::json_str(o)).collect();
             format!(
-                "{{\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"tree\":{},\"job\":{},\"pid1_child\":{},\"app_scope\":{}}}",
+                "{{\"v\":1,\"pid\":{},\"id\":{},\"mem\":{},\"age_s\":{},\"cpu_s\":{},\"cmd\":{},\"origin\":[{}],\"tree\":{},\"job\":{},\"pid1_child\":{},\"app_scope\":{}}}",
                 r.pid,
                 r.id,
                 r.mem,
