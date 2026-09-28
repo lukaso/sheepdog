@@ -1589,7 +1589,14 @@ fn run(argv: Vec<OsString>) -> i32 {
         Some(b"run") => {}
         Some(_) => {
             let typed: Vec<String> = argv[1..].iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
-            say!("sheepdog: '{}' is not a sheepdog command. To run it under sheepdog: sheepdog run -- {}", typed[0], typed.join(" "));
+            // options (or `--`) first: they are run's, so `run` goes in front of them as typed
+            let fix = if typed[0].starts_with('-') {
+                let tail = if typed.iter().any(|t| t == "--") { "" } else { " -- COMMAND" };
+                format!("sheepdog run {}{tail}", typed.join(" "))
+            } else {
+                format!("sheepdog run -- {}", typed.join(" "))
+            };
+            fail!("sheepdog: '{}' is not a sheepdog command. To run it under sheepdog: {fix}", typed[0]);
             return 2;
         }
     }

@@ -142,3 +142,21 @@ fn the_json_error_message_is_the_error_line() {
     let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
     assert!(m.starts_with("usage: sheepdog kill"), "message: {m:?}");
 }
+
+/// A call that starts with `--` or an option is a usage error whose fix puts `run` in front
+/// and keeps what was typed runnable: `sheepdog -- /usr/bin/true` suggests
+/// `sheepdog run -- /usr/bin/true` (never `run -- --`), and the suggestion, run, works.
+#[test]
+fn a_flag_first_call_suggests_a_fix_that_runs() {
+    for (typed, fix) in [
+        (&["--", "/usr/bin/true"][..], "sheepdog run -- /usr/bin/true"),
+        (&["--timeout", "5m", "--", "/usr/bin/true"][..], "sheepdog run --timeout 5m -- /usr/bin/true"),
+    ] {
+        let o = sd(typed);
+        assert_eq!(o.code, Some(2), "{typed:?}");
+        let line = o.err.lines().find(|l| l.contains("sheepdog run")).unwrap_or_else(|| panic!("{typed:?}: no fix:\n{}", o.err));
+        assert!(line.ends_with(fix), "{typed:?}: {line}");
+        let args: Vec<&str> = fix.split(' ').skip(1).collect();
+        assert_eq!(sd(&args).code, Some(0), "the suggested fix does not run: {fix}");
+    }
+}
