@@ -1,0 +1,16 @@
+# The exec door's fixtures (PHASE3.md §1.1). One per line: name, the door's verdict, install.sh's
+# verdict (S3). allow = the door runs it; refuse = it never runs. Built by tests/dist/lib.sh.
+dev_bundle	allow	refuse
+dev_bare	allow	refuse
+plain_unsigned	allow	refuse
+rel_adhoc_bundle	refuse	refuse
+rel_adhoc_bare	refuse	refuse
+rel_adhoc_copy	refuse	refuse
+rel_adhoc_hardlink	refuse	refuse
+rel_adhoc_symlink	refuse	refuse
+rel_bundle_linker_signed	refuse	refuse
+rel_bundle_unsigned	refuse	refuse
+rel_embedded_plist	refuse	refuse
+rel_bundle_symlink	refuse	refuse
+rel_bundle_linker_symlink	refuse	refuse
+rel_bundle_bad_plist	refuse	refuse
