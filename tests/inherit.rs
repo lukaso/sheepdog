@@ -486,6 +486,30 @@ fn a_blocked_privacy_probe_does_not_hold_the_start() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Under the phase-1 opt-out every phase-2 source is disabled outright (PHASE2 §0.1), and
+/// inherit mode is one (D1): an inherit-mode run then refuses (125) and runs nothing; the
+/// control, the same run without the opt-out, runs its command. Both run under T.
+#[cfg(target_os = "macos")]
+#[test]
+fn inherit_mode_refuses_under_the_phase1_opt_out() {
+    let d = scratch("inhp1");
+    let go = |name: &str, phase1: bool| -> (Option<i32>, bool) {
+        let ran = d.join(format!("ran-{name}"));
+        let mut c = Command::new(fixture());
+        c.arg("t").arg(d.join(format!("T-{name}"))).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/usr/bin/touch", ran.to_str().unwrap()]).stdin(Stdio::null()).stderr(Stdio::null());
+        if phase1 {
+            c.env("SHEEPDOG_TEST_PHASE1", "1");
+        }
+        let code = c.status().unwrap().code();
+        (code, ran.exists())
+    };
+    let (code, ran) = go("p1", true);
+    let (ccode, cran) = go("ctl", false);
+    assert_eq!((code, ran), (Some(125), false), "inherit mode ran under the phase-1 opt-out");
+    assert_eq!((ccode, cran), (Some(0), true), "control");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// `--version` prints this build's version.
 #[test]
 fn version_prints_the_build_version() {

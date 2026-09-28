@@ -1057,8 +1057,13 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             crate::status::set_tracking(if ok { "responsibility" } else { "puniq" });
             if a.inherit {
                 // a phase-2 source (PHASE2.md D1): the job is tracked by `puniq` and ever-seen
-                // facts only, so the test wall's latch comes on (a no-op in a release build)
-                let _ = crate::wall::gate();
+                // facts only, so the test wall's latch comes on (a no-op in a release build);
+                // under the phase-1 opt-out the source is disabled outright: nothing starts
+                if crate::wall::gate().is_none() {
+                    crate::fail!("sheepdog: --inherit-terminal-permissions is disabled in this test environment (SHEEPDOG_TEST_PHASE1). Nothing was run.");
+                    crate::status::set_error("inherit mode disabled");
+                    return 125;
+                }
                 if !a.quiet {
                     say!("sheepdog: --inherit-terminal-permissions: this job keeps your terminal's privacy permissions, so tracking falls back to parent ids (fast-escaping processes can be missed).");
                 }
