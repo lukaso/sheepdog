@@ -463,7 +463,7 @@ fn the_journal_lineage_never_reaches_the_caller() {
     assert_eq!(code, "1", "refused");
     // for this reason: the journaled subtree holds E (a failed ancestor walk is also exit 1)
     let err = std::fs::read_to_string(format!("{}.err", rc.display())).unwrap_or_default();
-    assert!(err.contains(&format!("journaled subtree holds pid {} ", e.0)), "the refusal is not the lineage refusal for pid {}: {err}", e.0);
+    assert!(err.contains(&format!("journaled subtree holds pid {},", e.0)), "the refusal is not the lineage refusal for pid {}: {err}", e.0);
     assert!(e_alive && !e_stopped, "the kill signalled its own caller");
     assert!(w_alive, "a refused kill signalled the target");
     let _ = std::fs::remove_dir_all(&d);
