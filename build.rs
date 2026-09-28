@@ -3,8 +3,7 @@
 // inside another repository, whose HEAD is not this crate's). The watched files come from git
 // itself: in a worktree `.git` is a file, and HEAD and the refs live elsewhere. Only this
 // checkout's HEAD and its branch's ref are watched (a commit in another worktree, or a fetch,
-// does not rebuild this one); a branch ref that is packed has no file yet, and a missing watched
-// file makes cargo rebuild every time until it exists (correct, only more work).
+// does not rebuild this one, unless its branch is packed: then the branch's directory is watched).
 use std::path::{Path, PathBuf};
 
 fn git(args: &[&str]) -> Option<String> {
@@ -39,7 +38,11 @@ fn main() {
         // the branch HEAD names (none when detached: then HEAD itself changes on a commit)
         let reftable = cd.join("reftable").exists();
         if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]).filter(|_| !reftable) {
-            println!("cargo:rerun-if-changed={}", cd.join(r).display());
+            // a packed branch has no loose file until its next commit writes one: watch the
+            // directory that file will appear in (a missing watched file rebuilds every time)
+            let f = cd.join(r);
+            let w = if f.exists() { f.clone() } else { f.parent().map_or(f.clone(), Path::to_path_buf) };
+            println!("cargo:rerun-if-changed={}", w.display());
         }
         // packed refs, and the reftable backend (its refs are all under reftable/)
         for f in ["packed-refs", "reftable"] {
