@@ -4,11 +4,16 @@
 # a decoy password is in the caller's environment. The end state of a dry signing run is the
 # door's refusal of the bundle the shim "signed" (the real /usr/bin/codesign sees it unsigned):
 # sign.sh exits 5 at the --version step and nothing runs. Checked:
-#   - the order: announce, profile check, sign, requirement, submit, staple, the dialog question;
-#   - notarytool only with --keychain-profile sheepdog-notary, never a password, key or Apple ID;
+#   - the order: announce, lock, unlock (the notary keychain's password), profile check, sign,
+#     requirement, submit, staple, and the notary keychain locked again at the end;
+#   - notarytool only with --keychain-profile sheepdog-notary and --keychain <the notary keychain
+#     file under HOME>, never a password, key or Apple ID; no other tool gets a keychain path;
+#   - a failed unlock stops the build before any notarytool call, and the keychain is locked; a
+#     missing notary keychain stops it before any keychain call; a rejection unlocks again before
+#     the log fetch;
 #   - each tool's environment is the named list, and the decoy reaches no tool, output or file;
 #   - the requirement comparison passes the real Developer ID output and refuses a changed marker;
-#   - the control mode (--no-notarize) makes no notarytool call and asks nothing;
+#   - the control mode (--no-notarize) makes no notarytool call and no keychain lock or unlock;
 #   - the guard: a direct call with a `security` that reports an identity, or with a forged
 #     --real nonce, is refused (3) and no signing tool runs;
 #   - the release-ID bundle lives only under /private/tmp/sd-sign.* and is gone afterwards.
@@ -39,18 +44,23 @@ shim codesign 'case "$*" in
 esac; exit 0'
 shim xcrun 'case "$*" in
   *"notarytool history"*) echo "Successfully received submission history." ;;
-  *"notarytool submit"*) echo "{\"id\":\"00000000-0000-0000-0000-000000000000\",\"status\":\"Accepted\"}" ;;
+  *"notarytool submit"*) if [ -e "'"$FX"'/reject" ]; then echo "{\"id\":\"11111111-0000-0000-0000-000000000000\",\"status\":\"Invalid\"}"; exit 1; fi
+    echo "{\"id\":\"00000000-0000-0000-0000-000000000000\",\"status\":\"Accepted\"}" ;;
 esac; exit 0'
 shim spctl 'exit 0'
 shim ditto 'for a; do last=$a; done; : > "$last"; exit 0'
-shim security 'case "$*" in *find-identity*) echo "     0 valid identities found" ;; esac; exit 0'
+shim security 'case "$*" in *find-identity*) echo "     0 valid identities found" ;;
+  unlock-keychain*) [ -e "'"$FX"'/unlock.fail" ] && { echo "security: SecKeychainUnlock: The user name or passphrase you entered is not correct." >&2; exit 51; } ;;
+esac; exit 0'
+KC=$FX/home/Library/Keychains/sheepdog-notary.keychain-db
+mkdir -p "${KC%/*}"; : > "$KC"
 
 run() { # name args... -> rc; output in $FX/out.<name>
   nm=$1; shift
-  rm -f "$S/calls" "$S"/env.* "$FX/ask.rec"; printf 'yes\nyes\n' > "$FX/ask.in"
+  rm -f "$S/calls" "$S"/env.*
   mkdir -p "$FX/dest.$nm"
   env HOME="$FX/home" PATH="$S:$PATH" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" CSC_KEY_PASSWORD="$DECOY" GH_TOKEN="$DECOY" NPM_TOKEN="$DECOY" \
-    SD_ASK_SCRIPT="$FX/ask.in" SD_ASK_RECORD="$S/calls" \
+    SD_ASK_RECORD="$S/calls" \
     sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.$nm" "$@" \
     > "$FX/out.$nm" 2>&1
 }
@@ -63,12 +73,14 @@ grep -q 'notarytool history' "$S/calls" && grep -q 'notarytool submit' "$S/calls
   && pass "profile check, submit, staple called" || fail "calls: $(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 seq=$(grep -n -e 'notarytool history' -e '--force' -e 'notarytool submit' -e 'stapler staple' "$S/calls" | cut -d: -f1 | tr '\n' ' ')
 [ "$seq" = "$(printf '%s\n' $seq | sort -n | tr '\n' ' ')" ] && [ "$(echo $seq | wc -w | tr -d ' ')" = 4 ] && pass "the order: profile, sign, submit, staple" || fail "the order: $seq"
-[ "$(grep -c '^ask ' "$S/calls" 2>/dev/null)" = 1 ] && pass "the dialog question asked once" || fail "the dialog question: $(grep -c '^ask ' "$S/calls" 2>/dev/null) reads"
-seq=$(grep -n -e '^announce' -e 'notarytool history' -e 'notarytool submit' -e '^ask ' -e 'stapler staple' "$S/calls" | cut -d: -f2 | cut -c1-20 | tr '\n' '|')
-case $seq in 'announce|xcrun notarytool his|xcrun notarytool sub|ask sign|xcrun stapler staple|') pass "the order: announce, profile check, submit, the question, then staple" ;; *) fail "the order: $seq" ;; esac
-grep notarytool "$S/calls" | grep -v -q -- '--keychain-profile sheepdog-notary' && fail "a notarytool call without the profile" || pass "every notarytool call uses the profile"
+kcl() { grep -n -e '^announce' -e '^security lock-keychain' -e '^security unlock-keychain' -e 'notarytool' "$S/calls" | cut -d: -f2- | sed -e 's/^security \([a-z-]*\) .*/\1/' -e 's/^xcrun notarytool \([a-z]*\) .*/\1/' | tr '\n' '|'; }
+seq=$(kcl)
+[ "$seq" = "announce|lock-keychain|unlock-keychain|history|submit|lock-keychain|" ] && pass "the order: announce, lock, unlock, profile check, submit, lock at the end" || fail "the keychain order: $seq"
+[ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] && pass "the last call locks the notary keychain" || fail "the last call: $(tail -1 "$S/calls")"
+grep notarytool "$S/calls" | grep -v -q -- "--keychain-profile sheepdog-notary --keychain $KC\( \|\$\)" && fail "a notarytool call without the profile and the notary keychain" || pass "every notarytool call uses the profile in the notary keychain"
 grep notarytool "$S/calls" | grep -q -e '--password' -e '--apple-id' -e '--key ' -e '--key-id' -e '--issuer' && fail "notarytool got a credential argument" || pass "notarytool got no credential argument"
-grep -q -e '--keychain ' -e 'Library/Keychains' "$S/calls" && fail "a tool got a keychain path" || pass "no tool got a keychain path"
+other=$(grep -e '--keychain ' -e 'Library/Keychains' "$S/calls" | grep -v -e "^xcrun notarytool .* --keychain $KC" -e "^security lock-keychain $KC\$" -e "^security unlock-keychain $KC\$")
+[ -z "$other" ] && pass "no other call got a keychain path" || fail "other keychain paths: $other"
 bad=""
 for f in "$S"/env.*; do
   [ -f "$f" ] || continue
@@ -87,7 +99,21 @@ ls "$FX/dest.n" | grep -q Sheepdog.app && fail "a bundle was left in the output"
 run c --no-notarize; rc=$?
 [ $rc = 5 ] && pass "control run ends at the door's refusal (5)" || fail "control run: rc=$rc $(tail -2 "$FX/out.c" | tr '\n' ' ')"
 grep -q notarytool "$S/calls" && fail "the control mode called notarytool" || pass "the control mode calls no notarytool"
-! grep -q -e '^ask ' -e '^announce' "$S/calls" && pass "the control mode announces and asks nothing" || fail "the control mode announced or asked"
+! grep -q -e '^announce' -e '^security lock-keychain' -e '^security unlock-keychain' "$S/calls" && pass "the control mode announces nothing and touches no keychain" || fail "the control mode announced or touched a keychain: $(grep -e announce -e keychain "$S/calls" | tr '\n' ';')"
+
+# 2b. a failed unlock (a wrong password): stops before any notarytool call; the keychain is locked
+: > "$FX/unlock.fail"; run u; rc=$?; rm -f "$FX/unlock.fail"
+[ $rc = 1 ] && ! grep -q notarytool "$S/calls" && ! grep -q -e '^codesign' "$S/calls" && [ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] && grep -q -i 'password' "$FX/out.u" \
+  && pass "a failed unlock: stopped (1) before notarytool and signing, the keychain locked, the password named" || fail "failed unlock: rc=$rc calls=$(tr '\n' ';' < "$S/calls")"
+# 2c. no notary keychain: stops before any keychain call, names D2
+mv "$KC" "$KC.away"; run m; rc=$?; mv "$KC.away" "$KC"
+[ $rc = 1 ] && ! grep -q -e 'keychain' -e notarytool -e '^codesign' "$S/calls" 2>/dev/null && grep -q 'D2' "$FX/out.m" \
+  && pass "no notary keychain: stopped (1) before any keychain or signing call, D2 named" || fail "missing keychain: rc=$rc $(tail -1 "$FX/out.m") calls=$(tr '\n' ';' < "$S/calls" 2>/dev/null)"
+# 2d. Apple rejects it: unlocked again before the log fetch, locked at the end
+: > "$FX/reject"; run j; rc=$?; rm -f "$FX/reject"
+seq=$(kcl)
+[ $rc = 1 ] && [ "$seq" = "announce|lock-keychain|unlock-keychain|history|submit|unlock-keychain|log|lock-keychain|" ] \
+  && pass "a rejection: unlocked again before the log fetch, locked at the end" || fail "rejection: rc=$rc $seq"
 
 # 3. the requirement comparison refuses a changed marker (a copy of sign.sh's library dir with a
 #    release.conf whose requirement lacks one Developer ID marker)
@@ -102,7 +128,7 @@ SIGN=$SIGN_SAVE
 # 4. the guard. (a) A real HOME (the key and the real login keychain in reach), everything else
 # the same: refused (3) before any signing tool, whatever the security shim says.
 rm -f "$S/calls" "$S"/env.*
-env PATH="$S:$PATH" SD_ASK_SCRIPT="$FX/ask.in" SD_ASK_RECORD="$S/calls" \
+env PATH="$S:$PATH" SD_ASK_RECORD="$S/calls" \
   sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.g1" > "$FX/out.g1" 2>&1; rc=$?
 [ $rc = 3 ] && ! grep -q -e '^codesign' -e '^xcrun' "$S/calls" 2>/dev/null && pass "a real HOME: refused (3), no signing tool ran" || fail "real HOME: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 # (b) the real mode's parent: sign.sh must be a direct child of `release.sh build --sign`, in any of

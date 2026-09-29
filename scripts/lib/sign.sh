@@ -15,13 +15,15 @@
 #     path) finds exactly 0 signing identities and does not list the real login keychain (an empty
 #     or failed answer refuses), and codesign/xcrun/spctl/ditto are not the system's; otherwise
 #     refused.
-# Then: announce the keychain dialogs (notarizing only); the profile check; the bundle with the
-# release ID, built only under /private/tmp and deleted on any failure; codesign with the hardened
-# runtime; the signed requirement must equal the release requirement (csreq's canonical form);
-# verify; the runtime flag; submit (--keychain-profile only), staple; ask whether the announced
-# dialogs appeared (No stops); spctl and stapler validate; --version through the exec door names
-# the commit; the archive. The control mode (--no-notarize) signs and checks only: no profile
-# check, no dialogs, no submission, no staple.
+# Then (notarizing only): the notary keychain, $HOME/$SD_NOTARY_KEYCHAIN, must exist; announce the
+# password prompt; lock it, then `security unlock-keychain` asks for its password in the terminal
+# (a failure stops before any notarytool call); from here every exit locks it again; the profile
+# check. Then: the bundle with the release ID, built only under /private/tmp and deleted on any
+# failure; codesign with the hardened runtime; the signed requirement must equal the release
+# requirement (csreq's canonical form); verify; the runtime flag; submit (the profile in the notary
+# keychain only), staple (on a rejection, unlock again, then the log fetch); spctl and stapler
+# validate; --version through the exec door names the commit; the archive. The control mode
+# (--no-notarize) signs and checks only: no keychain, no profile check, no submission, no staple.
 #
 # Every tool gets only HOME, PATH, TMPDIR, USER, LOGNAME (and DEVELOPER_DIR if set).
 # Exit: 0 done; 1 a step failed; 2 usage; 3 refused by the guard; 5 the exec door refused the
@@ -62,7 +64,7 @@ if [ -n "$nonce" ] || [ -n "$nfile" ] || [ -n "$ppid" ]; then
   pargs=$(/bin/ps -o args= -p "$PPID" 2>/dev/null)
   case $pargs in *"release.sh build"*" --sign"*) ;; *) guard "not called by release.sh build --sign (parent: $pargs)" ;; esac
   # the real tools only: a shim first on PATH must not answer for codesign or notarytool
-  for t in codesign:/usr/bin/codesign xcrun:/usr/bin/xcrun spctl:/usr/sbin/spctl ditto:/usr/bin/ditto; do
+  for t in codesign:/usr/bin/codesign xcrun:/usr/bin/xcrun spctl:/usr/sbin/spctl ditto:/usr/bin/ditto security:/usr/bin/security; do
     [ "$(command -v "${t%%:*}" 2>/dev/null)" = "${t#*:}" ] || guard "real mode with a non-system ${t%%:*} on PATH ($(command -v "${t%%:*}" 2>/dev/null))"
   done
 else
@@ -75,7 +77,7 @@ else
   case $kl in *"$rh/Library/Keychains/login.keychain"*) guard "the real login keychain is in reach (dry runs need a temp HOME)" ;; esac
   ids=$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null) || guard "cannot count the signing identities"
   printf '%s\n' "$ids" | /usr/bin/grep -q '^ *0 valid identities found$' || guard "a signing identity is in reach"
-  for t in codesign xcrun spctl ditto; do
+  for t in codesign xcrun spctl ditto security; do
     p=$(command -v "$t" 2>/dev/null)
     case $p in ''|/usr/bin/*|/bin/*|/usr/sbin/*|/sbin/*) guard "dry mode with the system's $t on PATH ($p)" ;; esac
   done
@@ -85,25 +87,24 @@ fi
 mkdir -p "$dest" || die "cannot make $dest"
 # named, trapped, then made: a signal at any point finds a trap that knows the dir
 tmp=/private/tmp/sd-sign.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
-trap 'rm -rf "$tmp"' EXIT
-trap 'rm -rf "$tmp"; exit 1' HUP INT TERM
+# kc is set (notarizing) only once the keychain is locked; from then on every exit locks it again
+kc=""
+relock() { [ -n "$kc" ] && tool security lock-keychain "$kc"; }
+trap 'relock; rm -rf "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
 mkdir -m 700 "$tmp" || die "cannot make $tmp"
-
-ask() { # question -> 0 on "yes"
-  if [ $real = yes ]; then
-    printf '%s ' "$1" > /dev/tty; IFS= read -r a < /dev/tty || return 1
-  else
-    n=$(grep -c '^ask ' "${SD_ASK_RECORD:-/dev/null}" 2>/dev/null); n=${n:-0}
-    a=$(sed -n "$((n + 1))p" "${SD_ASK_SCRIPT:-/dev/null}")
-    echo "ask $1 -> $a" >> "${SD_ASK_RECORD:-/dev/null}"
-  fi
-  [ "$a" = yes ]
-}
+# `security unlock-keychain` with no -p asks for the password in the terminal (never read here)
+unlock() { tool security unlock-keychain "$kc" || die "the notary keychain was not unlocked (a wrong password, or the prompt cancelled): nothing was sent to Apple"; }
 
 if [ $notarize = yes ]; then
-  echo "sign: expect keychain dialogs, in this order: (1) the profile check, (2) the submission, and (3) the log fetch only if Apple rejects it. Answer each at the screen; never click Always Allow."
+  k=$HOME/$SD_NOTARY_KEYCHAIN
+  [ -f "$k" ] || die "no notary keychain at $k: do PHASE3.md D2 step 3 first"
+  echo "sign: security will ask for the password of the sheepdog-notary keychain (its own password, not your login password). It is locked again when this build ends."
   [ $real = no ] && echo "announce" >> "${SD_ASK_RECORD:-/dev/null}"
-  if ! tool xcrun notarytool history --keychain-profile sheepdog-notary > "$dest/notary-profile.txt" 2>&1; then
+  tool security lock-keychain "$k" || die "cannot lock the notary keychain $k"
+  kc=$k
+  unlock
+  if ! tool xcrun notarytool history --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-profile.txt" 2>&1; then
     die "the profile check failed; see $dest/notary-profile.txt (a Deny, a missing profile, or no network: until the operator records each outcome, it is not told apart)"
   fi
 fi
@@ -119,15 +120,15 @@ tool codesign -d -v "$app" 2>&1 | grep -q 'flags=.*runtime' || die "the hardened
 if [ $notarize = yes ]; then
   tool ditto -c -k --keepParent "$app" "$tmp/submit.zip" || die "ditto"
   # the reply is kept even when notarytool fails (it may exit non-zero on a rejection)
-  res=$(tool xcrun notarytool submit "$tmp/submit.zip" --keychain-profile sheepdog-notary --wait --output-format json 2>&1)
+  res=$(tool xcrun notarytool submit "$tmp/submit.zip" --keychain-profile sheepdog-notary --keychain "$kc" --wait --output-format json 2>&1)
   printf '%s\n' "$res" > "$dest/notary-submit.json"
   case $res in
     *'"status":"Accepted"'*|*'"status": "Accepted"'*) ;;
     *) id=$(printf '%s' "$res" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')
-       [ -n "$id" ] && tool xcrun notarytool log "$id" --keychain-profile sheepdog-notary > "$dest/notary-log.json" 2>&1
+       # the keychain may have locked itself during --wait (5 minutes idle)
+       [ -n "$id" ] && unlock && tool xcrun notarytool log "$id" --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-log.json" 2>&1
        die "Apple did not accept it; see $dest/notary-log.json" ;;
   esac
-  ask "sign: did the keychain dialogs appear, as announced? (yes/no)" || die "the dialogs were not confirmed: redo PHASE3.md D2 step 3 (Confirm before allowing access)"
   tool xcrun stapler staple "$app" || die "stapler staple"
   tool spctl --assess --type execute "$app" || die "spctl rejects the bundle"
   tool xcrun stapler validate "$app" || die "stapler validate"

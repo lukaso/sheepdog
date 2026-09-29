@@ -17,7 +17,7 @@
 # `build --sign` and `publish` refuse under the test environment (any SHEEPDOG_TEST_* variable) and
 # without a terminal (stdin and /dev/tty), and read the typed tag from /dev/tty. That is a guard
 # against mistakes only: a pty passes it (PHASE3.md §1.2). The gate against an unattended Apple
-# submission is the keychain dialog (D2 step 3).
+# submission is the notary keychain's own password, asked for by sign.sh's unlock (D2 step 3).
 #
 # Exit codes: 0 done; 1 a check failed or a step failed; 2 usage; 3 refused in a test environment;
 # 4 refused without a terminal (or the typed tag did not match).
