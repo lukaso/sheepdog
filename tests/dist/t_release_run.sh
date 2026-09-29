@@ -48,19 +48,26 @@ refused "strays --cmd -- --kill" strays --cmd -- --kill
 refused "strays --cmd -- --kill --yes" strays --cmd -- --kill --yes
 refused "strays --older-than 1h --cmd -- --kill" strays --older-than 1h --cmd -- --kill
 o=$(out run -- sh -c 'x --kill'); [ $? = 0 ] && pass "control: --kill after run -- is the job's" || fail "run -- ... --kill refused"
-# the real home comes from the account database, not $HOME
+# HOME-DIR rules, in dry mode (SD_RELEASE_RUN_DRY=1 stops after the checks, before any mkdir,
+# so even a broken rule writes nothing), with HOME set to a temp dir. Each rule has its own exit
+# code: 4 = the real home or inside it, 5 = holds the real home, 3 = not under a temp root.
 realhome=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')
 [ -d "$realhome" ] || realhome=$(eval echo "~$(id -un)")
-for hd in "$realhome" "$realhome/Library" "$(dirname "$realhome")"; do
+up=$(printf %s "$realhome" | tr '[:lower:]' '[:upper:]')
+snap() { ls -A "$realhome" "$realhome/Library" 2>/dev/null | cksum; }
+before=$(snap)
+dry() { # want-rc home-dir label
   rec="$FX/rec"; : > "$rec"
-  HOME="$FX/home" SD_EXEC_RECORD="$rec" "$H" "$hd" "$FX/probe" doctor >/dev/null 2>&1; rc=$?
-  [ $rc != 0 ] && [ "$(grep -c . "$rec")" = 0 ] && pass "HOME-DIR $hd refused with HOME=temp" || fail "HOME-DIR $hd accepted with HOME=temp"
-done
-refused "an unknown subcommand" frobnicate
-rec="$FX/rec"; : > "$rec"
-SD_EXEC_RECORD="$rec" "$H" "$HOME" "$FX/probe" run -- true >/dev/null 2>&1; rc=$?
-[ $rc != 0 ] && [ "$(grep -c . "$rec")" = 0 ] && pass "HOME-DIR = the real home refused" || fail "the real home accepted as HOME-DIR"
-# control: the recording seam sees an allowed call
-: > "$rec"; SD_EXEC_RECORD="$rec" "$H" "$FX/home" "$FX/probe" doctor >/dev/null 2>&1
-[ "$(grep -c . "$rec")" = 1 ] && pass "control: an allowed call is recorded" || fail "control: allowed call not recorded"
+  HOME="$FX/home" SD_RELEASE_RUN_DRY=1 SD_EXEC_RECORD="$rec" "$H" "$2" "$FX/probe" doctor >/dev/null 2>&1; rc=$?
+  [ "$rc" = "$1" ] && [ "$(grep -c . "$rec")" = 0 ] && pass "$3: refused ($rc)" || fail "$3: rc=$rc, want $1"
+}
+dry 4 "$realhome" "the real home"
+dry 4 "$realhome/Library" "inside the real home"
+[ -d "$up/Library" ] && dry 4 "$up/Library" "inside the real home, upper-case spelling"
+[ -d "/System/Volumes/Data$realhome/Library" ] && dry 4 "/System/Volumes/Data$realhome/Library" "inside the real home, the data-volume spelling"
+dry 5 / "the root, which holds the real home"
+dry 5 "$(dirname "$realhome")" "the folder that holds the real home"
+dry 3 /usr "a folder outside every temp root"
+HOME="$FX/home" SD_RELEASE_RUN_DRY=1 "$H" "$FX/home" "$FX/probe" doctor >/dev/null 2>&1 && pass "control: a temp HOME-DIR passes the checks" || fail "control: a temp HOME-DIR refused"
+[ "$(snap)" = "$before" ] && pass "the real home gained no entries" || fail "the real home changed"
 finish

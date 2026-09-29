@@ -6,7 +6,8 @@
 #
 # - the environment is cleared (no SHEEPDOG_TEST_*: a release build exits 125 on one; no
 #   SHEEPDOG_OUTER: no listener of another test's run is reachable), with PATH=/usr/bin:/bin and
-#   HOME, XDG_STATE_HOME, SHEEPDOG_STATE and TMPDIR inside HOME-DIR (never the real home);
+#   HOME, XDG_STATE_HOME, SHEEPDOG_STATE and TMPDIR inside HOME-DIR, which must be under a temp
+#   root and not be, hold or lie inside the real home (below);
 # - only run, doctor, ps, strays (without --kill), --version and help are allowed: kill, sweep
 #   and strays --kill aim at processes the cell did not start;
 # - --inherit-terminal-permissions (before `--`) is refused: its responsible process is the
@@ -20,15 +21,35 @@ no() { echo "release-run: refused: $*" >&2; exit 2; }
 home=$1 bin=$2; shift 2
 [ -d "$home" ] || no "HOME-DIR $home is not a directory"
 h=$(cd -P "$home" && pwd -P) || no "cannot resolve $home"
-# the real home from the account database ($HOME can be anything): HOME-DIR may not be it, be
-# inside it, or hold it (a job there reads the real ~/Documents and can touch the grant)
+# HOME-DIR rules. The real home comes from the account database ($HOME can be anything), and it is
+# compared by device and inode, not by spelling (/USERS/..., /System/Volumes/Data/... and a symlink
+# all name the same folder). HOME-DIR may not be the real home or inside it (exit 4), may not hold
+# it (exit 5: a job there could reach it), and must be under a temp root (exit 3).
+# SD_RELEASE_RUN_DRY=1 stops after these checks and before any write (the cells use it).
 u=$(/usr/bin/id -un)
 r=$(/usr/bin/dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | /usr/bin/sed -n 's/^NFSHomeDirectory: *//p')
-[ -n "$r" ] || r=$(/usr/bin/getent passwd "$u" 2>/dev/null | /usr/bin/cut -d: -f6)
-[ -n "$r" ] || no "cannot read the real home of $u"
-r=$(cd -P "$r" 2>/dev/null && pwd -P) || no "cannot resolve the real home $r"
-case $h/ in "$r"/*) no "HOME-DIR is inside the real home" ;; esac
-case $r/ in "$h"/*) no "HOME-DIR holds the real home" ;; esac
+[ -n "$r" ] || r=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
+[ -n "$r" ] && [ -d "$r" ] || no "cannot read the real home of $u"
+ino() { # path -> device:inode
+  case $(/usr/bin/uname -s) in Darwin) /usr/bin/stat -f %d:%i "$1" ;; *) stat -c %d:%i "$1" ;; esac
+}
+under() { # dir ancestor-inode -> 0 if dir is that folder or inside it
+  d=$1
+  while :; do
+    [ "$(ino "$d")" = "$2" ] && return 0
+    [ "$d" = / ] && return 1
+    d=$(/usr/bin/dirname "$d")
+  done
+}
+ri=$(ino "$r") || no "cannot stat the real home"
+hi=$(ino "$h") || no "cannot stat HOME-DIR"
+under "$h" "$ri" && { echo "release-run: refused: HOME-DIR is the real home or inside it" >&2; exit 4; }
+under "$r" "$hi" && { echo "release-run: refused: HOME-DIR holds the real home" >&2; exit 5; }
+case $(/usr/bin/uname -s) in Darwin) roots="/private/tmp/ /private/var/folders/" ;; *) roots="/tmp/" ;; esac
+ok=no
+for t in $roots; do case $h/ in "$t"*) ok=yes ;; esac; done
+[ $ok = yes ] || { echo "release-run: refused: HOME-DIR is not under a temp root ($roots)" >&2; exit 3; }
+[ "${SD_RELEASE_RUN_DRY:-}" = 1 ] && { echo "release-run: checks passed"; exit 0; }
 
 sub=${1:-}
 extra=
