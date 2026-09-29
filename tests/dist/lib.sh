@@ -147,7 +147,7 @@ fx_release() {
   if grep -q '^SD_BUILD_COUNTER=' "$REPO/scripts/release.conf"; then
     sed -i.bak "s/^SD_BUILD_COUNTER=.*/SD_BUILD_COUNTER=$2/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
   else printf '\nSD_BUILD_COUNTER=%s\n' "$2" >> "$REPO/scripts/release.conf"; fi
-  g commit -qam "release $3" && g tag -a "$3" -m "$3"
+  g commit -q --allow-empty -am "release $3" && g tag -a "$3" -m "$3" || { echo "fx_release: could not make $3" >&2; exit 3; }
 }
 # shims that record their argv, for tools a refusal must never reach
 fx_shims() { # dir tool...

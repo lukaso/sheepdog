@@ -22,7 +22,9 @@ echo '# x' >> "$REPO/build.rs"; chk no "a changed tracked file" v0.1.0-rc.1; g c
 chk no "a missing tag" v0.1.0-rc.9
 for t in v0.1 0.1.0 v0.1.0-beta v0.1.0-rc v0.1.0-rc.01 'v0.1.0 ' ; do chk no "a malformed tag '$t'" "$t"; done
 g commit -q --allow-empty -m later; chk no "HEAD not on the tag" v0.1.0-rc.1
-g tag -a v0.2.0-rc.1 -m x; chk no "a tag whose version is not Cargo.toml's" v0.2.0-rc.1
+# (counter 5, so only the version check can refuse it)
+fx_release 0.1.0 5 v0.2.0-rc.1; chk no "a tag whose version is not Cargo.toml's" v0.2.0-rc.1
+g tag -d v0.2.0-rc.1 >/dev/null
 fx_release 0.1.0 1 v0.1.0-rc.2; chk no "a counter not above the previous tag's" v0.1.0-rc.2
 fx_release 0.1.0 2 v0.1.0-rc.3; chk ok "a counter above the previous tag's" v0.1.0-rc.3
 fx_release 0.1.0 2 v0.1.0; chk no "the final after an rc with the same counter" v0.1.0
@@ -36,7 +38,9 @@ refused() { # want-rc label args...
   "$@" >/dev/null 2>&1; rc=$?
   [ $rc = "$w" ] && [ ! -e "$FX/sh/calls" ] && pass "$l: refused ($rc), nothing ran" || fail "$l: rc=$rc (want $w) calls=$(cat "$FX/sh/calls" 2>/dev/null | head -1)"
 }
-E="env PATH=$FX/sh:$PATH HOME=$FX/ghome GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1"
+# a wrapper, not a string: PATH may hold spaces
+printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/sh:$PATH" "$FX/ghome" > "$FX/e"
+chmod +x "$FX/e"; E=$FX/e
 refused 2 "build --no-notarize without --sign" $E sh "$RS" build --no-notarize v0.1.0
 for v in SHEEPDOG_TEST_TAG=0123456789abcdef SHEEPDOG_TEST_STATE=/x; do
   refused 3 "build --sign under $v" $E "$v" sh "$RS" build --sign v0.1.0
