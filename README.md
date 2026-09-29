@@ -1,0 +1,124 @@
+# sheepdog
+
+Run a command, and make sure every process it starts is gone at the end: also the ones that
+escaped with `setsid`, a double fork, or reparenting to PID 1 or launchd. It works on macOS, on
+Linux, and in a default Docker container, with no root, no cgroups and no systemd.
+
+## Install
+
+**macOS** (installs `Sheepdog.app`, signed and notarized, and puts `sheepdog` on your PATH):
+
+```sh
+brew install --cask lukaso/tap/sheepdog
+```
+
+or, without Homebrew:
+
+```sh
+curl -fsSL https://github.com/lukaso/sheepdog/releases/latest/download/install.sh | sh
+```
+
+or with npm or pnpm (a global install; see [npm](#npm) below):
+
+```sh
+npm i -g @lukaso/sheepdog
+```
+
+**Linux**, a static binary (`x86_64` and `aarch64`):
+
+```sh
+curl -fsSL https://github.com/lukaso/sheepdog/releases/latest/download/install.sh | sh
+```
+
+**Docker**, pinned and checked:
+
+```dockerfile
+ARG SHEEPDOG_VERSION=0.1.0
+RUN curl -fsSL -o /usr/local/bin/sheepdog \
+      "https://github.com/lukaso/sheepdog/releases/download/v${SHEEPDOG_VERSION}/sheepdog-linux-$(uname -m)" \
+ && echo "<sha256 from the release's SHA256SUMS>  /usr/local/bin/sheepdog" | sha256sum -c - \
+ && chmod +x /usr/local/bin/sheepdog
+```
+
+On Linux the checksum proves the download is intact, not where it came from: `SHA256SUMS` comes
+from the same release. On macOS, install.sh and Homebrew check the Developer ID signature, which
+does prove where it came from.
+
+## Use
+
+```sh
+sheepdog run --timeout 5m -- npm test        # stop the whole tree after 5 minutes
+sheepdog run --max-mem 2G -- python3 job.py  # stop it if the tree uses more than 2 GB
+sheepdog strays                              # list leaked processes of yours, biggest first
+sheepdog kill 4242                           # kill 4242 and the processes it provably started
+                                             # (see first: sheepdog ps 4242)
+```
+
+To stop a running job, send TERM to sheepdog. Exit 124 means a limit fired. `sheepdog help
+<command>` shows each command's options.
+
+## For coding agents
+
+Put this in your `CLAUDE.md` or `AGENTS.md`:
+
+```markdown
+## Commands that may hang or leak processes
+Wrap them: `sheepdog run --timeout 5m -- <command>`. It kills the whole process tree when the command ends or a limit fires, including processes that escaped. Exit 124 means a limit fired; read the `sheepdog:` lines on stderr. To stop a job, send TERM to sheepdog (SIGINT to its pid does not reach the command). Leaked processes from earlier runs: `sheepdog strays`.
+```
+
+## Limits
+
+sheepdog is not a sandbox. It does not reach:
+
+- work started through another launcher: on macOS `open`, `osascript`, `xcodebuild test`, launchd
+  agents; on Linux `systemd-run --user` and D-Bus activation;
+- a process inside the job that disclaims itself again (Electron, VS Code and Chrome helpers), except
+  on a best-effort basis;
+- containers the job starts: they belong to `dockerd`;
+- a process that leaves on purpose: `sudo`, another user, ptrace.
+
+A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (Node's `child.kill`,
+`docker stop` with `STOPSIGNAL SIGINT`) kills only sheepdog; the tree then waits for the next
+`sheepdog sweep`. Send TERM instead.
+
+Where a delegated cgroup v2 is available, a cgroup is stronger: processes cannot leave it. sheepdog
+is the portable floor, and on a Mac the only option.
+
+## macOS privacy
+
+A job under sheepdog does not inherit your terminal's privacy permissions (Full Disk Access,
+Documents, Desktop and so on): sheepdog makes itself the job's responsible app, which is what lets
+it track the whole tree. If a job needs a protected folder, give Sheepdog Full Disk Access once:
+System Settings > Privacy & Security > Full Disk Access, click +, and choose `Sheepdog.app`
+(`~/Applications` for install.sh, `/Applications` for Homebrew). The grant survives upgrades.
+`sheepdog doctor` shows which grants sheepdog has.
+
+Or run one job with `--inherit-terminal-permissions`: it keeps your terminal's permissions, and
+sheepdog falls back to a weaker way of tracking the tree.
+
+Uninstalling does not remove a grant. To remove it:
+
+```sh
+tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
+```
+
+## npm
+
+- Install globally (`npm i -g`, `pnpm add -g`). The `sheepdog` on your PATH then *is* sheepdog (a
+  small `sh` launcher replaces itself with it), so it keeps your process id, signal settings and
+  environment, and TERM to it reaches the job.
+- Do not run it through `npx`, `pnpm dlx` or `bunx`: they start it as a child of their own, so TERM
+  to the process you hold does not reach sheepdog.
+- pnpm's own launcher adds a `NODE_PATH` to the job's environment, as it does for every global bin.
+- If you use bun, check the installed files' permissions: a bun install has been measured to make
+  them world-writable. Do not install with bun as root or into a shared prefix.
+
+## Reference
+
+- Exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired (`--timeout`, a
+  cap); 125 when sheepdog failed, for a usage error of `run`, or when a process was still alive at
+  the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
+  `--status-fd` says which, as one JSON line.
+- Stable interfaces: the subcommands and flags, the exit codes, the `--status-fd` and `--json`
+  schemas (`"v": 1`), and the `sheepdog:` prefix on stderr. Every release has a
+  [CHANGELOG](CHANGELOG.md) entry.
