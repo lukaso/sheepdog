@@ -16,3 +16,4 @@ The first release.
 - A journal of every job, so `sweep` can end what a killed sheepdog left behind.
 - macOS: `Sheepdog.app`, Developer ID-signed and notarized; Homebrew cask, `install.sh`, npm.
 - Linux: static binaries for `x86_64` and `aarch64`.
+- Licensed under MIT OR Apache-2.0; every npm package carries both texts.

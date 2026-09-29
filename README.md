@@ -122,3 +122,10 @@ tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
 - Stable interfaces: the subcommands and flags, the exit codes, the `--status-fd` and `--json`
   schemas (`"v": 1`), and the `sheepdog:` prefix on stderr. Every release has a
   [CHANGELOG](CHANGELOG.md) entry.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT),
+at your option. Unless you explicitly state otherwise, any contribution you submit for inclusion in
+sheepdog, as defined in the Apache-2.0 license, is dual licensed as above, without any additional
+terms or conditions.
