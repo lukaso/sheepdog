@@ -35,12 +35,13 @@ pgid() { # pid -> its process group (Linux: /proc, which busybox and slim images
 me=$(pgid $$)
 # the escapee: fork, a new session, fork again. The grandchild writes its own record (pid, start
 # time, process group) before it becomes `sleep 300` (exec keeps the pid and the start time), so
-# every escapee that runs has a record for reap; the record is written only when all three were read
+# every escapee that runs has a record for reap; with no record (a read or the write failed) it exits
 cat > "$t/me.sh" <<'E'
 f=$1 p=$$
 if [ -r "/proc/$p/stat" ]; then st=$(sed 's/.*) //' "/proc/$p/stat"); s=$(echo "$st" | cut -d' ' -f20); g=$(echo "$st" | cut -d' ' -f3)
 else s=$(LC_ALL=C ps -o lstart= -p "$p"); g=$(ps -o pgid= -p "$p" | tr -d ' '); fi
-[ -n "$s" ] && [ -n "$g" ] && printf '%s\n%s\n%s\n' "$p" "$s" "$g" > "$f.w" && mv "$f.w" "$f"
+# no record, no escapee: a process reap cannot find must not be left behind
+[ -n "$s" ] && [ -n "$g" ] && printf '%s\n%s\n%s\n' "$p" "$s" "$g" > "$f.w" && mv "$f.w" "$f" || exit 1
 exec sleep 300
 E
 cat > "$t/esc.sh" <<'E'
@@ -61,7 +62,7 @@ echo "smoke: testing $w ($("$SD" --version < /dev/null 2>&1 | head -1))"
 t0=$(date +%s)
 "$SD" run --timeout 60s -- sh "$t/esc.sh" "$t/e1" >/dev/null 2>&1
 el=$(($(date +%s) - t0))
-if ! rec "$t/e1"; then bad "cell 3: the escapee did not start"
+if ! rec "$t/e1"; then bad "cell 3: the escapee did not start or could not record itself"
 elif [ "$g" = "$me" ]; then bad "cell 3: the escapee did not leave smoke's process group ($g)"
 elif alive "$t/e1"; then bad "cell 3: the escapee survived the job"
 elif [ $el -ge 30 ]; then bad "cell 3: the job took ${el}s, so sheepdog waited instead of killing (the escapee sleeps 300 s)"
@@ -69,6 +70,6 @@ else ok "cell 3: the escapee left smoke's process group and was killed with the 
 # control: without sheepdog it survives (reap kills it at exit)
 sh "$t/esc.sh" "$t/e2"
 if rec "$t/e2" && [ "$g" != "$me" ] && alive "$t/e2"; then ok "control: without sheepdog the escapee survives"
-else bad "control: the escapee did not start, did not escape, or did not survive without sheepdog (the check proves nothing)"; fi
+else bad "control: the escapee did not start or record itself, did not escape, or did not survive without sheepdog (the check proves nothing)"; fi
 [ $fails = 0 ] && { echo "smoke: PASS"; exit 0; }
 echo "smoke: FAIL ($fails)"; exit 1
