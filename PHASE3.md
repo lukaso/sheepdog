@@ -196,6 +196,8 @@ Cells: the helper refuses each forbidden form (a cell per form, a mutant per ref
 
 **S0+S1 review, round 4 (the round-3 fixes, 449cde9; 0 P1, 0 P2, 5 P3 — fixed, 390ed89..50ddd14):** the door let an execute-only (0111) file and an embedded plist whose unparsable key hid behind a parsable one through, and blamed a release ID when `lipo` was the cause → both count as release, and the refusal names its reason; the dist runner lost a stopped cell's output → it prints the partial log and KILLs the cell after 5 s; the native-platform check ran before a `pull` leg in the same run and read a missing image as a wrong platform → checked before the first native leg, and "missing or Docker unreachable" is its own message. 3 mutants red; the full door test green.
 
+**S0+S1 review, round 5 (the round-4 fixes, 9729ce8; 0 P1, 0 P2, 1 P3 — fixed, fd614e8):** the runner's stop KILLed only `timeout`, so a cell that ignores TERM was left running (round 4's note claimed otherwise) → it KILLs the cell's process group, confirmed as `timeout`'s own when the cell started; `t_runner.sh` now drives the runner as a subject (pass, fail, SKIP, no cells, TERM with a TERM-ignoring child). Mutant (pid-only KILL): red.
+
 ## 3. The full-matrix legs
 
 The ten legs of `./test-all` stay (on the pinned toolchain from S1). Phase 3 adds:
