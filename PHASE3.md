@@ -198,6 +198,8 @@ Cells: the helper refuses each forbidden form (a cell per form, a mutant per ref
 
 **S0+S1 review, round 5 (the round-4 fixes, 9729ce8; 0 P1, 0 P2, 1 P3 — fixed, fd614e8):** the runner's stop KILLed only `timeout`, so a cell that ignores TERM was left running (round 4's note claimed otherwise) → it KILLs the cell's process group, confirmed as `timeout`'s own when the cell started; `t_runner.sh` now drives the runner as a subject (pass, fail, SKIP, no cells, TERM with a TERM-ignoring child). Mutant (pid-only KILL): red.
 
+**S0+S1 review, rounds 6–7:** round 6 (the round-5 fix, f306b5d; 1 P3, fixed 9ee6a02): dash's and busybox ash's `kill` reject `--`, so the group KILL did nothing there → `kill -KILL "-$gp"` (measured in macOS sh, bash, dash, zsh-as-sh and busybox ash); `t_runner.sh`'s TERM case runs under sh and dash. **Round 7: no findings — the S0+S1 review is closed. The full matrix (12 legs, bundle and hardened included) is GREEN at 9ee6a02.** Declined (stated): `t_runner.sh`'s TERM case does not require the child's pid file before checking (if the child never started, only the cell's pid is checked; the output check still catches a cell that never ran).
+
 ## 3. The full-matrix legs
 
 The ten legs of `./test-all` stay (on the pinned toolchain from S1). Phase 3 adds:
