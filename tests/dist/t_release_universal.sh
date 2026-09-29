@@ -64,8 +64,11 @@ perl "$FX/escape.pl" "$FX/esc2"
 if [ -s "$FX/esc2" ] && alive "$FX/esc2"; then pass "control: without sheepdog the escapee survives"; kill -9 "$(cut -d' ' -f1 "$FX/esc2")"
 else fail "control: the escapee did not survive without sheepdog"; fi
 
-if "$SD_ROOT/scripts/lib/exec-guard.sh" check "$FX/sheepdog" && arch -x86_64 "$FX/sheepdog" --version >/dev/null 2>&1; then
-  pass "x86_64 slice runs (Rosetta)"
+# the x86_64 slice: the door judges the file first (a refusal fails the cell); it runs only where
+# an x86_64 binary can (Rosetta), else the cell notes that it was checked statically
+if ! "$SD_ROOT/scripts/lib/exec-guard.sh" check "$FX/sheepdog"; then fail "the door refused the universal binary"
+elif printf 'int main(){return 0;}\n' > "$FX/x.c" && cc -arch x86_64 -o "$FX/x" "$FX/x.c" && arch -x86_64 "$FX/x" 2>/dev/null; then
+  arch -x86_64 "$FX/sheepdog" --version >/dev/null 2>&1 && pass "x86_64 slice runs (Rosetta)" || fail "x86_64 slice does not run under Rosetta"
 else
   echo "note: no x86_64 runtime here (Rosetta absent); the x86_64 slice is checked statically only"
 fi

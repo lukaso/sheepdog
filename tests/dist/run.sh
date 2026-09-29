@@ -4,14 +4,19 @@
 set -u
 cd "$(dirname "$0")" || exit 3
 n=0 bad=""
+log=$(mktemp -d "${TMPDIR:-/tmp}/sd-dist.XXXXXX")/cell || exit 3
 for t in t_*.sh; do
   [ -f "$t" ] || continue
   n=$((n + 1))
   echo "== $t"
-  out=$(timeout 1200 sh "$t" 2>&1); rc=$?
-  printf '%s\n' "$out"
+  # streamed, and kept in a file for the SKIP check (a $( ) capture would wait for any process
+  # that kept the output open)
+  timeout 1200 sh "$t" > "$log.$n" 2>&1 & p=$!
+  tail -f "$log.$n" & tp=$!
+  wait $p; rc=$?
+  sleep 0.2; kill $tp 2>/dev/null; wait $tp 2>/dev/null
   if [ $rc != 0 ]; then bad="$bad $t"
-  elif [ "$(/usr/bin/uname -s)" = Darwin ] && printf '%s\n' "$out" | grep -q '^SKIP'; then bad="$bad $t(skipped on macOS)"; fi
+  elif [ "$(/usr/bin/uname -s)" = Darwin ] && grep -q '^SKIP' "$log.$n"; then bad="$bad $t(skipped on macOS)"; fi
 done
 [ "$n" -gt 0 ] || { echo "no cells found"; exit 1; }
 [ -z "$bad" ] && { echo "dist: $n cells PASS"; exit 0; }

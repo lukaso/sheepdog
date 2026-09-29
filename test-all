@@ -138,7 +138,11 @@ leg_amd64() {
     # bg_wait would run it in a subshell, out of cleanup's reach)
     mkdir -p "$LOGDIR/amd64-context"
     printf 'FROM --platform=linux/amd64 %s\nRUN apk add -q procps bash util-linux-misc\n' "$SD_IMG_ALPINE" > "$LOGDIR/amd64.Dockerfile"
-    bg_wait timeout -k 30 1800 docker build --platform linux/amd64 -t "$img" -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
+    # the base comes from the local amd64 copy (`./test-all pull` fetches it); a missing one fails
+    # here instead of a registry call, which can show a keychain prompt
+    timeout 60 docker image inspect --platform linux/amd64 "$SD_IMG_ALPINE" >/dev/null 2>&1 \
+      || { record amd64 "FAIL (no local linux/amd64 $SD_IMG_ALPINE: run ./test-all pull)"; return; }
+    bg_wait timeout -k 30 1800 docker build --pull=false --platform linux/amd64 -t "$img" -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
       > "$LOGDIR/amd64-image.log" 2>&1 \
       || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
   fi
@@ -287,9 +291,12 @@ leg_hardened() {
 
 leg_pull() {
   local ok=1 i
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM" "linux/amd64 $SD_IMG_ALPINE"; do
     echo "pulling $i (Docker Desktop may ask for keychain access)"
-    timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0
+    case $i in
+      linux/amd64*) timeout 1800 docker pull -q --platform linux/amd64 "${i#linux/amd64 }" >> "$LOGDIR/pull.log" 2>&1 || ok=0 ;;
+      *) timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0 ;;
+    esac
   done
   [ $ok = 1 ] && record pull PASS || record pull "FAIL ($LOGDIR/pull.log)"
 }
