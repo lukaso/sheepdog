@@ -22,6 +22,9 @@
 # Exit codes: 0 done; 1 a check failed or a step failed; 2 usage; 3 refused in a test environment;
 # 4 refused without a terminal (or the typed tag did not match).
 set -u
+# one collation and one message language for every sort and comparison (the operator's locale sorts
+# "SHA256SUMS" after "install.sh"; measured)
+LC_ALL=C; export LC_ALL
 root=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
 usage() { echo "usage: release.sh check|build|publish|npm-check|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
 die() { echo "release: $*" >&2; exit 1; }
@@ -41,7 +44,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tag" ] || usage
 case $sub in
-  check|build|publish|npm-check|verify) ;;
+  check|build|publish|npm-check|verify|__publish-dry) ;;
   *) usage ;;
 esac
 [ $sign = no ] || [ "$sub" = build ] || usage
@@ -53,7 +56,7 @@ if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ]; then
     echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set" >&2; exit 3
   fi
   if ! [ -t 0 ] || ! (: < /dev/tty) 2>/dev/null; then
-    echo "release: refused: $sub${sign:+ --sign} needs a terminal" >&2; exit 4
+    echo "release: refused: $sub$( [ $sign = yes ] && echo ' --sign') needs a terminal" >&2; exit 4
   fi
   printf 'release: %s %s. Type the tag to go on: ' "$sub" "$tag" > /dev/tty
   IFS= read -r answer < /dev/tty || exit 4
@@ -93,16 +96,17 @@ checks() {
 # base: HOME PATH TMPDIR USER LOGNAME (+ DEVELOPER_DIR); cargo adds its own; docker adds its host
 # and config. Nothing else of the caller's environment reaches a tool (never RUSTUP_TOOLCHAIN: it
 # overrides rust-toolchain.toml).
-tool() { # class command...
+tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]; net: base and the
+          # git/gh transport: SSH_AUTH_SOCK GIT_SSH_COMMAND GH_CONFIG_DIR, never GH_TOKEN, since gh
+          # uses its own stored login)
   cls=$1; shift
-  set -- env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
-    ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$@"
   case $cls in
-    cargo) set -- "$@" ;;
-    docker) set -- "$@" ;;
-    base) ;;
+    base) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+            ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$@" ;;
+    net) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+            ${SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$SSH_AUTH_SOCK"} ${GIT_SSH_COMMAND:+GIT_SSH_COMMAND="$GIT_SSH_COMMAND"} \
+            ${GH_CONFIG_DIR:+GH_CONFIG_DIR="$GH_CONFIG_DIR"} "$@" ;;
   esac
-  "$@"
 }
 cargo_env() { # CARGO_HOME TARGET_DIR command... (the cargo class)
   ch=$1 td=$2; shift 2
@@ -113,12 +117,18 @@ docker_env() { # the docker class
   tool base env ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} docker "$@"
 }
 
+step() { echo "release: step: $*"; }
+npm_pack() { # the four npm tarballs into $dest; sets files_npm
+  files_npm=$(tool base sh "$S/lib/npm-pack.sh" "${tag#v}" "$dest/sheepdog-macos-universal.tar.gz" "$dest/sheepdog-linux-aarch64" \
+    "$dest/sheepdog-linux-x86_64" "$src/npm/sheepdog/bin/sheepdog" "$dest") || return 1
+  files_npm=$(printf '%s' "$files_npm" | tr '\n' ' ')
+}
+
 # --- the build (PHASE3.md S2): unsigned, signed, or the signed control ----------------------------
 build_release() { # mode: unsigned | signed | control
-  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
-  short=$(git -C "$root" rev-parse --short=12 "$commit")
   mode=$1
   case $mode in unsigned) dest=$out/$tag-unsigned ;; signed) dest=$out/$tag ;; control) dest=$out/$tag-control ;; esac
+  short=$(git -C "$root" rev-parse --short=12 "$commit")
   [ -e "$dest" ] && die "$dest exists (a release output directory is never reused)"
   mkdir -p "$dest" || die "cannot make $dest"
   scratch=$(mktemp -d /private/tmp/sd-release.XXXXXX 2>/dev/null || mktemp -d) || die "no scratch dir"
@@ -127,41 +137,32 @@ build_release() { # mode: unsigned | signed | control
   src=$scratch/src
   git -C "$root" worktree add -q --detach "$src" "$tag" || die "cannot make a worktree of $tag"
   [ -z "$(git -C "$src" status --porcelain --ignored)" ] || die "the worktree holds an untracked or ignored file"
-  echo "release: building $tag ($short) in $src"
+  # from here on every helper and every setting comes from the tag's worktree, never the shared checkout
+  S=$src/scripts
+  . "$S/release.conf" || die "cannot read the tag's scripts/release.conf"
+  pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$src/rust-toolchain.toml")
+  [ -n "$pin" ] || die "the tag's rust-toolchain.toml names no channel"
+  echo "release: building $tag ($short, $mode) in $src"
+  if [ "$mode" != unsigned ]; then
+    step "the signing identity"
+    /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q " $SD_SIGN_IDENTITY " \
+      || die "the signing identity $SD_SIGN_IDENTITY is not in the keychain"
+  fi
 
-  # macOS: a fresh CARGO_HOME, fetched (Cargo checks each crate against Cargo.lock), then offline
+  # macOS compile: a fresh CARGO_HOME, fetched (Cargo checks each crate against Cargo.lock), then
+  # offline; the compiler must be the pinned one
+  step "the macOS compile"
   mkdir -p "$scratch/cargo-mac"
   (cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" cargo fetch --locked -q) || die "cargo fetch (mac)"
+  rustc_mac=$(cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" rustc -V) || die "rustc -V (mac)"
+  case $rustc_mac in "rustc $pin "*) ;; *) die "the Mac compiler is '$rustc_mac', not the pinned $pin" ;; esac
   for t in aarch64-apple-darwin x86_64-apple-darwin; do
     (cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" cargo build -q --release --locked --offline --bin sheepdog --target $t) \
       || die "cargo build $t"
   done
-  rustc_mac=$(cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" rustc -V) || die "rustc -V (mac)"
-  lipo -create -output "$scratch/sheepdog" "$scratch/target-mac/aarch64-apple-darwin/release/sheepdog" \
-    "$scratch/target-mac/x86_64-apple-darwin/release/sheepdog" || die "lipo"
-  for a in arm64 x86_64; do
-    m=$(vtool -arch $a -show-build "$scratch/sheepdog" 2>/dev/null | awk '$1=="minos"{print $2; exit}')
-    [ "$m" = 12.0 ] || die "the $a slice's minimum macOS is '$m', not 12.0"
-  done
-  xyz=${tag#v}; xyz=${xyz%%-*}
-  if [ "$mode" = unsigned ]; then
-    app=$("$root/scripts/bundle.sh" "$scratch/sheepdog" "$scratch/bundle" "$xyz" "$c") || die "bundle.sh"
-    mkdir -p "$scratch/rh"
-    v=$("$root/scripts/lib/release-run.sh" "$scratch/rh" "$app/Contents/MacOS/sheepdog" --version) || die "the Mac binary does not run"
-    case $v in *"$short"*) ;; *) die "the Mac binary names another commit: $v" ;; esac
-    "$root/scripts/lib/archive.sh" make "$app" "$dest/sheepdog-macos-universal.tar.gz" || die "archive"
-    "$root/scripts/lib/archive.sh" check "$dest/sheepdog-macos-universal.tar.gz" || die "the archive fails its check"
-  else
-    # sign.sh as a direct child (never in ( ), $( ) or a pipeline: it checks that its parent is
-    # this process), with a nonce only this run knows, in a 0600 file of this user's
-    umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$scratch/nonce"; umask 022
-    nn=$(cat "$scratch/nonce")
-    set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce" --parent-pid "$$"
-    [ "$mode" = control ] && set -- "$@" --no-notarize
-    "$root/scripts/lib/sign.sh" "$@" || die "signing failed (sign.sh exit $?)"
-  fi
 
-  # Linux: the pinned image's own CARGO_HOME, fetched in the image, then built offline
+  # Linux, all of it before any signing: a failure here must not cost a notarization
+  step "the Linux builds"
   amd64=sd-amd64-base:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)
   docker_env image inspect "$amd64" >/dev/null 2>&1 || amd64=sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)
   docker_env image inspect "$amd64" >/dev/null 2>&1 || die "no local amd64 image of the pinned base (run ./test-all pull, or ./test-all amd64)"
@@ -181,39 +182,51 @@ build_release() { # mode: unsigned | signed | control
       sh -c 'cargo build -q --release --locked --offline --bin sheepdog && rustc -V > /tgt/rustc && uname -m > /tgt/arch && if readelf -l /tgt/release/sheepdog | grep -q INTERP; then echo "a PT_INTERP" >&2; exit 1; fi' \
       || die "the Linux $a build"
     [ "$(cat "$scratch/target-$a/arch")" = "$a" ] || die "the $a build ran as $(cat "$scratch/target-$a/arch")"
+    case $(cat "$scratch/target-$a/rustc") in "rustc $pin "*) ;; *) die "the Linux $a compiler is '$(cat "$scratch/target-$a/rustc")', not the pinned $pin" ;; esac
     cp "$scratch/target-$a/release/sheepdog" "$dest/sheepdog-linux-$a" || die "copy $a"
     v=$(docker_env run --rm --pull=never --network none --platform "$pf" -v "$dest/sheepdog-linux-$a":/sheepdog:ro "sd-scratch:empty-${pf#linux/}" /sheepdog --version) \
       || die "the $a binary does not run in an empty image (not static?)"
     case $v in *"$short"*) ;; *) die "the $a binary names another commit: $v" ;; esac
   done
 
-  # install.sh (PHASE3.md S3), with this release's version written in
+  # macOS: the universal binary, then the bundle (unsigned), or signing (sign.sh)
+  step "the macOS bundle"
+  tool base lipo -create -output "$scratch/sheepdog" "$scratch/target-mac/aarch64-apple-darwin/release/sheepdog" \
+    "$scratch/target-mac/x86_64-apple-darwin/release/sheepdog" || die "lipo"
+  for a in arm64 x86_64; do
+    m=$(tool base vtool -arch $a -show-build "$scratch/sheepdog" 2>/dev/null | awk '$1=="minos"{print $2; exit}')
+    [ "$m" = 12.0 ] || die "the $a slice's minimum macOS is '$m', not 12.0"
+  done
+  xyz=${tag#v}; xyz=${xyz%%-*}
+  if [ "$mode" = unsigned ]; then
+    app=$(tool base sh "$S/bundle.sh" "$scratch/sheepdog" "$scratch/bundle" "$xyz" "$c") || die "bundle.sh"
+    mkdir -p "$scratch/rh"
+    v=$(tool base sh "$S/lib/release-run.sh" "$scratch/rh" "$app/Contents/MacOS/sheepdog" --version) || die "the Mac binary does not run"
+    case $v in *"$short"*) ;; *) die "the Mac binary names another commit: $v" ;; esac
+    tool base sh "$S/lib/archive.sh" make "$app" "$dest/sheepdog-macos-universal.tar.gz" || die "archive"
+    tool base sh "$S/lib/archive.sh" check "$dest/sheepdog-macos-universal.tar.gz" || die "the archive fails its check"
+  else
+    step "signing"
+    # sign.sh as a direct child (never in ( ), $( ) or a pipeline: it checks that its parent is
+    # this process, by pid), with a nonce only this run knows, in a 0600 file of this user's
+    umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$scratch/nonce"; umask 022
+    nn=$(cat "$scratch/nonce")
+    set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce" --parent-pid "$$"
+    [ "$mode" = control ] && set -- "$@" --no-notarize
+    env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+      ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$S/lib/sign.sh" "$@" &
+    sp=$!; wait $sp || die "signing failed"
+  fi
+
+  # install.sh (PHASE3.md S3), rendered with this release's version and the door
+  step "install.sh, the checksums, the npm packages"
   files="sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64"
-  if [ -f "$src/scripts/install.sh" ]; then
-    sh "$src/scripts/lib/render-install.sh" "$src/scripts/install.sh" "${tag#v}" "$dest/install.sh" || die "render install.sh"
+  if [ -f "$S/install.sh" ]; then
+    tool base sh "$S/lib/render-install.sh" "$S/install.sh" "${tag#v}" "$dest/install.sh" || die "render install.sh"
     files="$files install.sh"
   fi
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
-
-  # the npm packages (PHASE3.md S5, D9): the sh launcher, and one package per platform holding the
-  # executable; the launcher's optional dependencies are pinned to exactly this version
-  nv=${tag#v} pk=$scratch/npm
-  mkdir -p "$pk/main/bin" "$pk/darwin" "$pk/linux-arm64/bin" "$pk/linux-x64/bin" "$scratch/npm-cache"
-  cp "$src/npm/sheepdog/bin/sheepdog" "$pk/main/bin/sheepdog" && chmod 755 "$pk/main/bin/sheepdog" || die "npm launcher"
-  printf '{\n  "name": "@lukaso/sheepdog",\n  "version": "%s",\n  "description": "Run a command and kill every process it started, escapees included",\n  "bin": {"sheepdog": "bin/sheepdog"},\n  "files": ["bin"],\n  "optionalDependencies": {\n    "@lukaso/sheepdog-darwin-universal": "%s",\n    "@lukaso/sheepdog-linux-arm64": "%s",\n    "@lukaso/sheepdog-linux-x64": "%s"\n  }\n}\n' \
-    "$nv" "$nv" "$nv" "$nv" > "$pk/main/package.json"
-  tar -xzf "$dest/sheepdog-macos-universal.tar.gz" -C "$pk/darwin" || die "npm: unpack the bundle"
-  printf '{\n  "name": "@lukaso/sheepdog-darwin-universal",\n  "version": "%s",\n  "os": ["darwin"],\n  "cpu": ["arm64", "x64"],\n  "files": ["Sheepdog.app"]\n}\n' "$nv" > "$pk/darwin/package.json"
-  for a in arm64 x64; do
-    case $a in arm64) b=aarch64 ;; x64) b=x86_64 ;; esac
-    cp "$dest/sheepdog-linux-$b" "$pk/linux-$a/bin/sheepdog" && chmod 755 "$pk/linux-$a/bin/sheepdog" || die "npm: linux $a"
-    printf '{\n  "name": "@lukaso/sheepdog-linux-%s",\n  "version": "%s",\n  "os": ["linux"],\n  "cpu": ["%s"],\n  "files": ["bin"]\n}\n' "$a" "$nv" "$a" > "$pk/linux-$a/package.json"
-  done
-  for d2 in main darwin linux-arm64 linux-x64; do
-    (cd "$pk/$d2" && tool base env npm_config_cache="$scratch/npm-cache" npm pack --silent --pack-destination "$dest" >/dev/null) || die "npm pack $d2"
-  done
-  files_npm="lukaso-sheepdog-$nv.tgz lukaso-sheepdog-darwin-universal-$nv.tgz lukaso-sheepdog-linux-arm64-$nv.tgz lukaso-sheepdog-linux-x64-$nv.tgz"
-  for f in $files_npm; do [ -s "$dest/$f" ] || die "npm pack made no $f"; done
+  npm_pack || die "npm packing"
   {
     printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": [\n' "$tag" "$commit" "$mode" "$( [ "$mode" = control ] && echo true || echo false)"
     sep=""
@@ -234,37 +247,63 @@ build_release() { # mode: unsigned | signed | control
 }
 
 # --- publish: the thin executor behind the gate (PHASE3.md §1.2) ------------------------------
-publish() {
-  d=$out/$tag
-  verify "$d"
+# The remote tag is read from github.com/lukaso/sheepdog itself (the repository the release is
+# made on), never from `origin`. GH and GITCMD are the gh and git to use: the real ones for
+# publish; for __publish-dry (the cells), stand-ins under /private/tmp/sd-p3-fixtures.*, given by
+# path, so the dry run can never reach the real gh.
+UPSTREAM=https://github.com/lukaso/sheepdog
+confirm() { # prompt -> 0 on the tag typed back
+  if [ "${DRY:-no}" = yes ]; then
+    n=$(grep -c '^ask ' "${SD_ASK_RECORD:-/dev/null}" 2>/dev/null); n=${n:-0}
+    a=$(sed -n "$((n + 1))p" "${SD_ASK_SCRIPT:-/dev/null}")
+    echo "ask $1 -> $a" >> "${SD_ASK_RECORD:-/dev/null}"
+  else
+    printf '%s ' "$1" > /dev/tty; IFS= read -r a < /dev/tty || return 1
+  fi
+  [ "$a" = "$tag" ]
+}
+publish_exec() { # dir
+  d=$1
   pt=$(mktemp -d /private/tmp/sd-publish.XXXXXX) || die "no temp dir"
-  git -C "$root" ls-remote origin "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote"
-  gh api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
+  trap 'rm -rf "$pt"' EXIT; trap 'rm -rf "$pt"; exit 1' HUP INT TERM
+  tool net "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
+  tool net "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
   sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
   echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
-  id=$(gh api -X POST repos/lukaso/sheepdog/releases -F draft=true -f tag_name="$tag" -f name="$tag" --jq .id) || die "gh: cannot make the draft"
+  set -- $(sed -n 's/^POST [^ ]* //p' "$pt/plan")
+  id=$(tool net "$GH" api -X POST repos/lukaso/sheepdog/releases "$@" --jq .id) || die "gh: cannot make the draft"
   case $id in ''|*[!0-9]*) die "gh: no release id ($id)" ;; esac
   echo "release: draft $id made"
   for f in $(sed -n 's/^UPLOAD //p' "$pt/plan"); do
-    gh api -X POST -H 'Content-Type: application/octet-stream' \
+    tool net "$GH" api -X POST -H 'Content-Type: application/octet-stream' \
       "https://uploads.github.com/repos/lukaso/sheepdog/releases/$id/assets?name=$f" --input "$d/$f" --jq .id >/dev/null \
       || die "gh: upload of $f failed (the draft $id is not public; delete it on GitHub)"
   done
-  gh api "repos/lukaso/sheepdog/releases/$id" --jq '.assets[] | "\(.id) \(.name)"' > "$pt/assets" || die "gh: cannot read the draft"
+  tool net "$GH" api "repos/lukaso/sheepdog/releases/$id" --jq '.assets[] | "\(.id) \(.name)"' > "$pt/assets" || die "gh: cannot read the draft"
   [ "$(awk '{print $2}' "$pt/assets" | sort | tr '\n' ' ')" = "SHA256SUMS install.sh sheepdog-linux-aarch64 sheepdog-linux-x86_64 sheepdog-macos-universal.tar.gz " ] \
     || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
   while read -r aid name; do
-    gh api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
-    [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$(shasum -a 256 "$d/$name" | cut -d' ' -f1)" ] || die "the uploaded $name differs from the local one"
+    tool net "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
+    [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$(shasum -a 256 "$d/$name" | cut -d' ' -f1)" ] || die "the uploaded $name differs from the local one; the draft $id stays a draft"
   done < "$pt/assets"
-  git -C "$root" ls-remote origin "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote"
-  cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload"
-  printf 'release: the draft %s holds the five files, each matching. Type the tag again to make it public: ' "$id" > /dev/tty
-  IFS= read -r again < /dev/tty && [ "$again" = "$tag" ] || die "not confirmed; the draft $id stays a draft"
-  gh api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
-  rm -rf "$pt"
+  tool net "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
+  cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload; the draft $id stays a draft"
+  confirm "release: the draft $id holds the five files, each matching. Type the tag again to make it public:" || die "not confirmed; the draft $id stays a draft"
+  tool net "$GH" api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
   echo "release: $tag published"
+}
+publish() {
+  verify "$out/$tag"
+  GH=gh GITCMD=git DRY=no publish_exec "$out/$tag"
+}
+publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
+  for v in SD_PUBLISH_DRY_GH SD_PUBLISH_DRY_GIT; do
+    eval "p=\${$v:-}"
+    case $p in /private/tmp/sd-p3-fixtures.*/*) [ -x "$p" ] || die "$v is not executable" ;; *) die "$v must be a stand-in under /private/tmp/sd-p3-fixtures.*" ;; esac
+  done
+  echo "release: __publish-dry (stand-ins; verify not run)"
+  GH=$SD_PUBLISH_DRY_GH GITCMD=$SD_PUBLISH_DRY_GIT DRY=yes publish_exec "$out/$tag"
 }
 
 # --- npm-check: before any `npm publish` (PHASE3.md §5 step 5) ----------------------------------
@@ -325,5 +364,6 @@ case $sub in
     elif [ $nonot = yes ]; then build_release control
     else build_release signed; fi ;;
   publish) publish ;;
+  __publish-dry) publish_dry ;;
   npm-check) npm_check "$out/$tag" ;;
 esac

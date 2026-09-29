@@ -15,23 +15,26 @@
 #     annotated tag only the peeled `^{}` line counts; no remote tag is refused);
 #   - a release or draft that already uses the tag.
 # The plan (one shape only, which --validate checks):
-#   POST repos/lukaso/sheepdog/releases -F draft=true -f tag_name=vTAG -f name=vTAG
+#   POST repos/lukaso/sheepdog/releases -F draft=true [-F prerelease=true] -f tag_name=vTAG -f name=vTAG
+#     (prerelease exactly for a vX.Y.Z-rc.N tag, so an rc is never the "latest" release)
 #   UPLOAD <file>            (the five, in a fixed order)
 #   PATCH -F draft=false
 # `-F` sends a JSON boolean (`-f` would send the string "true"); there is no target_commitish: with
 # the tag missing, GitHub would make it from the default branch when the draft is published.
 set -u
 PATH=/usr/bin:/bin:$PATH
+LC_ALL=C; export LC_ALL
 die() { echo "release-plan: $*" >&2; exit 1; }
 usage() { echo "usage: release-plan.sh --out DIR --tag vTAG --remote FILE --releases FILE | --validate PLAN" >&2; exit 2; }
 FIVE="sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh SHA256SUMS"
 REPO=lukaso/sheepdog
 
+pre() { case $1 in *-rc.*) printf '%s' '-F prerelease=true ' ;; esac; }
 validate() { # plan-file -> 0 if it is exactly the one shape
   f=$1
-  t=$(sed -n 's/^POST repos\/lukaso\/sheepdog\/releases -F draft=true -f tag_name=\(v[0-9.a-z-]*\) -f name=\1$/\1/p' "$f")
+  t=$(sed -n 's/^POST repos\/lukaso\/sheepdog\/releases -F draft=true \(-F prerelease=true \)\{0,1\}-f tag_name=\(v[0-9.a-z-]*\) -f name=\2$/\2/p' "$f")
   [ -n "$t" ] || die "the plan has no POST of the one shape"
-  exp="POST repos/$REPO/releases -F draft=true -f tag_name=$t -f name=$t"
+  exp="POST repos/$REPO/releases -F draft=true $(pre "$t")-f tag_name=$t -f name=$t"
   for x in $FIVE; do exp="$exp
 UPLOAD $x"; done
   exp="$exp
@@ -56,6 +59,10 @@ mv_() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" 
 [ "$(mv_ tag)" = "$tag" ] || die "the manifest is for $(mv_ tag), not $tag"
 [ "$(mv_ mode)" = signed ] || die "the manifest's mode is '$(mv_ mode)', not signed"
 [ "$(mv_ control)" = false ] || die "the manifest is a control build"
+# a control build's output nested anywhere below is refused too
+for nm in $(find "$out" -mindepth 2 -name MANIFEST.json 2>/dev/null); do
+  grep -q '"control": *true' "$nm" && die "a control build's manifest lies inside $out ($nm)"
+done
 mc=$(mv_ commit)
 
 # the upload set and SHA256SUMS
@@ -80,7 +87,7 @@ grep -qx "$tag" "$releases" && die "a release or draft already uses $tag"
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/sd-plan.XXXXXX") || exit 1
 {
-  echo "POST repos/$REPO/releases -F draft=true -f tag_name=$tag -f name=$tag"
+  echo "POST repos/$REPO/releases -F draft=true $(pre "$tag")-f tag_name=$tag -f name=$tag"
   for x in $FIVE; do echo "UPLOAD $x"; done
   echo "PATCH -F draft=false"
 } > "$tmp"

@@ -61,8 +61,20 @@ printf '%s\trefs/tags/v0.1.0\n' "$C" > "$FX/r5"
 ok "$FX/o" "$FX/r5" && pass "a lightweight remote tag on the commit: accepted" || fail "lightweight: rc=$r"
 echo v0.1.0 > "$FX/rel2"; no "$FX/o" "$FX/remote" "$FX/rel2" && pass "a release or draft that already uses the tag: refused" || fail "existing release: rc=$r"
 
+mkout "$FX/o"; mkdir -p "$FX/o/sub/v0.1.0-control"; printf '{\n  "control": true\n}\n' > "$FX/o/sub/v0.1.0-control/MANIFEST.json"
+no "$FX/o" && pass "a control manifest nested inside: refused" || fail "nested control: rc=$r"
+# an rc tag is a prerelease (never the "latest" release)
+fx_release 0.1.1 2 v0.1.1-rc.1; C2=$(g rev-parse "v0.1.1-rc.1^{commit}")
+mkout "$FX/o2"; sed -i.b "s/v0.1.0/v0.1.1-rc.1/; s/$C/$C2/" "$FX/o2/MANIFEST.json"
+printf '%s\trefs/tags/v0.1.1-rc.1\n' "$C2" > "$FX/r6"
+(cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 sh "$P" --out "$FX/o2" --tag v0.1.1-rc.1 --remote "$FX/r6" --releases "$FX/releases") > "$FX/plan2" 2>"$FX/err"
+grep -qx 'POST repos/lukaso/sheepdog/releases -F draft=true -F prerelease=true -f tag_name=v0.1.1-rc.1 -f name=v0.1.1-rc.1' "$FX/plan2" && pass "an rc tag: POST with prerelease true" || fail "rc POST: $(grep POST "$FX/plan2") $(cat "$FX/err")"
+sh "$P" --validate "$FX/plan2" && pass "the rc plan validates" || fail "the rc plan does not validate"
+sed 's/ -F prerelease=true//' "$FX/plan2" > "$FX/plan3"; sh "$P" --validate "$FX/plan3" >/dev/null 2>&1 && fail "an rc plan without prerelease validated" || pass "an rc plan without prerelease: refused"
+grep -q prerelease "$FX/plan" && fail "a final tag was marked prerelease" || pass "a final tag: no prerelease"
+fx_release 0.1.0 9 v0.1.0-tmp >/dev/null 2>&1; g tag -d v0.1.0-tmp >/dev/null 2>&1
 # --validate refuses every other shape
-ok "$FX/o"; cp "$FX/plan" "$FX/good"
+mkout "$FX/o"; ok "$FX/o" || fail "the good plan for --validate: rc=$r"; cp "$FX/plan" "$FX/good"
 bad() { # label sed-expression
   sed "$2" "$FX/good" > "$FX/bad"
   cmp -s "$FX/bad" "$FX/good" && { fail "$1: the change was not made"; return; }
