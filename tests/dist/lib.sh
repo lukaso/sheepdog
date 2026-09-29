@@ -145,8 +145,10 @@ g() { (cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG
 fx_release() {
   sed -i.bak "s/^version = \".*\"/version = \"$1\"/" "$REPO/Cargo.toml" && rm -f "$REPO/Cargo.toml.bak"
   # Cargo.lock records the crate's own version too (a build with --locked refuses a stale one)
-  [ "${FX_STALE_LOCK:-}" = 1 ] || awk -v v="$1" 'p && /^version = /{print "version = \"" v "\""; p=0; next} {print} /^name = "sheepdog"$/{p=1}' \
-    "$REPO/Cargo.lock" > "$REPO/Cargo.lock.new" && mv "$REPO/Cargo.lock.new" "$REPO/Cargo.lock"
+  if [ "${FX_STALE_LOCK:-}" != 1 ]; then
+    awk -v v="$1" 'p && /^version = /{print "version = \"" v "\""; p=0; next} {print} /^name = "sheepdog"$/{p=1}' \
+      "$REPO/Cargo.lock" > "$REPO/Cargo.lock.new" && mv "$REPO/Cargo.lock.new" "$REPO/Cargo.lock" || exit 3
+  fi
   if grep -q '^SD_BUILD_COUNTER=' "$REPO/scripts/release.conf"; then
     sed -i.bak "s/^SD_BUILD_COUNTER=.*/SD_BUILD_COUNTER=$2/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
   else printf '\nSD_BUILD_COUNTER=%s\n' "$2" >> "$REPO/scripts/release.conf"; fi

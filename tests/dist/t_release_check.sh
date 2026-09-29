@@ -25,7 +25,8 @@ g commit -q --allow-empty -m later; chk no "HEAD not on the tag" v0.1.0-rc.1
 # (counter 5, so only the version check can refuse it)
 fx_release 0.1.0 5 v0.2.0-rc.1; chk no "a tag whose version is not Cargo.toml's" v0.2.0-rc.1
 g tag -d v0.2.0-rc.1 >/dev/null
-FX_STALE_LOCK=1 fx_release 0.3.0 9 v0.3.0-rc.1; chk no "a Cargo.lock that still records the old version" v0.3.0-rc.1
+# (in a subshell: a variable set before a function call stays set after it in bash's POSIX mode)
+(FX_STALE_LOCK=1; fx_release 0.3.0 9 v0.3.0-rc.1); chk no "a Cargo.lock that still records the old version" v0.3.0-rc.1
 g tag -d v0.3.0-rc.1 >/dev/null; fx_release 0.1.0 5 v0.1.0-x; g tag -d v0.1.0-x >/dev/null
 fx_release 0.1.0 1 v0.1.0-rc.2; chk no "a counter not above the previous tag's" v0.1.0-rc.2
 fx_release 0.1.0 2 v0.1.0-rc.3; chk ok "a counter above the previous tag's" v0.1.0-rc.3

@@ -112,11 +112,12 @@ docker_env() { # the docker class
   tool base env ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} docker "$@"
 }
 
-# --- the unsigned build (PHASE3.md S2) --------------------------------------------------------
-build_unsigned() {
+# --- the build (PHASE3.md S2): unsigned, signed, or the signed control ----------------------------
+build_release() { # mode: unsigned | signed | control
   . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
   short=$(git -C "$root" rev-parse --short=12 "$commit")
-  dest=$out/$tag-unsigned
+  mode=$1
+  case $mode in unsigned) dest=$out/$tag-unsigned ;; signed) dest=$out/$tag ;; control) dest=$out/$tag-control ;; esac
   [ -e "$dest" ] && die "$dest exists (a release output directory is never reused)"
   mkdir -p "$dest" || die "cannot make $dest"
   scratch=$(mktemp -d /private/tmp/sd-release.XXXXXX 2>/dev/null || mktemp -d) || die "no scratch dir"
@@ -142,12 +143,22 @@ build_unsigned() {
     [ "$m" = 12.0 ] || die "the $a slice's minimum macOS is '$m', not 12.0"
   done
   xyz=${tag#v}; xyz=${xyz%%-*}
-  app=$("$root/scripts/bundle.sh" "$scratch/sheepdog" "$scratch/bundle" "$xyz" "$c") || die "bundle.sh"
-  mkdir -p "$scratch/rh"
-  v=$("$root/scripts/lib/release-run.sh" "$scratch/rh" "$app/Contents/MacOS/sheepdog" --version) || die "the Mac binary does not run"
-  case $v in *"$short"*) ;; *) die "the Mac binary names another commit: $v" ;; esac
-  "$root/scripts/lib/archive.sh" make "$app" "$dest/sheepdog-macos-universal.tar.gz" || die "archive"
-  "$root/scripts/lib/archive.sh" check "$dest/sheepdog-macos-universal.tar.gz" || die "the archive fails its check"
+  if [ "$mode" = unsigned ]; then
+    app=$("$root/scripts/bundle.sh" "$scratch/sheepdog" "$scratch/bundle" "$xyz" "$c") || die "bundle.sh"
+    mkdir -p "$scratch/rh"
+    v=$("$root/scripts/lib/release-run.sh" "$scratch/rh" "$app/Contents/MacOS/sheepdog" --version) || die "the Mac binary does not run"
+    case $v in *"$short"*) ;; *) die "the Mac binary names another commit: $v" ;; esac
+    "$root/scripts/lib/archive.sh" make "$app" "$dest/sheepdog-macos-universal.tar.gz" || die "archive"
+    "$root/scripts/lib/archive.sh" check "$dest/sheepdog-macos-universal.tar.gz" || die "the archive fails its check"
+  else
+    # sign.sh as a direct child (never in ( ), $( ) or a pipeline: it checks that its parent is
+    # this process), with a nonce only this run knows, in a 0600 file of this user's
+    umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$scratch/nonce"; umask 022
+    nn=$(cat "$scratch/nonce")
+    set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce"
+    [ "$mode" = control ] && set -- "$@" --no-notarize
+    "$root/scripts/lib/sign.sh" "$@" || die "signing failed (sign.sh exit $?)"
+  fi
 
   # Linux: the pinned image's own CARGO_HOME, fetched in the image, then built offline
   amd64=sd-amd64-base:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)
@@ -183,7 +194,7 @@ build_unsigned() {
   fi
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
   {
-    printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "control": false,\n  "files": [\n' "$tag" "$commit"
+    printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": [\n' "$tag" "$commit" "$mode" "$( [ "$mode" = control ] && echo true || echo false)"
     sep=""
     for f in $files; do
       h=$(shasum -a 256 "$dest/$f" | cut -d' ' -f1)
@@ -198,15 +209,16 @@ build_unsigned() {
     done
     printf '\n  ]\n}\n'
   } > "$dest/MANIFEST.json"
-  echo "release: $tag built (unsigned) in $dest"
+  echo "release: $tag built ($mode) in $dest"
 }
 
 case $sub in
   check) checks ;;
   build)
     checks
-    [ $sign = yes ] && die "build --sign is not built yet (PHASE3.md S2c)"
-    build_unsigned ;;
+    if [ $sign = no ]; then build_release unsigned
+    elif [ $nonot = yes ]; then build_release control
+    else build_release signed; fi ;;
   publish) die "publish is not built yet (PHASE3.md S2d)" ;;
   npm-check) die "npm-check is not built yet (PHASE3.md S2e)" ;;
 esac

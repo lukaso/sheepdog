@@ -32,4 +32,13 @@ rm -f "$app/Contents/extra"
 xattr -c "$app/Contents/Info.plist"
 (cd "$FX/b" && tar --no-xattrs --no-mac-metadata --no-acls -czf "$FX/names.tar.gz" Sheepdog.app) 2>/dev/null
 "$A" check "$FX/names.tar.gz" >/dev/null 2>&1 && fail "owner names accepted" || pass "owner names refused"
+# a signed, not stapled bundle (the control mode): --signed-unstapled wants the signature and no
+# ticket; --signed (a ticket) and the unsigned check refuse it
+xattr -c -r "$app" 2>/dev/null
+codesign -s - -f "$app" 2>/dev/null
+"$A" make "$app" "$FX/su.tar.gz" >/dev/null 2>&1
+"$A" check "$FX/su.tar.gz" --signed-unstapled && pass "a signed, unstapled bundle passes --signed-unstapled" || fail "--signed-unstapled refused a signed bundle"
+"$A" check "$FX/su.tar.gz" --signed >/dev/null 2>&1 && fail "--signed accepted a bundle with no staple ticket" || pass "--signed refuses a bundle with no staple ticket"
+"$A" check "$FX/su.tar.gz" >/dev/null 2>&1 && fail "the unsigned check accepted a signed bundle" || pass "the unsigned check refuses a signed bundle"
+"$A" check "$FX/good.tar.gz" --signed-unstapled >/dev/null 2>&1 && fail "--signed-unstapled accepted an unsigned bundle" || pass "--signed-unstapled refuses an unsigned bundle"
 finish
