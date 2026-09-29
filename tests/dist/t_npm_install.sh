@@ -22,16 +22,12 @@ app=$("$SD_ROOT/scripts/bundle.sh" "$FX/target/release/sheepdog" "$FX/bundle" 0.
 EXE=$app/Contents/MacOS/sheepdog
 "$SD_ROOT/scripts/lib/exec-guard.sh" check "$EXE" || { fail "the door refuses the .dev bundle"; finish; }
 
-# the packages, as release.sh makes them
-pk=$FX/pk; mkdir -p "$pk/main/bin" "$pk/darwin" "$pk/linux-arm64/bin" "$pk/linux-x64/bin" "$FX/tgz"
-cp "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$pk/main/bin/" && chmod 755 "$pk/main/bin/sheepdog"
-printf '{"name":"@lukaso/sheepdog","version":"%s","bin":{"sheepdog":"bin/sheepdog"},"files":["bin"],"optionalDependencies":{"@lukaso/sheepdog-darwin-universal":"%s","@lukaso/sheepdog-linux-arm64":"%s","@lukaso/sheepdog-linux-x64":"%s"}}\n' "$V" "$V" "$V" "$V" > "$pk/main/package.json"
-cp -R "$app" "$pk/darwin/"
-printf '{"name":"@lukaso/sheepdog-darwin-universal","version":"%s","os":["darwin"],"cpu":["arm64","x64"],"files":["Sheepdog.app"]}\n' "$V" > "$pk/darwin/package.json"
-for a in arm64 x64; do printf '#!/bin/sh\n' > "$pk/linux-$a/bin/sheepdog"; chmod 755 "$pk/linux-$a/bin/sheepdog"
-  printf '{"name":"@lukaso/sheepdog-linux-%s","version":"%s","os":["linux"],"cpu":["%s"],"files":["bin"]}\n' "$a" "$V" "$a" > "$pk/linux-$a/package.json"; done
-for d in main darwin linux-arm64 linux-x64; do (cd "$pk/$d" && env npm_config_cache="$FX/npmc" HOME="$FX/h0" npm pack --silent --pack-destination "$FX/tgz" >/dev/null) || fail "npm pack $d"; done
-
+# the packages, packed by scripts/lib/npm-pack.sh (what release.sh build runs)
+mkdir -p "$FX/tgz" "$FX/lin"
+"$SD_ROOT/scripts/lib/archive.sh" make "$app" "$FX/lin/sheepdog-macos-universal.tar.gz" || { fail "archive"; finish; }
+printf '#!/bin/sh\n' > "$FX/lin/a"; printf '#!/bin/sh\n' > "$FX/lin/x"
+sh "$SD_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepdog-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" >/dev/null \
+  || { fail "npm-pack.sh"; finish; }
 # a static registry: a packument per package, the tarballs beside
 reg() { # dir port [skip-platform]
   python3 - "$1" "$2" "${3:-}" "$FX/tgz" <<'PY'

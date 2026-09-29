@@ -14,8 +14,16 @@ fx_release 0.1.0 1 v0.1.0-rc.1
 short=$(g rev-parse --short=12 "v0.1.0-rc.1^{commit}")
 out=$FX/out
 (cd "$REPO" && env -u RUSTUP_TOOLCHAIN HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
-  timeout 3000 sh scripts/release.sh build --out "$out" v0.1.0-rc.1) > "$FX/log" 2>&1; rc=$?
+  timeout 3000 sh scripts/release.sh build --out "$out" v0.1.0-rc.1) > "$FX/log" 2>&1 & bp=$!
+# once the tag's worktree exists, break the shared checkout's helpers: the build must use the tag's
+i=0; until grep -q '^release: building' "$FX/log" 2>/dev/null || [ $i -gt 600 ]; do sleep 0.5; i=$((i + 1)); done
+for h in scripts/bundle.sh scripts/lib/archive.sh scripts/lib/npm-pack.sh scripts/lib/render-install.sh; do
+  printf '#!/bin/sh\necho CHECKOUT-HELPER-USED >&2\nexit 1\n' > "$REPO/$h"
+done
+wait $bp; rc=$?
 [ $rc = 0 ] && pass "build: rc 0" || { fail "build: rc=$rc"; tail -20 "$FX/log"; finish; }
+grep -q CHECKOUT-HELPER-USED "$FX/log" && fail "a helper ran from the shared checkout" || pass "every helper ran from the tag's worktree (the checkout's were broken mid-build)"
+g checkout -q -- scripts
 echo "expect commit $short; the build said: $(grep '^release: building' "$FX/log")"
 D=$out/v0.1.0-rc.1-unsigned
 for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 SHA256SUMS MANIFEST.json; do
@@ -33,6 +41,11 @@ mkdir -p "$FX/rh"
 v=$("$SD_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepdog" --version 2>&1)
 case $v in *"$short"*) pass "the Mac binary names the tag's commit" ;; *) fail "the Mac binary says: $v" ;; esac
 . "$SD_ROOT/scripts/release.conf"
+# control for the static check: a glibc build has a PT_INTERP (so the check can fire)
+if [ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ]; then
+  timeout 120 docker run --rm --pull=never --network none -v "$SD_ROOT/target-linux-gnu/debug/sheepdog":/b:ro "$SD_IMG_ALPINE" sh -c 'readelf -l /b | grep -q INTERP' \
+    && pass "control: a glibc build shows a PT_INTERP" || fail "control: the glibc build shows no PT_INTERP"
+fi
 for a in aarch64 x86_64; do
   b=$D/sheepdog-linux-$a
   case $a in aarch64) pf=linux/arm64 ;; *) pf=linux/amd64 ;; esac
