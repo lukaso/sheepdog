@@ -22,7 +22,9 @@ serve() { # dir -> sets PORT, SP; log in dir.log
   PORT=$(cat "$1.port")
 }
 cp -r /srv /tmp/good && serve /tmp/good; GP=$PORT; GS=$SP
-cp -r /srv /tmp/badsum && sed -i 's/^./0/' /tmp/badsum/SHA256SUMS && serve /tmp/badsum; BP=$PORT; BS=$SP
+cp -r /srv /tmp/badsum && awk '{c=substr($0,1,1); print (c=="0"?"1":"0") substr($0,2)}' /srv/SHA256SUMS > /tmp/badsum/SHA256SUMS
+cmp -s /srv/SHA256SUMS /tmp/badsum/SHA256SUMS && bad "the corrupted sum did not change"
+serve /tmp/badsum; BP=$PORT; BS=$SP
 inst() { # user base -> rc; output in /tmp/o
   if [ "$1" = root ]; then env SHEEPDOG_INSTALL_BASE="$2" sh /tmp/good/install.sh > /tmp/o 2>&1
   else su -s /bin/sh "$1" -c "env PATH=/usr/bin:/bin SHEEPDOG_INSTALL_BASE='$2' sh /tmp/good/install.sh" > /tmp/o 2>&1; fi

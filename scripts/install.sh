@@ -27,6 +27,8 @@ die() { echo "sheepdog install: $*" >&2; exit 1; }
 : @@SD_DOOR@@
 
 [ -n "$SHEEPDOG_VERSION" ] || die "this is the unrendered install.sh; use the one from a release"
+# HOME names where it installs (except as root on Linux)
+if [ -z "${HOME:-}" ] && { [ "$(uname -s)" = Darwin ] || [ "$(id -u)" != 0 ]; }; then die "HOME is not set; it names where sheepdog is installed"; fi
 base=${SHEEPDOG_INSTALL_BASE:-https://github.com/$REPO/releases/download/v$SHEEPDOG_VERSION}
 
 # the base: https, or http on exactly a loopback host (no userinfo, fragment, query or backslash
@@ -93,8 +95,13 @@ if [ "$(uname -s)" = Darwin ]; then
   /bin/sh -p "$tmp/door/lib/exec-guard.sh" check "$new/Contents/MacOS/sheepdog" || die "the exec door refuses Sheepdog.app; nothing installed"
   # two moves, not one atomic swap: between them there is no app, and a sheepdog starting then
   # falls back as PLAN.md §4.4 says
-  if [ -e "$app" ]; then mv "$app" "$stage/Sheepdog.app.old" || die "cannot move the old app aside"; fi
-  mv "$new" "$app" || die "cannot move Sheepdog.app into $apps"
+  old=""
+  if [ -e "$app" ]; then mv "$app" "$stage/Sheepdog.app.old" || die "cannot move the old app aside"; old=$stage/Sheepdog.app.old; fi
+  if ! mv "$new" "$app"; then
+    # put the old one back before the cleanup removes the staging dir
+    [ -n "$old" ] && mv "$old" "$app"
+    die "cannot move Sheepdog.app into $apps${old:+ (the old one is back in place)}"
+  fi
   rm -rf "$stage"; stage=""
   bin=$HOME/.local/bin
   mkdir -p "$bin" && ln -sf "$app/Contents/MacOS/sheepdog" "$bin/sheepdog" || die "cannot link $bin/sheepdog"

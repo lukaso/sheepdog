@@ -54,7 +54,9 @@ serve() { # bundle-id sign(adhoc|none) [bad-sum|no-line]
   "$SD_ROOT/scripts/lib/archive.sh" make "$app" "$FX/srv/sheepdog-macos-universal.tar.gz" || exit 3
   (cd "$FX/srv" && shasum -a 256 sheepdog-macos-universal.tar.gz > SHA256SUMS)
   case ${3:-} in
-    bad-sum) sed -i.b 's/^./0/' "$FX/srv/SHA256SUMS" ;;
+    bad-sum) cp "$FX/srv/SHA256SUMS" "$FX/sum0"
+      awk '{c=substr($0,1,1); print (c=="0"?"1":"0") substr($0,2)}' "$FX/sum0" > "$FX/srv/SHA256SUMS"
+      cmp -s "$FX/sum0" "$FX/srv/SHA256SUMS" && fail "the corrupted sum did not change" ;;
     no-line) : > "$FX/srv/SHA256SUMS" ;;
   esac
   rm -rf "$FX/b"
@@ -71,6 +73,10 @@ serve com.lukaso.sheepdog adhoc; inst "$BASE"; r=$?
 serve com.lukaso.sheepdog none; inst "$BASE"; r=$?
 [ $r = 1 ] && nothing && pass "a linker-signed executable in a release-ID bundle: refused, nothing run" || fail "linker-signed: rc=$r $(tail -1 "$FX/o")"
 
+# no HOME: refused by name (not a shell error)
+serve com.lukaso.sheepdog.dev adhoc; rec=$FX/rec; : > "$rec"
+env -u HOME SHEEPDOG_INSTALL_BASE="$BASE" SD_EXEC_RECORD="$rec" sh "$I" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'HOME' "$FX/o" && ! grep -q 'parameter not set\|unbound variable' "$FX/o" && pass "no HOME: refused, by name" || fail "no HOME: rc=$r $(tail -1 "$FX/o")"
 # no curl, no wget: a PATH with the tools install.sh needs, but neither downloader
 mkdir -p "$FX/p"
 for t in sh tar mkdir mv rm ln uname mktemp sed grep awk cat shasum dirname basename head od tr readlink chmod cut id env sleep ls cp; do
