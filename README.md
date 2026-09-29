@@ -81,8 +81,9 @@ sheepdog is not a sandbox. It does not reach:
 
 A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (Node's `child.kill`,
 `docker stop` with `STOPSIGNAL SIGINT`) kills only sheepdog; the rest of the tree is then ended by
-your next `sheepdog run` or `sheepdog sweep` with the same `--owner` (a `run` with `--no-sweep`
-skips that). Send TERM instead.
+your next `sheepdog run` or `sheepdog sweep` with the same `--owner` and the same state directory,
+before a reboot (in a container: in the same container). A `run` with `--no-sweep` skips that, and
+a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run. Send TERM instead.
 
 Where a delegated cgroup v2 is available, a cgroup is stronger: processes cannot leave it. sheepdog
 is the portable floor, and on a Mac the only option.
