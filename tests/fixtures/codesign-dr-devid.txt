@@ -1,0 +1,5 @@
+# The `codesign -d -r-` output of a Developer ID-signed app on the operator's Mac (read 2026-09-29
+# from /Applications/Chief of Staff.app, team P7UM972E39), with its identifier changed to the
+# release ID. sign.sh's requirement comparison is tested against it (PHASE3.md §1.1).
+Executable=/Applications/Sheepdog.app/Contents/MacOS/sheepdog
+designated => identifier "com.lukaso.sheepdog" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = P7UM972E39

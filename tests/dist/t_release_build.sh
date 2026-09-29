@@ -41,8 +41,9 @@ for a in aarch64 x86_64; do
   v=$(timeout 120 docker run --rm --pull=never --network none --platform $pf -v "$b":/sheepdog:ro "sd-scratch:empty-${pf#linux/}" /sheepdog --version 2>&1)
   case $v in *"$short"*) pass "$a runs in an empty image and names the tag's commit" ;; *) fail "$a in an empty image: $v" ;; esac
 done
-(cd "$D" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) && pass "SHA256SUMS matches" || fail "SHA256SUMS does not match"
-n=$(grep -c . "$D/SHA256SUMS"); [ "$n" -ge 3 ] && pass "SHA256SUMS has $n lines" || fail "SHA256SUMS has $n lines"
+(cd "$D" && shasum -a 256 -c --strict SHA256SUMS >/dev/null 2>&1) && pass "SHA256SUMS matches (strict: no malformed line)" || fail "SHA256SUMS does not match, or has a malformed line"
+want=3; [ -e "$D/install.sh" ] && want=4
+n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = "$want" ] && pass "SHA256SUMS has exactly $want lines" || fail "SHA256SUMS has $n lines, want $want"
 pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SD_ROOT/rust-toolchain.toml")
 rs=$(sed -n 's/.*"rustc": *"\([^"]*\)".*/\1/p' "$D/MANIFEST.json" | sort -u)
 [ -n "$rs" ] && [ "$(printf '%s\n' "$rs" | grep -vc "^rustc $pin ")" = 0 ] && pass "every recorded rustc is $pin" || fail "recorded rustc: $rs"
