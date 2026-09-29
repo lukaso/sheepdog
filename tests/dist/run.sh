@@ -7,13 +7,15 @@
 set -u
 cd "$(dirname "$0")" || exit 3
 logdir=$(mktemp -d "${TMPDIR:-/tmp}/sd-dist.XXXXXX") || exit 3
-cp="" cur=""
-# stop the running cell (TERM, then KILL after 5 s, by the pid recorded here), print what it wrote
+cp="" gp="" cur=""
+# stop the running cell: TERM to its `timeout`, then, after at most 5 s, KILL its whole process
+# group (GNU timeout leads a group of its own; this runner started it and confirmed the group id
+# when it started, so no other group can be hit). Then print what the cell wrote.
 stop() {
   if [ -n "$cp" ]; then
     kill -TERM "$cp" 2>/dev/null
     i=0; while kill -0 "$cp" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-    kill -KILL "$cp" 2>/dev/null
+    if [ -n "$gp" ] && [ "$gp" -gt 1 ]; then kill -KILL -- "-$gp" 2>/dev/null; else kill -KILL "$cp" 2>/dev/null; fi
     [ -n "$cur" ] && [ -f "$cur" ] && { cat "$cur"; echo "(stopped by a signal)"; }
   fi
   rm -rf "$logdir"; exit "$1"
@@ -28,7 +30,15 @@ for t in t_*.sh; do
   echo "== $t"
   cur="$logdir/$n"
   timeout -k 10 1200 sh "$t" > "$cur" 2>&1 & cp=$!
-  wait "$cp"; rc=$?; cp=""
+  # the group id, once timeout has made its group (bounded; unconfirmed means a pid-only kill)
+  gp="" i=0
+  while [ $i -lt 20 ]; do
+    g=$(ps -o pgid= -p "$cp" 2>/dev/null | tr -d ' ')
+    [ "$g" = "$cp" ] && { gp=$cp; break; }
+    [ -n "$g" ] || break
+    sleep 0.05; i=$((i + 1))
+  done
+  wait "$cp"; rc=$?; cp="" gp=""
   cat "$logdir/$n"
   if [ $rc != 0 ]; then bad="$bad $t"
   elif [ "$(/usr/bin/uname -s 2>/dev/null || uname -s)" = Darwin ] && grep -q '^SKIP' "$logdir/$n"; then bad="$bad $t(skipped on macOS)"; fi
