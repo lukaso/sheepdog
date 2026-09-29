@@ -52,7 +52,7 @@ esac; exit 0'
 shim spctl 'exit 0'
 shim ditto 'for a; do last=$a; done; : > "$last"; exit 0'
 shim security 'case "$*" in *find-identity*) echo "     0 valid identities found" ;;
-  unlock-keychain*) [ -e "'"$FX"'/unlock.fail" ] && { echo "security: SecKeychainUnlock: The user name or passphrase you entered is not correct." >&2; exit 51; } ;;
+  unlock-keychain*) { [ -e "'"$FX"'/unlock.fail" ] || { [ -e "'"$FX"'/unlock.fail2" ] && [ "$(grep -c "^security unlock-keychain" "'"$S"'/calls")" -ge 2 ]; }; } && { echo "security: SecKeychainUnlock: The user name or passphrase you entered is not correct." >&2; exit 51; } ;;
   lock-keychain*) [ -e "'"$FX"'/lock.fail" ] && [ "$(grep -c "^security lock-keychain" "'"$S"'/calls")" -ge 2 ] && { echo "security: lock failed" >&2; exit 50; } ;;
 esac; exit 0'
 KC=$FX/home/Library/Keychains/sheepdog-notary.keychain-db
@@ -126,6 +126,10 @@ mv "$KC" "$KC.away"; run m; rc=$?; mv "$KC.away" "$KC"
 : > "$FX/unlock.fail"; : > "$FX/lock.fail"; run lu; rc=$?; rm -f "$FX/unlock.fail" "$FX/lock.fail"
 [ $rc != 0 ] && grep -q "could not lock the notary keychain $KC" "$FX/out.lu" \
   && pass "a failed unlock and a failed lock at exit: loud, the file named" || fail "failed unlock+lock: rc=$rc $(tail -2 "$FX/out.lu" | tr '\n' ' ')"
+# 2g. Apple rejects it and the second unlock fails: the message says it WAS sent, names the id
+: > "$FX/reject"; : > "$FX/unlock.fail2"; run ju; rc=$?; rm -f "$FX/reject" "$FX/unlock.fail2"
+[ $rc = 1 ] && ! grep -q 'nothing was sent' "$FX/out.ju" && grep -q '11111111-0000-0000-0000-000000000000' "$FX/out.ju" && [ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] \
+  && pass "a rejection whose log unlock fails: says the submission was sent, names its id, locks" || fail "rejection + failed unlock: rc=$rc $(tail -2 "$FX/out.ju" | tr '\n' ' ')"
 # 2d. Apple rejects it: unlocked again before the log fetch, locked at the end
 : > "$FX/reject"; run j; rc=$?; rm -f "$FX/reject"
 seq=$(kcl)

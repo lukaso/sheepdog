@@ -93,18 +93,20 @@ tmp=/private/tmp/sd-sign.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
 # lock after the last notarytool call); any exit in that span locks it. A failed lock is loud and
 # fails the build: the operator must not be told it ended well while the keychain is open.
 kc=""
+# kc is cleared only after the lock was tried, so a signal during the lock leaves it set and the
+# exit trap tries again
 relock() {
   [ -n "$kc" ] || return 0
-  k1=$kc; kc=""
-  tool security lock-keychain "$k1" && return 0
-  echo "sign: could not lock the notary keychain $k1; lock it now: security lock-keychain $k1" >&2
-  return 1
+  if tool security lock-keychain "$kc"; then kc=""; return 0; fi
+  echo "sign: could not lock the notary keychain $kc; lock it now: security lock-keychain $kc" >&2
+  kc=""; return 1
 }
-trap 'rc=$?; relock || rc=1; rm -rf "$tmp"; exit $rc' EXIT
+trap 'rc=$?; relock; rm -rf "$tmp"; exit $rc' EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -m 700 "$tmp" || die "cannot make $tmp"
 # `security unlock-keychain` with no -p asks for the password in the terminal (never read here)
-unlock() { tool security unlock-keychain "$kc" || die "the notary keychain was not unlocked (a wrong password, or the prompt cancelled): nothing was sent to Apple"; }
+unlock() { # what-was-sent
+  tool security unlock-keychain "$kc" || die "the notary keychain was not unlocked (a wrong password, or the prompt cancelled): $1"; }
 
 if [ $notarize = yes ]; then
   k=$HOME/$SD_NOTARY_KEYCHAIN
@@ -127,7 +129,7 @@ if [ $notarize = yes ]; then
   [ $real = no ] && echo "announce" >> "${SD_ASK_RECORD:-/dev/null}"
   kc=$k
   tool security lock-keychain "$kc" || die "cannot lock the notary keychain $kc"
-  unlock
+  unlock "nothing was sent to Apple"
   if ! tool xcrun notarytool history --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-profile.txt" 2>&1; then
     die "the profile check failed; see $dest/notary-profile.txt (a missing profile or no network: until the operator records each outcome, it is not told apart)"
   fi
@@ -138,8 +140,8 @@ if [ $notarize = yes ]; then
     *'"status":"Accepted"'*|*'"status": "Accepted"'*) ;;
     *) id=$(printf '%s' "$res" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')
        # the keychain may have locked itself during --wait (5 minutes idle)
-       [ -n "$id" ] && unlock && tool xcrun notarytool log "$id" --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-log.json" 2>&1
-       relock || exit 1
+       [ -n "$id" ] && unlock "the submission $id WAS sent and Apple did not accept it; its log was not fetched: xcrun notarytool log $id --keychain-profile sheepdog-notary --keychain $kc" \
+         && tool xcrun notarytool log "$id" --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-log.json" 2>&1
        die "Apple did not accept it; see $dest/notary-log.json" ;;
   esac
   relock || exit 1
