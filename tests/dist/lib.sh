@@ -131,3 +131,28 @@ fx_build() {
     *) echo "no fixture $1" >&2; exit 3 ;;
   esac
 }
+
+# A throwaway git repo: the tracked files of this tree, committed, with git isolated from the
+# operator's config (no global or system config, a temp HOME). Sets REPO.
+fx_repo() {
+  REPO=$FX/repo; rm -rf "$REPO"; mkdir -p "$REPO" "$FX/ghome"
+  (cd "$SD_ROOT" && git ls-files -z | xargs -0 tar -cf -) | tar -xmf - -C "$REPO" || exit 3
+  g init -q && g add -A && g commit -qm base || exit 3
+}
+g() { (cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t git "$@"); }
+# fx_release VERSION COUNTER TAG: set Cargo.toml's version and the build counter, commit, tag
+fx_release() {
+  sed -i.bak "s/^version = \".*\"/version = \"$1\"/" "$REPO/Cargo.toml" && rm -f "$REPO/Cargo.toml.bak"
+  if grep -q '^SD_BUILD_COUNTER=' "$REPO/scripts/release.conf"; then
+    sed -i.bak "s/^SD_BUILD_COUNTER=.*/SD_BUILD_COUNTER=$2/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+  else printf '\nSD_BUILD_COUNTER=%s\n' "$2" >> "$REPO/scripts/release.conf"; fi
+  g commit -qam "release $3" && g tag -a "$3" -m "$3"
+}
+# shims that record their argv, for tools a refusal must never reach
+fx_shims() { # dir tool...
+  d=$1; shift; mkdir -p "$d"
+  for t in "$@"; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\nexit 0\n' "$t" "$d" > "$d/$t"; chmod +x "$d/$t"
+  done
+}
