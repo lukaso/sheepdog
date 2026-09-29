@@ -156,7 +156,7 @@ build_release() { # mode: unsigned | signed | control
     # this process), with a nonce only this run knows, in a 0600 file of this user's
     umask 077; od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$scratch/nonce"; umask 022
     nn=$(cat "$scratch/nonce")
-    set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce"
+    set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce" --parent-pid "$$"
     [ "$mode" = control ] && set -- "$@" --no-notarize
     "$root/scripts/lib/sign.sh" "$@" || die "signing failed (sign.sh exit $?)"
   fi
