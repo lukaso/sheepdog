@@ -17,7 +17,10 @@ xattr -w com.apple.quarantine "0081;00000000;Safari;" "$app/Contents/Info.plist"
 # the default tar keeps xattrs and owner names: refused
 (cd "$FX/b" && tar -czf "$FX/plain.tar.gz" Sheepdog.app) 2>/dev/null
 "$A" check "$FX/plain.tar.gz" >/dev/null 2>&1 && fail "a plain tar (xattr, names) accepted" || pass "a plain tar with an xattr and owner names refused"
-# an xattr only (owners already 0/0 without names): refused by the pax-header check
+# an xattr only (owners already 0/0 without names), and only com.apple.provenance, which macOS
+# puts on every file made here and extraction adds anyway: only the pax-header check can see it
+xattr -d com.apple.quarantine "$app/Contents/Info.plist" 2>/dev/null
+xattr -l "$app/Contents/Info.plist" | grep -q com.apple.provenance || fail "the fixture has no provenance xattr"
 (cd "$FX/b" && tar --uid 0 --gid 0 --uname '' --gname '' -czf "$FX/xattr.tar.gz" Sheepdog.app) 2>/dev/null
 "$A" check "$FX/xattr.tar.gz" >/dev/null 2>&1 && fail "an archive with an xattr accepted" || pass "an archive with an xattr (and 0/0 owners) refused"
 # an extra file: refused
