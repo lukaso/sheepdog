@@ -31,7 +31,7 @@ grep -q CHECKOUT-HELPER-USED "$FX/log" && fail "a helper ran from the shared che
 g checkout -q -- scripts
 echo "expect commit $short; the build said: $(grep '^release: building' "$FX/log")"
 D=$out/v0.1.0-rc.1-unsigned
-for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 SHA256SUMS MANIFEST.json; do
+for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 SHA256SUMS MANIFEST.json sheepdog.rb; do
   [ -s "$D/$f" ] && pass "$f made" || fail "$f missing"
 done
 "$SD_ROOT/scripts/lib/archive.sh" check "$D/sheepdog-macos-universal.tar.gz" && pass "the archive passes archive.sh check" || fail "the archive fails its check"
@@ -60,6 +60,7 @@ for a in aarch64 x86_64; do
   v=$(timeout 120 docker run --rm --pull=never --network none --platform $pf -v "$b":/sheepdog:ro "sd-scratch:empty-${pf#linux/}" /sheepdog --version 2>&1)
   case $v in *"$short"*) pass "$a runs in an empty image and names the tag's commit" ;; *) fail "$a in an empty image: $v" ;; esac
 done
+grep -q "sha256 \"$(shasum -a 256 "$D/sheepdog-macos-universal.tar.gz" | cut -d' ' -f1)\"" "$D/sheepdog.rb" && pass "the cask names the archive's hash" || fail "the cask's hash"
 (cd "$D" && shasum -a 256 -c --strict SHA256SUMS >/dev/null 2>&1) && pass "SHA256SUMS matches (strict: no malformed line)" || fail "SHA256SUMS does not match, or has a malformed line"
 want=3; [ -e "$D/install.sh" ] && want=4
 n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = "$want" ] && pass "SHA256SUMS has exactly $want lines" || fail "SHA256SUMS has $n lines, want $want"

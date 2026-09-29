@@ -237,6 +237,9 @@ build_release() { # mode: unsigned | signed | control
     files="$files install.sh"
   fi
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
+  # the Homebrew cask for lukaso/tap (PHASE3.md S4): a file for the tap, never uploaded
+  tool base sh "$S/lib/render-cask.sh" "${tag#v}" "$(shasum -a 256 "$dest/sheepdog-macos-universal.tar.gz" | cut -d' ' -f1)" "$dest/sheepdog.rb" \
+    || die "render the cask"
   npm_pack || die "npm packing"
   {
     printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": [\n' "$tag" "$commit" "$mode" "$( [ "$mode" = control ] && echo true || echo false)"
