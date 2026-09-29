@@ -4,8 +4,10 @@
 # a decoy password is in the caller's environment. The end state of a dry signing run is the
 # door's refusal of the bundle the shim "signed" (the real /usr/bin/codesign sees it unsigned):
 # sign.sh exits 5 at the --version step and nothing runs. Checked:
-#   - the order: announce, lock, unlock (the notary keychain's password), profile check, sign,
-#     requirement, submit, staple, and the notary keychain locked again at the end;
+#   - the order: sign, requirement; then announce, lock, unlock (the notary keychain's password),
+#     profile check, submit, and the notary keychain locked again right after the last notarytool
+#     call, before staple, spctl, the door and the archive (the new binary never runs while it is
+#     unlocked); a failed lock is loud and fails the build;
 #   - notarytool only with --keychain-profile sheepdog-notary and --keychain <the notary keychain
 #     file under HOME>, never a password, key or Apple ID; no other tool gets a keychain path;
 #   - a failed unlock stops the build before any notarytool call, and the keychain is locked; a
@@ -51,6 +53,7 @@ shim spctl 'exit 0'
 shim ditto 'for a; do last=$a; done; : > "$last"; exit 0'
 shim security 'case "$*" in *find-identity*) echo "     0 valid identities found" ;;
   unlock-keychain*) [ -e "'"$FX"'/unlock.fail" ] && { echo "security: SecKeychainUnlock: The user name or passphrase you entered is not correct." >&2; exit 51; } ;;
+  lock-keychain*) [ -e "'"$FX"'/lock.fail" ] && [ "$(grep -c "^security lock-keychain" "'"$S"'/calls")" -ge 2 ] && { echo "security: lock failed" >&2; exit 50; } ;;
 esac; exit 0'
 KC=$FX/home/Library/Keychains/sheepdog-notary.keychain-db
 mkdir -p "${KC%/*}"; : > "$KC"
@@ -76,7 +79,13 @@ seq=$(grep -n -e 'notarytool history' -e '--force' -e 'notarytool submit' -e 'st
 kcl() { grep -n -e '^announce' -e '^security lock-keychain' -e '^security unlock-keychain' -e 'notarytool' "$S/calls" | cut -d: -f2- | sed -e 's/^security \([a-z-]*\) .*/\1/' -e 's/^xcrun notarytool \([a-z]*\) .*/\1/' | tr '\n' '|'; }
 seq=$(kcl)
 [ "$seq" = "announce|lock-keychain|unlock-keychain|history|submit|lock-keychain|" ] && pass "the order: announce, lock, unlock, profile check, submit, lock at the end" || fail "the keychain order: $seq"
-[ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] && pass "the last call locks the notary keychain" || fail "the last call: $(tail -1 "$S/calls")"
+ln=$(grep -n notarytool "$S/calls" | tail -1 | cut -d: -f1)
+[ "$(sed -n "$((ln + 1))p" "$S/calls")" = "security lock-keychain $KC" ] && pass "the notary keychain is locked right after the last notarytool call" || fail "after the last notarytool call: $(sed -n "$((ln + 1))p" "$S/calls")"
+lk=$(grep -n '^security lock-keychain' "$S/calls" | tail -1 | cut -d: -f1); st=$(grep -n 'stapler staple' "$S/calls" | head -1 | cut -d: -f1)
+[ -n "$lk" ] && [ -n "$st" ] && [ "$lk" -lt "$st" ] && pass "locked before stapling (nothing runs the new binary while it is unlocked)" || fail "lock at $lk, staple at $st"
+ul=$(grep -n '^security unlock-keychain' "$S/calls" | head -1 | cut -d: -f1); cs=$(grep -n '^codesign --force' "$S/calls" | head -1 | cut -d: -f1)
+[ -n "$ul" ] && [ -n "$cs" ] && [ "$ul" -gt "$cs" ] && pass "unlocked only after codesign" || fail "unlock at $ul, codesign at $cs"
+[ "$(grep -c '^security lock-keychain' "$S/calls")" = 2 ] && pass "two locks: before the unlock and after the last notarytool call" || fail "lock calls: $(grep -c '^security lock-keychain' "$S/calls")"
 grep notarytool "$S/calls" | grep -v -q -- "--keychain-profile sheepdog-notary --keychain $KC\( \|\$\)" && fail "a notarytool call without the profile and the notary keychain" || pass "every notarytool call uses the profile in the notary keychain"
 grep notarytool "$S/calls" | grep -q -e '--password' -e '--apple-id' -e '--key ' -e '--key-id' -e '--issuer' && fail "notarytool got a credential argument" || pass "notarytool got no credential argument"
 other=$(grep -e '--keychain ' -e 'Library/Keychains' "$S/calls" | grep -v -e "^xcrun notarytool .* --keychain $KC" -e "^security lock-keychain $KC\$" -e "^security unlock-keychain $KC\$")
@@ -103,16 +112,24 @@ grep -q notarytool "$S/calls" && fail "the control mode called notarytool" || pa
 
 # 2b. a failed unlock (a wrong password): stops before any notarytool call; the keychain is locked
 : > "$FX/unlock.fail"; run u; rc=$?; rm -f "$FX/unlock.fail"
-[ $rc = 1 ] && ! grep -q notarytool "$S/calls" && ! grep -q -e '^codesign' "$S/calls" && [ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] && grep -q -i 'password' "$FX/out.u" \
-  && pass "a failed unlock: stopped (1) before notarytool and signing, the keychain locked, the password named" || fail "failed unlock: rc=$rc calls=$(tr '\n' ';' < "$S/calls")"
+[ $rc = 1 ] && ! grep -q notarytool "$S/calls" && [ "$(tail -1 "$S/calls")" = "security lock-keychain $KC" ] && grep -q 'was not unlocked' "$FX/out.u" \
+  && pass "a failed unlock: stopped (1) before notarytool, the keychain locked, the unlock named" || fail "failed unlock: rc=$rc calls=$(tr '\n' ';' < "$S/calls")"
 # 2c. no notary keychain: stops before any keychain call, names D2
 mv "$KC" "$KC.away"; run m; rc=$?; mv "$KC.away" "$KC"
 [ $rc = 1 ] && ! grep -q -e 'keychain' -e notarytool -e '^codesign' "$S/calls" 2>/dev/null && grep -q 'D2' "$FX/out.m" \
   && pass "no notary keychain: stopped (1) before any keychain or signing call, D2 named" || fail "missing keychain: rc=$rc $(tail -1 "$FX/out.m") calls=$(tr '\n' ';' < "$S/calls" 2>/dev/null)"
+# 2e. the lock after the last notarytool call fails: loud (names the file), the build fails
+: > "$FX/lock.fail"; run l; rc=$?; rm -f "$FX/lock.fail"
+[ $rc = 1 ] && grep -q "could not lock the notary keychain $KC" "$FX/out.l" && ! grep -q 'stapler' "$S/calls" \
+  && pass "a failed lock: the build fails (1), the file named, nothing after it runs" || fail "failed lock: rc=$rc $(tail -2 "$FX/out.l" | tr '\n' ' ')"
+# 2f. a failed unlock whose lock at exit also fails: still loud
+: > "$FX/unlock.fail"; : > "$FX/lock.fail"; run lu; rc=$?; rm -f "$FX/unlock.fail" "$FX/lock.fail"
+[ $rc != 0 ] && grep -q "could not lock the notary keychain $KC" "$FX/out.lu" \
+  && pass "a failed unlock and a failed lock at exit: loud, the file named" || fail "failed unlock+lock: rc=$rc $(tail -2 "$FX/out.lu" | tr '\n' ' ')"
 # 2d. Apple rejects it: unlocked again before the log fetch, locked at the end
 : > "$FX/reject"; run j; rc=$?; rm -f "$FX/reject"
 seq=$(kcl)
-[ $rc = 1 ] && [ "$seq" = "announce|lock-keychain|unlock-keychain|history|submit|unlock-keychain|log|lock-keychain|" ] \
+[ $rc = 1 ] && [ "$seq" = "announce|lock-keychain|unlock-keychain|history|submit|unlock-keychain|log|lock-keychain|" ] && ! grep -q stapler "$S/calls" \
   && pass "a rejection: unlocked again before the log fetch, locked at the end" || fail "rejection: rc=$rc $seq"
 
 # 3. the requirement comparison refuses a changed marker (a copy of sign.sh's library dir with a
