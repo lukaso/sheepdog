@@ -20,8 +20,15 @@ no() { echo "release-run: refused: $*" >&2; exit 2; }
 home=$1 bin=$2; shift 2
 [ -d "$home" ] || no "HOME-DIR $home is not a directory"
 h=$(cd -P "$home" && pwd -P) || no "cannot resolve $home"
-r=$(cd -P "${HOME:-/nonexistent}" 2>/dev/null && pwd -P) || r=
-[ -n "$r" ] && [ "$h" = "$r" ] && no "HOME-DIR is the real home"
+# the real home from the account database ($HOME can be anything): HOME-DIR may not be it, be
+# inside it, or hold it (a job there reads the real ~/Documents and can touch the grant)
+u=$(/usr/bin/id -un)
+r=$(/usr/bin/dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | /usr/bin/sed -n 's/^NFSHomeDirectory: *//p')
+[ -n "$r" ] || r=$(/usr/bin/getent passwd "$u" 2>/dev/null | /usr/bin/cut -d: -f6)
+[ -n "$r" ] || no "cannot read the real home of $u"
+r=$(cd -P "$r" 2>/dev/null && pwd -P) || no "cannot resolve the real home $r"
+case $h/ in "$r"/*) no "HOME-DIR is inside the real home" ;; esac
+case $r/ in "$h"/*) no "HOME-DIR holds the real home" ;; esac
 
 sub=${1:-}
 extra=
@@ -30,8 +37,10 @@ case $sub in
   doctor|ps|strays|--version|-V|help|--help|-h) ;;
   *) no "subcommand '$sub' (only run, doctor, ps, strays, --version and help)" ;;
 esac
+# `--` ends sheepdog's own flags only for `run`; strays takes it as a value (`--cmd --`), so for
+# every other subcommand the whole argv is checked
 for a in "$@"; do
-  [ "$a" = -- ] && break
+  [ "$a" = -- ] && [ "$sub" = run ] && break
   case $a in
     --inherit-terminal-permissions) no "--inherit-terminal-permissions" ;;
     --kill) [ "$sub" = strays ] && no "strays --kill" ;;

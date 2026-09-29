@@ -44,6 +44,18 @@ refused sweep sweep
 refused "strays --kill" strays --kill
 refused "strays --older-than 1h --kill" strays --older-than 1h --kill
 refused "run --inherit-terminal-permissions" run --inherit-terminal-permissions -- true
+refused "strays --cmd -- --kill" strays --cmd -- --kill
+refused "strays --cmd -- --kill --yes" strays --cmd -- --kill --yes
+refused "strays --older-than 1h --cmd -- --kill" strays --older-than 1h --cmd -- --kill
+o=$(out run -- sh -c 'x --kill'); [ $? = 0 ] && pass "control: --kill after run -- is the job's" || fail "run -- ... --kill refused"
+# the real home comes from the account database, not $HOME
+realhome=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')
+[ -d "$realhome" ] || realhome=$(eval echo "~$(id -un)")
+for hd in "$realhome" "$realhome/Library" "$(dirname "$realhome")"; do
+  rec="$FX/rec"; : > "$rec"
+  HOME="$FX/home" SD_EXEC_RECORD="$rec" "$H" "$hd" "$FX/probe" doctor >/dev/null 2>&1; rc=$?
+  [ $rc != 0 ] && [ "$(grep -c . "$rec")" = 0 ] && pass "HOME-DIR $hd refused with HOME=temp" || fail "HOME-DIR $hd accepted with HOME=temp"
+done
 refused "an unknown subcommand" frobnicate
 rec="$FX/rec"; : > "$rec"
 SD_EXEC_RECORD="$rec" "$H" "$HOME" "$FX/probe" run -- true >/dev/null 2>&1; rc=$?
