@@ -77,6 +77,27 @@ done
 # the callers really differ (else the equality proves nothing)
 run ignore "$FX/probe" | grep -q '^sig 15 ign' && run block "$FX/probe" | grep -q '^sig 15 dfl blocked' \
   && pass "the three callers differ" || fail "the callers do not set what they claim"
+# pnpm's layout: the package in the .pnpm store, its platform package a sibling symlink there, and
+# the global link pointing through node_modules/@lukaso/sheepdog (itself a symlink into the store)
+P="$FX/pnpm/global/5"
+st="$P/node_modules/.pnpm/@lukaso+sheepdog@0.1.0/node_modules/@lukaso"
+mkdir -p "$st/sheepdog/bin" "$P/node_modules/@lukaso" "$FX/pnpm/bin"
+cp "$L" "$st/sheepdog/bin/sheepdog" && chmod 755 "$st/sheepdog/bin/sheepdog"
+mk_plat "$P/node_modules/.pnpm/@lukaso+sheepdog-$plat@0.1.0/node_modules/@lukaso/sheepdog-$plat"
+ln -s "../../../@lukaso+sheepdog-$plat@0.1.0/node_modules/@lukaso/sheepdog-$plat" "$st/sheepdog-$plat"
+ln -s ../.pnpm/@lukaso+sheepdog@0.1.0/node_modules/@lukaso/sheepdog "$P/node_modules/@lukaso/sheepdog"
+ln -s ../global/5/node_modules/@lukaso/sheepdog/bin/sheepdog "$FX/pnpm/bin/sheepdog"
+run default "$FX/pnpm/bin/sheepdog" > "$FX/via"
+sp=$(sed -n 's/^shpid //p' "$FX/via"); pp=$(sed -n 's/^pid //p' "$FX/via")
+[ -n "$pp" ] && [ "$sp" = "$pp" ] && pass "pnpm layout: resolved, pid kept" || fail "pnpm layout: pid $sp -> $pp"
+
+# the caller's variables that share the launcher's names reach the job unchanged
+for layout in nested hoisted; do
+  env -i PATH=/usr/bin:/bin me=M n=N l=L pkg=P plat=Q exe=E dir=D target=T "$FX/$layout/bin/sheepdog" > "$FX/via"
+  got=$(grep -E '^env (me|n|l|pkg|plat|exe|dir|target)=' "$FX/via" | sort | tr '\n' ' ')
+  [ "$got" = "env dir=D env exe=E env l=L env me=M env n=N env pkg=P env plat=Q env target=T " ] && pass "$layout: caller variables with the launcher's names unchanged" || fail "$layout: $got"
+done
+
 # no platform package
 "$FX/none/bin/sheepdog" --version > "$FX/out" 2>&1; rc=$?
 [ $rc = 1 ] && grep -q "@lukaso/sheepdog-$plat" "$FX/out" && pass "missing platform package: exit 1, named" || fail "missing package: rc=$rc $(head -1 "$FX/out")"
