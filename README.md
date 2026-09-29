@@ -41,8 +41,9 @@ RUN curl -fsSL -o /usr/local/bin/sheepdog \
 ```
 
 On Linux the checksum proves the download is intact, not where it came from: `SHA256SUMS` comes
-from the same release. On macOS, install.sh and Homebrew check the Developer ID signature, which
-does prove where it came from.
+from the same release. On macOS, install.sh checks the Developer ID signature before it installs,
+which does prove where it came from. Homebrew checks the archive against the sha256 in the tap;
+macOS then checks the signature and notarization when you first run it.
 
 ## Use
 
