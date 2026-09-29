@@ -7,6 +7,7 @@
 #                                                     the signed, notarized release (the operator)
 #   release.sh publish [--out DIR] vTAG               publish a built release (the operator)
 #   release.sh npm-check [--out DIR] vTAG             check the npm tarballs before `npm publish`
+#   release.sh verify [--out DIR] vTAG                the release's facts from its archive (read-only)
 #
 # The checks (check, build): the tag is vX.Y.Z or vX.Y.Z-rc.N; the tree is clean (no change, no
 # untracked file); HEAD is the tag's commit; the tag's Cargo.toml and Cargo.lock say X.Y.Z; the tag's
@@ -22,7 +23,7 @@
 # 4 refused without a terminal (or the typed tag did not match).
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
-usage() { echo "usage: release.sh check|build|publish|npm-check [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
+usage() { echo "usage: release.sh check|build|publish|npm-check|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
 die() { echo "release: $*" >&2; exit 1; }
 
 [ $# -ge 1 ] || usage
@@ -40,7 +41,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tag" ] || usage
 case $sub in
-  check|build|publish|npm-check) ;;
+  check|build|publish|npm-check|verify) ;;
   *) usage ;;
 esac
 [ $sign = no ] || [ "$sub" = build ] || usage
@@ -212,13 +213,65 @@ build_release() { # mode: unsigned | signed | control
   echo "release: $tag built ($mode) in $dest"
 }
 
+# --- publish: the thin executor behind the gate (PHASE3.md §1.2) ------------------------------
+publish() {
+  d=$out/$tag
+  verify "$d"
+  pt=$(mktemp -d /private/tmp/sd-publish.XXXXXX) || die "no temp dir"
+  git -C "$root" ls-remote origin "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote"
+  gh api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
+  (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
+  sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
+  echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
+  id=$(gh api -X POST repos/lukaso/sheepdog/releases -F draft=true -f tag_name="$tag" -f name="$tag" --jq .id) || die "gh: cannot make the draft"
+  case $id in ''|*[!0-9]*) die "gh: no release id ($id)" ;; esac
+  echo "release: draft $id made"
+  for f in $(sed -n 's/^UPLOAD //p' "$pt/plan"); do
+    gh api -X POST -H 'Content-Type: application/octet-stream' \
+      "https://uploads.github.com/repos/lukaso/sheepdog/releases/$id/assets?name=$f" --input "$d/$f" --jq .id >/dev/null \
+      || die "gh: upload of $f failed (the draft $id is not public; delete it on GitHub)"
+  done
+  gh api "repos/lukaso/sheepdog/releases/$id" --jq '.assets[] | "\(.id) \(.name)"' > "$pt/assets" || die "gh: cannot read the draft"
+  [ "$(awk '{print $2}' "$pt/assets" | sort | tr '\n' ' ')" = "SHA256SUMS install.sh sheepdog-linux-aarch64 sheepdog-linux-x86_64 sheepdog-macos-universal.tar.gz " ] \
+    || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
+  while read -r aid name; do
+    gh api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
+    [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$(shasum -a 256 "$d/$name" | cut -d' ' -f1)" ] || die "the uploaded $name differs from the local one"
+  done < "$pt/assets"
+  git -C "$root" ls-remote origin "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote"
+  cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload"
+  printf 'release: the draft %s holds the five files, each matching. Type the tag again to make it public: ' "$id" > /dev/tty
+  IFS= read -r again < /dev/tty && [ "$again" = "$tag" ] || die "not confirmed; the draft $id stays a draft"
+  gh api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
+  rm -rf "$pt"
+  echo "release: $tag published"
+}
+
+# --- verify: the three facts, from the archive, by the real tools (PHASE3.md §1.2) --------------
+verify() { # dir -> exit 1 naming the tool that refused
+  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  . "$root/scripts/lib/realtools.sh" || die "cannot read realtools.sh"
+  d=$1 arc=$1/sheepdog-macos-universal.tar.gz
+  [ -f "$arc" ] || die "no $arc"
+  vt=/private/tmp/sd-verify.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  trap 'rm -rf "$vt"' EXIT; trap 'rm -rf "$vt"; exit 1' HUP INT TERM
+  mkdir -m 700 "$vt" && tar -xzf "$arc" -C "$vt" || die "cannot unpack $arc"
+  a=$vt/Sheepdog.app
+  rt_meets "$a" && rt_meets "$a/Contents/MacOS/sheepdog" || die "codesign: the bundle does not meet the release requirement"
+  rt_staple_ok "$a" || die "stapler: no valid staple ticket"
+  rt_spctl_ok "$a" || die "spctl: Gatekeeper rejects the bundle"
+  rm -rf "$vt"; trap - EXIT
+  echo "release: $d: signed, notarized and stapled (checked from the archive)"
+}
+
 case $sub in
   check) checks ;;
+  verify) verify "$out/$tag" ;;
   build)
     checks
     if [ $sign = no ]; then build_release unsigned
     elif [ $nonot = yes ]; then build_release control
     else build_release signed; fi ;;
-  publish) die "publish is not built yet (PHASE3.md S2d)" ;;
+  publish) publish ;;
   npm-check) die "npm-check is not built yet (PHASE3.md S2e)" ;;
 esac
