@@ -26,6 +26,13 @@ case $(lipo -archs "$A/Contents/MacOS/sheepdog" 2>/dev/null) in *x86_64*arm64*|*
 "$B" "$FX/bin" "$FX/rel" 0.1.0 7 --release-id >/dev/null 2>&1 || fail "bundle.sh --release-id failed"
 [ "$(key "$FX/rel/Sheepdog.app" CFBundleIdentifier)" = com.lukaso.sheepdog ] && pass "release ID with the flag" || fail "no release ID with the flag"
 
+# an unsigned release-ID bundle is made only under /private/tmp (Launch Services does not index it)
+out=$(mktemp -d /private/var/tmp/sd-p3-refuse.XXXXXX) || exit 3
+if "$B" "$FX/bin" "$out/x" 0.1.0 7 --release-id >/dev/null 2>&1 || [ -e "$out/x/Sheepdog.app" ]; then fail "--release-id outside /private/tmp accepted"
+else pass "--release-id outside /private/tmp refused, nothing made"; fi
+rm -rf "$out"
+"$B" "$FX/bin" "$out/y" 0.1.0 7 >/dev/null 2>&1 && pass "control: a .dev bundle outside /private/tmp is fine" || fail "a .dev bundle outside /private/tmp refused"
+rm -rf "$out"
 for bad in 0.1.0-rc.1 v0.1.0 1.2.3.4 ""; do
   rm -rf "$FX/bad"
   if "$B" "$FX/bin" "$FX/bad" "$bad" 7 >/dev/null 2>&1 || [ -e "$FX/bad/Sheepdog.app" ]; then fail "version '$bad' accepted"; else pass "version '$bad' refused"; fi

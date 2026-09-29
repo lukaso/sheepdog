@@ -6,7 +6,7 @@
 # VERSION is X.Y.Z and BUILD-NUMBER a positive integer (PHASE3.md D4: Apple's bundle versions are
 # dotted integers, and plutil does not check them). The bundle ID is com.lukaso.sheepdog.dev
 # unless --release-id is given (PHASE3.md D5): only the signing path passes it, and it signs the
-# bundle in the same step. The bundle is not signed here.
+# bundle in the same step, under /private/tmp. The bundle is not signed here.
 set -u
 usage() { echo "usage: bundle.sh BINARY OUT-DIR VERSION BUILD-NUMBER [--release-id]" >&2; exit 2; }
 [ $# -eq 4 ] || [ $# -eq 5 ] || usage
@@ -19,6 +19,13 @@ echo "$build" | grep -Eq '^[1-9][0-9]*$' \
   || { echo "bundle.sh: build number must be a positive integer: '$build'" >&2; exit 2; }
 [ -f "$bin" ] || { echo "bundle.sh: no binary at $bin" >&2; exit 2; }
 
+# an unsigned bundle with the release ID lives only under /private/tmp, which Launch Services does
+# not index (PLAN.md §4.4): the signing path builds and signs it there (PHASE3.md §1.1)
+if [ "$id" = com.lukaso.sheepdog ]; then
+  mkdir -p "$out" || exit 1
+  o=$(cd -P "$out" && pwd -P) || exit 1
+  case $o/ in /private/tmp/*) ;; *) rmdir "$out" 2>/dev/null; echo "bundle.sh: --release-id only under /private/tmp, not $o" >&2; exit 2 ;; esac
+fi
 app=$out/Sheepdog.app
 [ -e "$app" ] && { echo "bundle.sh: $app exists" >&2; exit 2; }
 mkdir -p "$app/Contents/MacOS" || exit 1
