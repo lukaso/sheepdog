@@ -39,6 +39,15 @@ ROOT=$PWD
 # the pinned images (PHASE3.md D7): the same as the release build. Every `docker run` uses
 # --pull=never (a registry call can show a keychain prompt); `./test-all pull` fetches them.
 . scripts/release.conf || exit 3
+# the amd64 base under its own local name: this Docker store keeps one platform per reference, so
+# pulling linux/amd64 of $SD_IMG_ALPINE would make every native leg run amd64 (review, S1 round 3)
+AMD64_BASE="sd-amd64-base:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+AMD64_IMG="sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+case $(uname -m) in arm64|aarch64) NATIVE=aarch64 ;; *) NATIVE=$(uname -m) ;; esac
+# img_arch IMAGE [PLATFORM]: `uname -m` inside it (never pulls)
+img_arch() {
+  timeout 60 docker run --rm --pull=never --network none ${2:+--platform "$2"} "$1" uname -m 2>/dev/null
+}
 ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened"
 [ "${1:-}" = "--list" ] && { echo "$ALL pull tcc"; exit 0; }
 LEGS="${*:-$ALL}"
@@ -131,21 +140,23 @@ leg_debian() {
 
 leg_amd64() {
   # tagged by the pinned base's digest, so a new pin builds a new image
-  local img="sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+  local img=$AMD64_IMG a
   if ! timeout 60 docker image inspect "$img" >/dev/null 2>&1; then
     # the Dockerfile goes in a file, never through stdin: bg_wait runs its command in the
     # background, where a non-interactive bash gives it /dev/null as stdin (and a pipe into
     # bg_wait would run it in a subshell, out of cleanup's reach)
     mkdir -p "$LOGDIR/amd64-context"
-    printf 'FROM --platform=linux/amd64 %s\nRUN apk add -q procps bash util-linux-misc\n' "$SD_IMG_ALPINE" > "$LOGDIR/amd64.Dockerfile"
-    # the base comes from the local amd64 copy (`./test-all pull` fetches it); a missing one fails
-    # here instead of a registry call, which can show a keychain prompt
-    timeout 60 docker image inspect --platform linux/amd64 "$SD_IMG_ALPINE" >/dev/null 2>&1 \
-      || { record amd64 "FAIL (no local linux/amd64 $SD_IMG_ALPINE: run ./test-all pull)"; return; }
+    printf 'FROM --platform=linux/amd64 %s\nRUN apk add -q procps bash util-linux-misc\n' "$AMD64_BASE" > "$LOGDIR/amd64.Dockerfile"
+    # the base is the local amd64 copy `./test-all pull` tags; a missing one fails here instead of
+    # a registry call, which can show a keychain prompt
+    timeout 60 docker image inspect "$AMD64_BASE" >/dev/null 2>&1 \
+      || { record amd64 "FAIL (no local $AMD64_BASE: run ./test-all pull)"; return; }
     bg_wait timeout -k 30 1800 docker build --pull=false --platform linux/amd64 -t "$img" -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
       > "$LOGDIR/amd64-image.log" 2>&1 \
       || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
   fi
+  a=$(img_arch "$img" linux/amd64)
+  [ "$a" = x86_64 ] || { record amd64 "FAIL ($img runs as '$a', not x86_64)"; return; }
   suite_in "$img" target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
     && record amd64 PASS || record amd64 "FAIL ($LOGDIR/amd64.log)"
 }
@@ -291,13 +302,17 @@ leg_hardened() {
 
 leg_pull() {
   local ok=1 i
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM" "linux/amd64 $SD_IMG_ALPINE"; do
-    echo "pulling $i (Docker Desktop may ask for keychain access)"
-    case $i in
-      linux/amd64*) timeout 1800 docker pull -q --platform linux/amd64 "${i#linux/amd64 }" >> "$LOGDIR/pull.log" 2>&1 || ok=0 ;;
-      *) timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0 ;;
-    esac
+  # amd64 first, tagged under its own name; then the native images last, so the pinned
+  # references point at the native platform again
+  echo "pulling linux/amd64 $SD_IMG_ALPINE (Docker Desktop may ask for keychain access)"
+  timeout 1800 docker pull -q --platform linux/amd64 "$SD_IMG_ALPINE" >> "$LOGDIR/pull.log" 2>&1 \
+    && timeout 60 docker tag "$SD_IMG_ALPINE" "$AMD64_BASE" || ok=0
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+    echo "pulling $i"
+    timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0
   done
+  [ "$(img_arch "$SD_IMG_ALPINE")" = "$NATIVE" ] && [ "$(img_arch "$SD_IMG_SLIM")" = "$NATIVE" ] \
+    && [ "$(img_arch "$AMD64_BASE" linux/amd64)" = x86_64 ] || { echo "pull: an image has the wrong platform" >> "$LOGDIR/pull.log"; ok=0; }
   [ $ok = 1 ] && record pull PASS || record pull "FAIL ($LOGDIR/pull.log)"
 }
 
@@ -312,7 +327,17 @@ TXT
   record tcc "manual (steps printed)"
 }
 
+# the native Linux legs run only if the pinned images really are the native platform
+NATIVE_BAD=""
+case " $LEGS " in *" alpine "*|*" debian "*|*" pid1 "*|*" init "*|*" enosys "*|*" sh1 "*|*" other-user "*)
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+    a=$(img_arch "$i"); [ "$a" = "$NATIVE" ] || NATIVE_BAD="$NATIVE_BAD $i runs as '$a' (want $NATIVE);"
+  done ;;
+esac
 for leg in $LEGS; do
+  case $leg in alpine|debian|pid1|init|enosys|sh1|other-user)
+    if [ -n "$NATIVE_BAD" ]; then record "$leg" "FAIL (image platform:$NATIVE_BAD run ./test-all pull)"; continue; fi ;;
+  esac
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
