@@ -97,7 +97,10 @@ my $p = fork(); if ($p == 0) { POSIX::setsid() != -1 or die; my $q = fork();
 waitpid($p, 0); sleep 300;
 P
 RH=$FX/rh; mkdir -p "$RH"
-job() { env -i PATH=/usr/bin:/bin HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$@"; }
+# the job's PATH has node's directory too, as a user's would (so a node launcher could run: the
+# D9 mutant must fail on the signal state, not on a missing node)
+JP=/usr/bin:/bin:$(dirname "$(command -v node)")
+job() { env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$@"; }
 callers() { # entry -> the probe's output for three callers, into $FX/c.<caller>
   for c in default ignore block; do
     case $c in
@@ -120,7 +123,7 @@ for m in npm pnpm bun; do
   rm -f "$FX/esc"
   # env in the background directly (a function in the background is a forked subshell, whose pid
   # is not the launched process's)
-  env -i PATH=/usr/bin:/bin HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
+  env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
   i=0; while [ ! -s "$FX/esc" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   comm=$(ps -o comm= -p $jp 2>/dev/null)
   case $comm in *Sheepdog.app/Contents/MacOS/sheepdog) pass "$m: the PATH entry's process is the bundle's executable (pid $jp)" ;; *) fail "$m: pid $jp is '$comm'" ;; esac
@@ -145,7 +148,7 @@ done
 
 # control: a wrapper that spawns the executable (no exec) is caught by the process check
 printf '#!/bin/sh\n"%s" "$@"\n' "$EXE" > "$FX/wrap"; chmod 755 "$FX/wrap"
-env -i PATH=/usr/bin:/bin HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$FX/wrap" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
+env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$FX/wrap" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
 case $(ps -o comm= -p $wp 2>/dev/null) in *Sheepdog.app/Contents/MacOS/sheepdog) fail "control: the spawning wrapper passed the process check" ;; *) pass "control: a spawning wrapper fails the process check" ;; esac
 wait $wp 2>/dev/null
 # control: no platform package in the registry
