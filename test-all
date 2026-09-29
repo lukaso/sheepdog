@@ -22,6 +22,9 @@
 #   other-user   the suite as an unprivileged user, with a decoy of a third user that must get no
 #                signal
 #   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
+#   dist-linux   install.sh in the pinned Alpine (busybox wget) and slim (no downloader) images:
+#                refused with no downloader, installed with wget and with curl, as root and as a
+#                user, a checksum mismatch refused (scripts/dist-linux.sh)
 #   hardened     the macOS suite against a sheepdog signed ad hoc with the hardened runtime (the
 #                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
@@ -48,7 +51,7 @@ case $(uname -m) in arm64|aarch64) NATIVE=aarch64 ;; *) NATIVE=$(uname -m) ;; es
 img_arch() {
   timeout 60 docker run --rm --pull=never --network none ${2:+--platform "$2"} "$1" uname -m 2>/dev/null
 }
-ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened"
+ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened dist-linux"
 [ "${1:-}" = "--list" ] && { echo "$ALL pull tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
@@ -283,6 +286,21 @@ leg_bundle() {
     && record bundle PASS || record bundle "FAIL ($LOGDIR/bundle.log)"
 }
 
+leg_dist_linux() {
+  build_alpine || { record dist-linux "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
+  local srv="$LOGDIR/dist-srv" art i ok=1
+  art=sheepdog-linux-$NATIVE
+  rm -rf "$srv" && mkdir -p "$srv"
+  sh scripts/lib/render-install.sh scripts/install.sh 0.0.0 "$srv/install.sh" || { record dist-linux "FAIL (render)"; return; }
+  cp "$ROOT/target-linux/debug/sheepdog" "$srv/$art" && (cd "$srv" && shasum -a 256 "$art" > SHA256SUMS) || { record dist-linux "FAIL (serve dir)"; return; }
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+    echo "== dist-linux in $i" >> "$LOGDIR/dist-linux.log"
+    bg_wait timeout -k 30 900 docker run --rm --pull=never -v "$srv":/srv:ro -v "$ROOT/target-linux":/tgt:ro -v "$ROOT/scripts":/scripts:ro \
+      "$i" sh /scripts/dist-linux.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
+  done
+  [ $ok = 1 ] && record dist-linux PASS || record dist-linux "FAIL ($LOGDIR/dist-linux.log)"
+}
+
 leg_hardened() {
   [ "$(uname -s)" = Darwin ] || { record hardened "skipped (not macOS)"; return; }
   local ev="$LOGDIR/hardened.flags" lt left tagged; : > "$ev"
@@ -341,14 +359,14 @@ native_check() {
   done
 }
 for leg in $LEGS; do
-  case $leg in alpine|debian|pid1|init|enosys|sh1|other-user)
+  case $leg in alpine|debian|pid1|init|enosys|sh1|other-user|dist-linux)
     native_check
     if [ -n "$NATIVE_BAD" ]; then record "$leg" "FAIL (image:$NATIVE_BAD)"; continue; fi ;;
   esac
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
-    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; pull) leg_pull ;; tcc) leg_tcc ;;
+    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; dist-linux) leg_dist_linux ;; pull) leg_pull ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done

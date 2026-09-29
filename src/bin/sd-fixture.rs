@@ -816,6 +816,39 @@ fn main() {
     if mode == "test-env" && a.len() >= 3 {
         test_env(&a[2..]);
     }
+    // P3 (install.sh in a container). `serve DIR PORTFILE`: a tiny HTTP/1.0 server of DIR's files on
+    // 127.0.0.1 (a port the kernel picks, written to PORTFILE); each request line goes to stderr, so
+    // a cell can prove install.sh reached it. Only GET of a plain file name; anything else is 404.
+    if mode == "serve" && a.len() == 4 {
+        use std::io::{BufRead, Write};
+        let dir = std::path::PathBuf::from(&a[2]);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|_| std::process::exit(1));
+        std::fs::write(&a[3], l.local_addr().unwrap().port().to_string()).unwrap_or_else(|_| std::process::exit(1));
+        for s in l.incoming().flatten() {
+            let mut r = std::io::BufReader::new(&s);
+            let mut line = String::new();
+            if r.read_line(&mut line).is_err() {
+                continue;
+            }
+            let mut h = String::new();
+            while r.read_line(&mut h).map_or(false, |n| n > 2) {
+                h.clear();
+            }
+            eprintln!("{}", line.trim_end());
+            let name = line.split_whitespace().nth(1).unwrap_or("").trim_start_matches('/').to_string();
+            let body = (line.starts_with("GET ") && !name.is_empty() && !name.contains('/') && !name.starts_with('.'))
+                .then(|| std::fs::read(dir.join(&name)).ok())
+                .flatten();
+            let mut w = &s;
+            let _ = match body {
+                Some(b) => w
+                    .write_all(format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len()).as_bytes())
+                    .and_then(|_| w.write_all(&b)),
+                None => w.write_all(b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+            };
+        }
+        std::process::exit(0);
+    }
     // P5 (registration). `dfork-exec R PROG ARGS...`: a fast double fork: C forks G and exits at
     // once; G (not in a new session) records itself in R and execs PROG ARGS. The root waits
     // until R has G's line (bounded, 10 s), then becomes `sigcount R.root` (this fixture, so its
