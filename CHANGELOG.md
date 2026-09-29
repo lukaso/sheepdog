@@ -2,7 +2,8 @@
 
 Every release has an entry here (PLAN.md §10.8). sheepdog follows semver; the stable interfaces are
 the subcommands and flags, the exit codes, the `--status-fd` and `--json` schemas (`"v": 1`,
-additive changes only) and the `sheepdog:` prefix on stderr.
+additive changes only) and the `sheepdog:` prefix on its stderr messages (a usage error starts
+with `usage:`).
 
 ## 0.1.0 (not yet released)
 

@@ -6,13 +6,14 @@ Linux, and in a default Docker container, with no root, no cgroups and no system
 
 ## Install
 
-**macOS** (installs `Sheepdog.app`, signed and notarized, and puts `sheepdog` on your PATH):
+**macOS** (installs `Sheepdog.app`, signed and notarized, and a `sheepdog` command that runs it):
 
 ```sh
 brew install --cask lukaso/tap/sheepdog
 ```
 
-or, without Homebrew:
+or, without Homebrew (into `~/Applications`, with the command in `~/.local/bin`; it tells you if
+that is not on your PATH):
 
 ```sh
 curl -fsSL https://github.com/lukaso/sheepdog/releases/latest/download/install.sh | sh
@@ -79,8 +80,8 @@ sheepdog is not a sandbox. It does not reach:
 - a process that leaves on purpose: `sudo`, another user, ptrace.
 
 A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (Node's `child.kill`,
-`docker stop` with `STOPSIGNAL SIGINT`) kills only sheepdog; the tree then waits for the next
-`sheepdog sweep`. Send TERM instead.
+`docker stop` with `STOPSIGNAL SIGINT`) kills only sheepdog; the rest of the tree is then ended by
+your next `sheepdog run` or `sheepdog sweep`. Send TERM instead.
 
 Where a delegated cgroup v2 is available, a cgroup is stronger: processes cannot leave it. sheepdog
 is the portable floor, and on a Mac the only option.
@@ -92,7 +93,8 @@ Documents, Desktop and so on): sheepdog makes itself the job's responsible app, 
 it track the whole tree. If a job needs a protected folder, give Sheepdog Full Disk Access once:
 System Settings > Privacy & Security > Full Disk Access, click +, and choose `Sheepdog.app`
 (`~/Applications` for install.sh, `/Applications` for Homebrew). The grant survives upgrades.
-`sheepdog doctor` shows which grants sheepdog has.
+`sheepdog doctor --grants` checks whether Sheepdog can read `~/Documents` (this can show a macOS
+privacy prompt).
 
 Or run one job with `--inherit-terminal-permissions`: it keeps your terminal's permissions, and
 sheepdog falls back to a weaker way of tracking the tree.
@@ -114,6 +116,19 @@ tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
 - If you use bun, check the installed files' permissions: a bun install has been measured to make
   them world-writable. Do not install with bun as root or into a shared prefix.
 
+## Uninstall
+
+```sh
+brew uninstall --cask sheepdog                          # Homebrew (--zap also removes the journals)
+rm -rf ~/Applications/Sheepdog.app ~/.local/bin/sheepdog  # install.sh on macOS
+rm ~/.local/bin/sheepdog                                # install.sh on Linux (as root: /usr/local/bin/sheepdog)
+npm rm -g @lukaso/sheepdog                              # npm (pnpm: pnpm rm -g @lukaso/sheepdog)
+```
+
+sheepdog keeps its job journals in `~/.local/state/sheepdog` (or `$XDG_STATE_HOME/sheepdog`); delete
+that directory to remove them. The privacy grant stays until you reset it (see
+[macOS privacy](#macos-privacy)).
+
 ## Reference
 
 - Exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired (`--timeout`, a
@@ -121,7 +136,8 @@ tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
   the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
   `--status-fd` says which, as one JSON line.
 - Stable interfaces: the subcommands and flags, the exit codes, the `--status-fd` and `--json`
-  schemas (`"v": 1`), and the `sheepdog:` prefix on stderr. Every release has a
+  schemas (`"v": 1`), and the `sheepdog:` prefix on its stderr messages (a usage error starts
+  with `usage:` instead). Every release has a
   [CHANGELOG](CHANGELOG.md) entry.
 
 ## License
