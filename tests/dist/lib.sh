@@ -115,6 +115,12 @@ fx_build() {
       printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog&#10;</string></dict></plist>\n' > "$d/sect.plist"
       printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
       echo "$d/sheepdog" ;;
+    rel_lowercase_disk) mkdir -p "$d/x.app/contents/macos"; fx_plist "$d/x.app/contents/Info.plist" com.lukaso.sheepdog
+      fx_prog "$d/x.app/contents/macos/sheepdog"; echo "$d/x.app/contents/macos/sheepdog" ;;
+    rel_embedded_nested_key)
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog</string><key>Z</key><dict><key>CFBundleIdentifier</key><string>x</string></dict></dict></plist>\n' > "$d/sect.plist"
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
+      echo "$d/sheepdog" ;;
     *) echo "no fixture $1" >&2; exit 3 ;;
   esac
 }

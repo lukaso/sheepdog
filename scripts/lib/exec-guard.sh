@@ -16,7 +16,8 @@
 #   (c) the embedded __info_plist section of every slice (a section that is there but cannot be
 #       parsed counts as the release ID);
 #   (d) for a `#!` script, the same checks on every word of the #! line that is a path (so
-#       `#!/usr/bin/env FILE` is judged too). What the script's body runs is not judged.
+#       `#!/usr/bin/env FILE` is judged too). What the script's body runs is not judged, nor what a
+#       bare name after env (`#!/usr/bin/env NAME`) finds on PATH when the script runs.
 # IDs are compared without case and whitespace (fail closed: whether macOS folds them is not
 # measured). If any key is the release ID, the file and each such bundle must meet the release
 # requirement in scripts/release.conf; otherwise the door refuses. What it cannot read counts as
@@ -46,6 +47,9 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
 (
   PATH=/usr/bin:/bin; export PATH
   unset DEVELOPER_DIR SDKROOT TOOLCHAINS
+  # lipo is an xcrun shim: it fails when the Xcode licence is not accepted or no developer dir is
+  # set, and a Mach-O file it cannot read then counts as the release ID (below)
+  LIPO=/usr/bin/lipo
   conf=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/release.conf
   . "$conf" || exit 2
   rel=$(printf %s "$SD_RELEASE_ID" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
@@ -113,9 +117,20 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     [ "$(uname -s)" = Darwin ] || return 0
     release=no
     # the slices of a universal file, each thinned into its own file (a thin file is its own)
-    archs="" macho=no info=$(lipo -info "$real" 2>/dev/null) && macho=yes
-    if printf '%s\n' "$info" | grep -q '^Architectures in the fat file'; then
-      archs=$(lipo -archs "$real" 2>/dev/null) || release=yes
+    # Mach-O by its magic bytes (thin 32/64-bit either endian, fat, fat64)
+    archs="" macho=no
+    case $(od -An -N4 -tx1 "$real" 2>/dev/null | tr -d ' \n') in
+      feedface|cefaedfe|feedfacf|cffaedfe|cafebabe|bebafeca|cafebabf|bfbafeca) macho=yes ;;
+    esac
+    if [ $macho = yes ]; then
+      if info=$("$LIPO" -info "$real" 2>/dev/null); then
+        if printf '%s\n' "$info" | grep -q '^Architectures in the fat file'; then
+          archs=$("$LIPO" -archs "$real" 2>/dev/null) || release=yes
+          [ -n "$archs" ] || release=yes
+        fi
+      else
+        release=yes   # a Mach-O file lipo cannot read
+      fi
     fi
     # (a)
     if [ -n "$archs" ]; then
@@ -139,7 +154,7 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     if [ $macho = no ]; then :
     elif [ -n "$archs" ]; then
       for a in $archs; do
-        lipo -thin "$a" -output "$tmp/slice.$a" "$real" 2>/dev/null || { release=yes; continue; }
+        "$LIPO" -thin "$a" -output "$tmp/slice.$a" "$real" 2>/dev/null || { release=yes; continue; }
         set -- "$@" "$tmp/slice.$a"
       done
     else
@@ -148,8 +163,12 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     for s in "$@"; do
       out=$(launchctl plist __TEXT,__info_plist "$s" 2>"$tmp/err")
       if [ -n "$out" ]; then
+        # every CFBundleIdentifier line (a nested dict may hold one too): any release ID counts
         e=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*"CFBundleIdentifier" *= *"\(.*\)";[[:space:]]*$/\1/p')
-        if [ -z "$e" ]; then release=yes; else is_rel "$e" && release=yes; fi
+        if [ -z "$e" ]; then release=yes
+        else
+          printf '%s\n' "$e" | { rel_any=no; while IFS= read -r v; do is_rel "$v" && rel_any=yes; done; [ $rel_any = yes ]; } && release=yes
+        fi
       elif ! grep -q 'does not have a __TEXT,__info_plist' "$tmp/err"; then
         release=yes   # a section launchctl cannot read
       fi

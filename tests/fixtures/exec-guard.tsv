@@ -37,3 +37,5 @@ dev_flat_plist	allow	refuse
 rel_shebang_env	refuse	refuse
 dev_shebang_env_sh	allow	refuse
 rel_embedded_newline	refuse	refuse
+rel_lowercase_disk	refuse	refuse
+rel_embedded_nested_key	refuse	refuse
