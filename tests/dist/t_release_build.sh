@@ -49,6 +49,25 @@ rs=$(sed -n 's/.*"rustc": *"\([^"]*\)".*/\1/p' "$D/MANIFEST.json" | sort -u)
 [ -n "$rs" ] && [ "$(printf '%s\n' "$rs" | grep -vc "^rustc $pin ")" = 0 ] && pass "every recorded rustc is $pin" || fail "recorded rustc: $rs"
 grep -q "\"commit\": *\"$(g rev-parse v0.1.0-rc.1^{commit})\"" "$D/MANIFEST.json" && pass "the manifest names the commit" || fail "the manifest's commit"
 grep -q '"control": *false' "$D/MANIFEST.json" && pass "the manifest is not a control" || fail "the manifest's control flag"
+# the npm packages (PHASE3.md S5): four tarballs, the main one's launcher executable and its
+# optional dependencies pinned to this version, each platform one holding its executable
+nv=0.1.0-rc.1
+for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
+  t=$D/lukaso-$p-$nv.tgz
+  [ -s "$t" ] || { fail "no $(basename "$t")"; continue; }
+  h=$(shasum -a 256 "$t" | cut -d' ' -f1)
+  grep -q "\"name\": \"$(basename "$t")\", \"sha256\": \"$h\"" "$D/MANIFEST.json" && pass "$p: packed, in the manifest with its hash" || fail "$p: not in the manifest with its hash"
+done
+lst() { tar -tvzf "$D/lukaso-$1-$nv.tgz" 2>/dev/null; }
+lst sheepdog | grep -q '^-rwx.* package/bin/sheepdog$' && pass "the main package's launcher is executable" || fail "the main package's launcher"
+tar -xzOf "$D/lukaso-sheepdog-$nv.tgz" package/package.json > "$FX/pj" 2>/dev/null
+for p in sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
+  grep -q "\"@lukaso/$p\": \"$nv\"" "$FX/pj" || fail "the main package does not pin @lukaso/$p to $nv"
+done
+grep -q '"optionalDependencies"' "$FX/pj" && pass "the platform packages are optional dependencies" || fail "no optionalDependencies"
+lst sheepdog-darwin-universal | grep -q '^-rwx.* package/Sheepdog.app/Contents/MacOS/sheepdog$' && pass "darwin: the bundle's executable" || fail "darwin package"
+lst sheepdog-linux-arm64 | grep -q '^-rwx.* package/bin/sheepdog$' && pass "linux-arm64: the binary" || fail "linux-arm64 package"
+lst sheepdog-linux-x64 | grep -q '^-rwx.* package/bin/sheepdog$' && pass "linux-x64: the binary" || fail "linux-x64 package"
 [ "$(g worktree list | grep -c .)" = 1 ] && pass "no worktree left" || fail "a worktree left: $(g worktree list)"
 (cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 timeout 60 sh scripts/release.sh build --out "$out" v0.1.0-rc.1) >/dev/null 2>&1 \
   && fail "an existing output directory was reused" || pass "an existing output directory is refused"

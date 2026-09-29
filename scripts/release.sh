@@ -194,10 +194,30 @@ build_release() { # mode: unsigned | signed | control
     files="$files install.sh"
   fi
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
+
+  # the npm packages (PHASE3.md S5, D9): the sh launcher, and one package per platform holding the
+  # executable; the launcher's optional dependencies are pinned to exactly this version
+  nv=${tag#v} pk=$scratch/npm
+  mkdir -p "$pk/main/bin" "$pk/darwin" "$pk/linux-arm64/bin" "$pk/linux-x64/bin" "$scratch/npm-cache"
+  cp "$src/npm/sheepdog/bin/sheepdog" "$pk/main/bin/sheepdog" && chmod 755 "$pk/main/bin/sheepdog" || die "npm launcher"
+  printf '{\n  "name": "@lukaso/sheepdog",\n  "version": "%s",\n  "description": "Run a command and kill every process it started, escapees included",\n  "bin": {"sheepdog": "bin/sheepdog"},\n  "files": ["bin"],\n  "optionalDependencies": {\n    "@lukaso/sheepdog-darwin-universal": "%s",\n    "@lukaso/sheepdog-linux-arm64": "%s",\n    "@lukaso/sheepdog-linux-x64": "%s"\n  }\n}\n' \
+    "$nv" "$nv" "$nv" "$nv" > "$pk/main/package.json"
+  tar -xzf "$dest/sheepdog-macos-universal.tar.gz" -C "$pk/darwin" || die "npm: unpack the bundle"
+  printf '{\n  "name": "@lukaso/sheepdog-darwin-universal",\n  "version": "%s",\n  "os": ["darwin"],\n  "cpu": ["arm64", "x64"],\n  "files": ["Sheepdog.app"]\n}\n' "$nv" > "$pk/darwin/package.json"
+  for a in arm64 x64; do
+    case $a in arm64) b=aarch64 ;; x64) b=x86_64 ;; esac
+    cp "$dest/sheepdog-linux-$b" "$pk/linux-$a/bin/sheepdog" && chmod 755 "$pk/linux-$a/bin/sheepdog" || die "npm: linux $a"
+    printf '{\n  "name": "@lukaso/sheepdog-linux-%s",\n  "version": "%s",\n  "os": ["linux"],\n  "cpu": ["%s"],\n  "files": ["bin"]\n}\n' "$a" "$nv" "$a" > "$pk/linux-$a/package.json"
+  done
+  for d2 in main darwin linux-arm64 linux-x64; do
+    (cd "$pk/$d2" && tool base env npm_config_cache="$scratch/npm-cache" npm pack --silent --pack-destination "$dest" >/dev/null) || die "npm pack $d2"
+  done
+  files_npm="lukaso-sheepdog-$nv.tgz lukaso-sheepdog-darwin-universal-$nv.tgz lukaso-sheepdog-linux-arm64-$nv.tgz lukaso-sheepdog-linux-x64-$nv.tgz"
+  for f in $files_npm; do [ -s "$dest/$f" ] || die "npm pack made no $f"; done
   {
     printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": [\n' "$tag" "$commit" "$mode" "$( [ "$mode" = control ] && echo true || echo false)"
     sep=""
-    for f in $files; do
+    for f in $files $files_npm; do
       h=$(shasum -a 256 "$dest/$f" | cut -d' ' -f1)
       case $f in
         sheepdog-macos-*) r=$rustc_mac ;;
@@ -247,6 +267,38 @@ publish() {
   echo "release: $tag published"
 }
 
+# --- npm-check: before any `npm publish` (PHASE3.md §5 step 5) ----------------------------------
+npm_check() { # dir
+  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  . "$root/scripts/lib/realtools.sh" || die "cannot read realtools.sh"
+  d=$1 m=$1/MANIFEST.json nv=${tag#v}
+  [ -f "$m" ] || die "no $m"
+  mode=$(sed -n 's/^ *"mode": *"\([^"]*\)",*$/\1/p' "$m"); ctl=$(sed -n 's/^ *"control": *\([a-z]*\),*$/\1/p' "$m")
+  mtag=$(sed -n 's/^ *"tag": *"\([^"]*\)",*$/\1/p' "$m")
+  [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
+  [ "$mode" = signed ] || die "the manifest's mode is '$mode', not signed"
+  [ "$ctl" = false ] || die "the manifest is a control build"
+  for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
+    f=lukaso-$p-$nv.tgz
+    [ -f "$d/$f" ] || die "missing $f"
+    h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
+    grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
+  done
+  nt=/private/tmp/sd-npmcheck.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
+  mkdir -m 700 "$nt" "$nt/p" "$nt/a" || die "no temp dir"
+  tar -xzf "$d/lukaso-sheepdog-darwin-universal-$nv.tgz" -C "$nt/p" || die "cannot unpack the darwin package"
+  tar -xzf "$d/sheepdog-macos-universal.tar.gz" -C "$nt/a" || die "cannot unpack the release archive"
+  b=$nt/p/package/Sheepdog.app
+  rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"
+  rt_staple_ok "$b" || die "stapler: the darwin package's bundle has no valid staple ticket"
+  rt_spctl_ok "$b" || die "spctl: Gatekeeper rejects the darwin package's bundle"
+  c1=$(rt_cdhash "$b"); c2=$(rt_cdhash "$nt/a/Sheepdog.app")
+  [ -n "$c1" ] && [ "$c1" = "$c2" ] || die "the darwin package's bundle ($c1) is not the release archive's ($c2)"
+  rm -rf "$nt"; trap - EXIT
+  echo "release: the npm tarballs of $tag check out; publish them, platform packages first"
+}
+
 # --- verify: the three facts, from the archive, by the real tools (PHASE3.md §1.2) --------------
 verify() { # dir -> exit 1 naming the tool that refused
   . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
@@ -273,5 +325,5 @@ case $sub in
     elif [ $nonot = yes ]; then build_release control
     else build_release signed; fi ;;
   publish) publish ;;
-  npm-check) die "npm-check is not built yet (PHASE3.md S2e)" ;;
+  npm-check) npm_check "$out/$tag" ;;
 esac
