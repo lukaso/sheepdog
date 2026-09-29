@@ -131,7 +131,7 @@ form "an absolute path" "$FX/fake/scripts/release.sh" build --sign v0.1.0-rc.1
 echo forged > "$FX/nonce"; chmod 600 "$FX/nonce"; rm -f "$S/calls"
 env HOME="$FX/home" PATH="$S:$PATH" sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab \
   --dest "$FX/dest.g2" --real forged --nonce-file "$FX/nonce" --parent-pid $$ > "$FX/out.g2" 2>&1; rc=$?
-[ $rc = 3 ] && [ ! -e "$S/calls" ] && pass "a forged --real (not called by release.sh build --sign): refused (3), nothing ran" || fail "forged --real: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
+[ $rc = 3 ] && grep -q 'not called by release.sh build --sign' "$FX/out.g2" && [ ! -e "$S/calls" ] && pass "a forged --real (not called by release.sh build --sign): refused by the parent check (3), nothing ran" || fail "forged --real: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 # forged: the right parent and arguments, but another pid given (1)
 rm -f "$S/calls"
 (cd "$FX/fake" && env HOME="$FX/home" PATH="$S:$PATH" SD_PPID=1 scripts/release.sh build --sign v0.1.0-rc.1) > "$FX/out.g3" 2>&1; rc=$?

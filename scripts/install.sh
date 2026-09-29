@@ -101,7 +101,8 @@ if [ "$(uname -s)" = Darwin ]; then
   /bin/sh -p "$tmp/door/lib/exec-guard.sh" check "$new/Contents/MacOS/sheepdog" || die "the exec door refuses Sheepdog.app; nothing installed"
   # two moves, not one atomic swap: between them there is no app, and a sheepdog starting then
   # falls back as PLAN.md §4.4 says
-  if [ -e "$app" ]; then mv "$app" "$stage/Sheepdog.app.old" || die "cannot move the old app aside"; old=$stage/Sheepdog.app.old; fi
+  # old is set before the move: a signal during it finds cleanup knowing where the old app went
+  if [ -e "$app" ]; then old=$stage/Sheepdog.app.old; mv "$app" "$old" || { old=""; die "cannot move the old app aside"; }; fi
   if ! mv "$new" "$app"; then
     # put the old one back; if that fails too, keep it where it is and say where
     if [ -n "$old" ] && mv "$old" "$app"; then old=""; die "cannot move Sheepdog.app into $apps (the old one is back in place)"; fi

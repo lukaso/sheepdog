@@ -25,6 +25,7 @@ set -u
 # one collation and one message language for every sort and comparison (the operator's locale sorts
 # "SHA256SUMS" after "install.sh"; measured)
 LC_ALL=C; export LC_ALL
+DRYHOME=""   # set only by __publish-dry; never inherited (its EXIT trap removes it)
 root=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
 usage() { echo "usage: release.sh check|build|publish|npm-check|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
 die() { echo "release: $*" >&2; exit 1; }
@@ -312,6 +313,9 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
   # and every call runs with a fresh temp HOME and nothing else of the caller's (the `dry` class)
   for v in SD_PUBLISH_DRY_GH SD_PUBLISH_DRY_GIT; do
     eval "p=\${$v:-}"
+    # one string is checked and run: no control character (a trailing newline would be stripped
+    # when the path is rebuilt, and another file would run)
+    case $p in *[[:cntrl:]]*) die "$v holds a control character" ;; esac
     [ -n "$p" ] && [ -f "$p" ] && [ ! -L "$p" ] && [ -x "$p" ] || die "$v is not an executable file (and not a symlink)"
     pd=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P) || die "$v: cannot resolve its directory"
     case $pd/ in /private/tmp/sd-p3-fixtures.*/) ;; *) die "$v must be a stand-in in a /private/tmp/sd-p3-fixtures.* directory, not in $pd" ;; esac

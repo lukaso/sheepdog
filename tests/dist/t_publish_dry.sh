@@ -96,6 +96,14 @@ for spec in "outside:$OUT/gh" "symlink:$FX/gh-link" "dotdot:$FX/../$(basename "$
     sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
   [ $r != 0 ] && [ ! -e "$OUT/called" ] && pass "__publish-dry, a $l gh: refused, the outside gh never called" || fail "__publish-dry, $l: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 done
+# a stand-in whose name ends in a newline, next to a symlink without it: refused, the symlink's
+# target never called (the checked name and the run name must be one string)
+nl='
+'
+cp "$FX/gh" "$FX/ghn$nl"; ln -s "$OUT/gh" "$FX/ghn"; rm -f "$OUT/called"
+(cd "$REPO" && env HOME="$FX/ghome" SD_PUBLISH_DRY_GH="$FX/ghn$nl" SD_PUBLISH_DRY_GIT="$FX/git" SD_ASK_SCRIPT="$FX/ask" SD_ASK_RECORD="$FX/calls2" \
+  sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && [ ! -e "$OUT/called" ] && pass "a stand-in name ending in a newline: refused, the symlink's target never called" || fail "newline name: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 # a wrapper inside the fixtures that execs a gh outside them cannot be seen before it runs: what
 # it reaches runs with a fresh temp HOME and no token or transport variable, so a real gh would
 # have no login and could not write
