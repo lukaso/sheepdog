@@ -21,7 +21,7 @@ v env; rc=$?
 mkdir -p "$FX/liar"
 for t in codesign xcrun spctl; do printf '#!/bin/sh\necho "valid on disk"\nexit 0\n' > "$FX/liar/$t"; chmod +x "$FX/liar/$t"; done
 v env PATH="$FX/liar:$PATH"; rc=$?
-[ $rc = 1 ] && pass "with lying codesign, xcrun and spctl on PATH: still refused" || fail "liars: rc=$rc $(tail -1 "$FX/o")"
+[ $rc = 1 ] && grep -q 'codesign' "$FX/o" && pass "with lying codesign, xcrun and spctl on PATH: still refused, by codesign" || fail "liars: rc=$rc $(tail -1 "$FX/o")"
 v env DEVELOPER_DIR="$FX/liar-dev"; rc=$?
 [ $rc = 1 ] && pass "with a DEVELOPER_DIR set: still refused" || fail "DEVELOPER_DIR: rc=$rc"
 finish
