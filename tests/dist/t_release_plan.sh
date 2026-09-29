@@ -45,7 +45,9 @@ mkout "$FX/o"; echo "0000  sheepdog-linux-aarch64" >> "$FX/o/SHA256SUMS"
 no "$FX/o" && pass "a malformed or fifth SHA256SUMS line: refused" || fail "SHA256SUMS lines: rc=$r"
 mkout "$FX/o"; (cd "$FX/o" && shasum -a 256 sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
 no "$FX/o" && pass "a SHA256SUMS that misses an artifact: refused" || fail "short SHA256SUMS: rc=$r"
-mkout "$FX/o" control true; no "$FX/o" && pass "a control build: refused" || fail "control: rc=$r"
+mkout "$FX/o" signed true; no "$FX/o" && pass "a control build (mode signed, control true): refused" || fail "control: rc=$r"
+mkout "$FX/o"; (cd "$FX/o" && shasum -a 256 sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-aarch64 sheepdog-linux-x86_64 > SHA256SUMS)
+no "$FX/o" && pass "four matching lines that name a file twice (install.sh missing): refused" || fail "duplicate name: rc=$r"
 mkout "$FX/o" unsigned false; no "$FX/o" && pass "an unsigned build: refused" || fail "unsigned: rc=$r"
 mkout "$FX/o"; sed -i.b "s/$C/0000000000000000000000000000000000000000/" "$FX/o/MANIFEST.json"
 no "$FX/o" && pass "a manifest commit that is not the tag's: refused" || fail "manifest commit: rc=$r"
