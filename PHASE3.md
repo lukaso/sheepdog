@@ -176,6 +176,13 @@ Cells: the helper refuses each forbidden form (a cell per form, a mutant per ref
 - **§1.2–§1.5's cells are written at the start of S2**, red first, with the scripts they test (`release.sh`, `release-plan.sh`, `sign.sh`); in S0 there was nothing for them to drive yet.
 - **The door's bundle-level check** (a file that meets the requirement inside a bundle that does not) has no fixture before a real Developer ID file exists; its mutant stayed green. Its cell goes in the `rc` leg: rc.1's bundle with a changed `Info.plist` byte (the executable still meets the requirement; the bundle's seal does not) is refused.
 
+**S1 as built (2026-09-29):**
+- `rust-toolchain.toml` pins 1.98.1 (the Mac had 1.75.0); `scripts/release.conf` pins `rust:1.98.1-alpine` and `-slim` by index digest, and every leg uses them; the amd64 image is tagged by the base digest. The full matrix ran green on it (macOS on a rerun: `s2`'s CPU cell passed alone 3/3 and in the rerun at load 20; `s6`'s other-user cell had a real race, fixed: it now takes the first candidate still alive).
+- **The `hardened` leg:** the whole macOS suite against a sheepdog signed ad hoc with the hardened runtime (the cargo runner signs it before each test binary, since `cargo test` relinks it) — green, 24 of 24 test binaries with `adhoc,runtime`. Control: a runner that signs without `-o runtime` leaves the suite green and the leg red on the evidence (0 of 24).
+- `scripts/lib/release-run.sh` (the release-binary rules; 6 mutants red) and `tests/dist/t_release_universal.sh`: the universal `--release --locked` build, minos 12.0 on both slices (mutant: no deployment target, red), the `.dev` bundle ad hoc with the hardened runtime, cells 1 and 3 and the tracking through the helper, with the escapee control.
+- **Not done: Rosetta is not installed on this Mac** (an x86_64 binary does not start: "Bad CPU type"), so the x86_64 slice is checked statically only (present, minos 12.0). Installing it (`softwareupdate --install-rosetta`) is the operator's call.
+- **Found on the way:** every registry call (`docker pull`, `buildx imagetools`) makes Docker Desktop run `docker-credential-osxkeychain`, which can show a keychain prompt, even with an empty `DOCKER_CONFIG`. The operator approves them (2026-09-29); a step that may reach the registry is announced first. A local `docker run --pull=never` of a pinned image never does.
+
 ## 3. The full-matrix legs
 
 The ten legs of `./test-all` stay (on the pinned toolchain from S1). Phase 3 adds:
