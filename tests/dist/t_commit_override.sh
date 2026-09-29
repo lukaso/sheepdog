@@ -22,6 +22,8 @@ case $(ver) in *0123456789abcdef0123456789abcdef01234567*) pass "a changed overr
 for bad in 'abc' 'xyz1234' 'abc1234 (evil)' '0123456789abcdef0123456789abcdef012345678'; do
   if b SHEEPDOG_COMMIT_OVERRIDE="$bad"; then fail "override '$bad' accepted"; else pass "override '$bad' fails the build"; fi
 done
+b SHEEPDOG_COMMIT_OVERRIDE= || fail "an empty override fails the build"
+case $(ver) in *unknown*) pass "an empty override counts as unset" ;; *) fail "empty override: $(ver)" ;; esac
 b -u SHEEPDOG_COMMIT_OVERRIDE || fail "rebuild without override failed"
 case $(ver) in *unknown*) pass "unset again: unknown" ;; *) fail "unset again: $(ver)" ;; esac
 finish

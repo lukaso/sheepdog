@@ -23,9 +23,10 @@ fn git(args: &[&str]) -> Option<String> {
 
 fn main() {
     // The release build passes the commit in (PHASE3.md D7): in its container the worktree's .git
-    // names a host path. Hex only, 7 to 40 digits; anything else fails the build.
+    // names a host path. Hex only, 7 to 40 digits; anything else fails the build. Empty counts as
+    // unset (a caller that exports it empty must not break every build).
     println!("cargo:rerun-if-env-changed=SHEEPDOG_COMMIT_OVERRIDE");
-    if let Some(c) = std::env::var_os("SHEEPDOG_COMMIT_OVERRIDE") {
+    if let Some(c) = std::env::var_os("SHEEPDOG_COMMIT_OVERRIDE").filter(|c| !c.is_empty()) {
         let c = c.to_string_lossy().into_owned();
         let hex = (7..=40).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_hexdigit());
         assert!(hex, "SHEEPDOG_COMMIT_OVERRIDE must be 7 to 40 hex digits, got {c:?}");

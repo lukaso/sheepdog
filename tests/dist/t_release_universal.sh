@@ -64,7 +64,7 @@ perl "$FX/escape.pl" "$FX/esc2"
 if [ -s "$FX/esc2" ] && alive "$FX/esc2"; then pass "control: without sheepdog the escapee survives"; kill -9 "$(cut -d' ' -f1 "$FX/esc2")"
 else fail "control: the escapee did not survive without sheepdog"; fi
 
-if [ -n "$(command -v arch)" ] && arch -x86_64 "$FX/sheepdog" --version >/dev/null 2>&1; then
+if "$SD_ROOT/scripts/lib/exec-guard.sh" check "$FX/sheepdog" && arch -x86_64 "$FX/sheepdog" --version >/dev/null 2>&1; then
   pass "x86_64 slice runs (Rosetta)"
 else
   echo "note: no x86_64 runtime here (Rosetta absent); the x86_64 slice is checked statically only"

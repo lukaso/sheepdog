@@ -26,6 +26,8 @@
 #                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
 #                the commit override, the npm launcher; PHASE3.md §3)
+#   pull         (not automatic) fetch the pinned images from the registry; the one step that
+#                reaches it (Docker Desktop may show a keychain prompt for its credential helper)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
 #                operator's Developer ID and a click in System Settings; prints the steps
 #
@@ -34,10 +36,11 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
-# the pinned images (PHASE3.md D7): the same as the release build
+# the pinned images (PHASE3.md D7): the same as the release build. Every `docker run` uses
+# --pull=never (a registry call can show a keychain prompt); `./test-all pull` fetches them.
 . scripts/release.conf || exit 3
 ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened"
-[ "${1:-}" = "--list" ] && { echo "$ALL tcc"; exit 0; }
+[ "${1:-}" = "--list" ] && { echo "$ALL pull tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
 mkdir -p "$LOGDIR"
@@ -90,7 +93,7 @@ legtag() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 leg_run() { # leg-name docker-args...
   local name=$1; shift
   rm -f "$LOGDIR/$name.cid"
-  bg_wait timeout -k 30 3600 docker run --rm --init --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
+  bg_wait timeout -k 30 3600 docker run --rm --init --pull=never --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/$name.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
   return $rc
@@ -154,7 +157,7 @@ build_alpine() {
 # cleanup's *.cid glob covers even if the interrupt comes before the caller records it)
 start_job() { # extra docker args...
   local cf="$LOGDIR/job-$RANDOM$RANDOM.cid"
-  timeout 60 docker run -d --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" \
+  timeout 60 docker run -d --pull=never --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" \
     /tgt/debug/sheepdog run --quiet -- /tgt/debug/sd-fixture ticker 29.1 /tmp/r
 }
 
@@ -242,7 +245,7 @@ leg_sh1() {
   build_alpine || { record sh1 "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
   # no --init: the script's shell is PID 1 (the shape under test)
   rm -f "$LOGDIR/sh1.cid"
-  bg_wait timeout -k 30 600 docker run --rm --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
+  bg_wait timeout -k 30 600 docker run --rm --pull=never --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/sh1.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/sh1.cid")" >/dev/null 2>&1
   [ $rc -eq 0 ] && record sh1 PASS || record sh1 "FAIL ($LOGDIR/sh1.log)"
@@ -275,11 +278,20 @@ leg_hardened() {
   left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
   tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPDOG_TEST_TA[G]=$lt")
   # the evidence: one line per test binary, each with the runtime flag
-  local n bins
-  n=$(grep -c 'runtime' "$ev"); bins=$(grep -c . "$ev")
+  local n bins bins_run
+  n=$(awk '$2 == "adhoc,runtime"' "$ev" | grep -c .); bins=$(grep -c . "$ev")
   bins_run=$(grep -c '^     Running ' "$LOGDIR/hardened.log")
   if [ $rc = 0 ] && [ "$n" -gt 0 ] && [ "$n" = "$bins" ] && [ "$bins" = "$bins_run" ] && [ "$left" -eq 0 ] && [ "$tagged" -eq 0 ]; then record hardened PASS
   else record hardened "FAIL (rc $rc; $n of $bins signed runs had the runtime flag; $bins_run test binaries; leftovers $left, tagged $tagged; $LOGDIR/hardened.log)"; fi
+}
+
+leg_pull() {
+  local ok=1 i
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+    echo "pulling $i (Docker Desktop may ask for keychain access)"
+    timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0
+  done
+  [ $ok = 1 ] && record pull PASS || record pull "FAIL ($LOGDIR/pull.log)"
 }
 
 leg_tcc() {
@@ -297,7 +309,7 @@ for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
-    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; tcc) leg_tcc ;;
+    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; pull) leg_pull ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done
