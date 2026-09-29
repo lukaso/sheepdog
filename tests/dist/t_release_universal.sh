@@ -44,7 +44,7 @@ my $p = fork(); die "fork" unless defined $p;
 if ($p == 0) {
   POSIX::setsid() != -1 or die "setsid";
   my $q = fork(); die "fork2" unless defined $q;
-  if ($q == 0) { my $s = `ps -o lstart= -p $$`; chomp $s; open(my $h, '>', "$f.tmp") or die; print $h "$$ $s\n"; close $h; rename "$f.tmp", $f; sleep 300; exit 0; }
+  if ($q == 0) { my $s = `LC_ALL=C ps -o lstart= -p $$`; chomp $s; open(my $h, '>', "$f.tmp") or die; print $h "$$ $s\n"; close $h; rename "$f.tmp", $f; sleep 300; exit 0; }
   exit 0;
 }
 waitpid($p, 0);
@@ -53,7 +53,7 @@ exit(-e $f ? 0 : 3);
 P
 alive() { # recordfile -> 0 if the recorded process is alive with the same start time
   p=$(cut -d' ' -f1 "$1"); s=$(cut -d' ' -f2- "$1")
-  [ "$(ps -o lstart= -p "$p" 2>/dev/null)" = "$s" ]
+  [ "$(LC_ALL=C ps -o lstart= -p "$p" 2>/dev/null)" = "$s" ]
 }
 R run -- perl "$FX/escape.pl" "$FX/esc1" 2>/dev/null; rc=$?
 if [ $rc = 0 ] && [ -s "$FX/esc1" ]; then
