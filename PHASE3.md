@@ -217,6 +217,12 @@ Cells: the helper refuses each forbidden form (a cell per form, a mutant per ref
 
 **S2+S3+S5 review, rounds 3–4:** round 3 (91d4a8c; 1 P2, 2 P3, fixed a25b5a1): t_sign's forged row passed for the wrong reason after real mode began refusing shims (it now requires the parent check's own message); a stand-in name ending in a newline let `__publish-dry` check one file and run another (control characters refused); install.sh sets `old` before moving the old app aside; `DRYHOME` is reset at start. **Round 4: no findings — the S2+S3+S5 review is closed.** Coverage gaps, stated: install.sh's swap and restore run only after a Developer ID-signed app passes, so no stand-in reaches them (the rc leg does); the `DRYHOME` reset guards only the real `publish` path.
 
+**The matrix at 2026-09-30 (a quiet run at the S7 commit) is RED, for reasons outside phase 3's code:**
+- **Docker Desktop's disk is full** (the VM's overlay: 58.4 GB of 58.4 GB used; images 18 GB, volumes 19.6 GB, build cache 4.3 GB, mostly other projects'): debian, amd64, other-user and dist-linux fail with "No space left on device". Freeing it is the operator's call.
+- **The macOS scan-cost cell** (`s2_the_scan_costs_under_one_percent_cpu`) now fails on this Mac: 38–44 ms of CPU per 3 s (1.3–1.5%) with 864 of the operator's processes and a load average of 13–21; the same on Rust 1.75 and 1.98.1 (measured back to back), so not the pin. This is the scan-cost item in TODOS.md, now reached.
+- **The 100 ms exit cell** (`s1_exit_follows_the_root_within_100ms_every_time`) fails under that load (117 ms) and passes alone.
+Every other leg passed: alpine, pid1, init, enosys, sh1, release, bundle (all phase-3 cells) and hardened.
+
 ## 3. The full-matrix legs
 
 The ten legs of `./test-all` stay (on the pinned toolchain from S1). Phase 3 adds:
