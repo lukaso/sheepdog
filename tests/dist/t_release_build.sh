@@ -47,7 +47,7 @@ v=$("$SD_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepdog
 case $v in *"$short"*) pass "the Mac binary names the tag's commit" ;; *) fail "the Mac binary says: $v" ;; esac
 . "$SD_ROOT/scripts/release.conf"
 # control for the static check: a glibc build has a PT_INTERP (so the check can fire)
-[ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ] || echo "SKIP-ROW: no glibc build (./test-all debian makes one); the PT_INTERP control did not run"
+[ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ] || echo "note: no glibc build (./test-all debian makes one); the PT_INTERP control did not run"
 if [ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ]; then
   timeout 120 docker run --rm --pull=never --network none -v "$SD_ROOT/target-linux-gnu/debug/sheepdog":/b:ro "$SD_IMG_ALPINE" sh -c 'readelf -l /b | grep -q INTERP' \
     && pass "control: a glibc build shows a PT_INTERP" || fail "control: the glibc build shows no PT_INTERP"
