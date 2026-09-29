@@ -24,7 +24,7 @@ while IFS="$(printf '\t')" read -r name verdict _install; do
   p=$(fx_build "$name") || { fail "building $name"; continue; }
   door "$verdict" "$p" "$name"; rows=$((rows + 1))
 done < "$FX/table"
-[ "$rows" -ge 26 ] || fail "only $rows fixtures ran"
+[ "$rows" -ge 37 ] || fail "only $rows fixtures ran"
 
 # liars: each command the door could call by name, alone first on PATH (it prints a harmless
 # answer and succeeds), and each as an exported bash function; a test variable set. Every refuse
@@ -38,7 +38,7 @@ while IFS="$(printf '\t')" read -r name verdict _install; do
 done < "$FX/table"
 OK=$(fx_build dev_bundle)
 count() { /usr/bin/grep -c . "$1"; }
-for c in codesign uname sed grep dirname readlink head lipo plutil launchctl tr cut mktemp rm cat env pwd; do
+for c in codesign uname sed grep dirname basename readlink head lipo plutil launchctl tr mktemp rm; do
   mkdir -p "$FX/liar-$c"
   printf '#!/bin/sh\necho "Identifier=com.example.harmless"\necho Linux\nexit 0\n' > "$FX/liar-$c/$c"; chmod +x "$FX/liar-$c/$c"
   bad=0
@@ -56,6 +56,37 @@ for c in codesign uname sed grep dirname readlink head lipo plutil launchctl tr 
   env "BASH_FUNC_$c%%=() { echo Identifier=com.example.harmless; echo Linux; return 0; }" SD_EXEC_RECORD="$rec" "$DOOR" exec "$OK" >/dev/null 2>&1; b=$(count "$rec")
   [ "$a" = 1 ] && [ "$b" = 1 ] && pass "control: a lying $c does not break an allowed file" || fail "control: a lying $c breaks an allowed file (path $a, function $b)"
 done
+
+# started as `sh DOOR` and `bash DOOR` (no #! -p from the kernel), with SD_GUARD_P=1 preset and
+# a lying uname function: still refused
+for shell in sh bash; do
+  bad=0
+  for p in $REFUSE; do
+    rec="$FX/rec.s"; : > "$rec"
+    env SD_GUARD_P=1 "BASH_FUNC_uname%%=() { echo Linux; }" "BASH_FUNC_codesign%%=() { echo Identifier=x; }" \
+      SD_EXEC_RECORD="$rec" $shell "$DOOR" exec "$p" >/dev/null 2>&1
+    [ "$(count "$rec")" = 0 ] || { bad=1; echo "  $shell DOOR let through: $p"; }
+  done
+  [ $bad = 0 ] && pass "started as '$shell DOOR' with SD_GUARD_P preset: nothing through" || fail "'$shell DOOR' with SD_GUARD_P preset lets a file through"
+done
+# a lying DEVELOPER_DIR (lipo is a DEVELOPER_DIR trampoline): its fake lipo cannot answer
+mkdir -p "$FX/fakedev/usr/bin"
+printf '#!/bin/sh\nexit 1\n' > "$FX/fakedev/usr/bin/lipo"; chmod +x "$FX/fakedev/usr/bin/lipo"
+for n in rel_fat_plist_arm64 rel_fat_ident_x86; do
+  p=$(fx_build "$n"); rec="$FX/rec.d"; : > "$rec"
+  env DEVELOPER_DIR="$FX/fakedev" SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1
+  [ "$(count "$rec")" = 0 ] && pass "$n with a lying DEVELOPER_DIR refused" || fail "$n with a lying DEVELOPER_DIR let through"
+done
+# a door killed by TERM leaves no temp dir
+# (the door runs in a process group of its own, and the group is killed, as `timeout` does; at ten
+# delays, so some land while the temp dir exists)
+p=$(fx_build rel_fat_plist_x86); before=$(ls -d /private/tmp/sd-exec-guard.* 2>/dev/null | wc -l)
+for dl in 0.02 0.04 0.06 0.08 0.1 0.12 0.15 0.2 0.25 0.3; do
+  perl -e 'setpgrp(0, 0); exec @ARGV' "$DOOR" check "$p" 2>/dev/null & dp=$!
+  sleep $dl; kill -TERM -$dp 2>/dev/null; wait $dp 2>/dev/null
+done
+sleep 1; after=$(ls -d /private/tmp/sd-exec-guard.* 2>/dev/null | wc -l)
+[ "$after" -le "$before" ] && pass "a door group killed by TERM leaves no temp dir" || fail "a killed door left $((after - before)) temp dir(s)"
 
 # `exec` runs the path the caller typed (a symlink stays a symlink), judged in both forms
 p=$(fx_build dev_symlink); rec="$FX/rec.t"; : > "$rec"

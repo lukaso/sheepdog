@@ -26,3 +26,14 @@ rel_shebang	refuse	refuse
 rel_dir_symlink	refuse	refuse
 dev_script	allow	refuse
 dev_symlink	allow	refuse
+rel_embedded_space_path	refuse	refuse
+rel_embedded_tab_path	refuse	refuse
+rel_fat_ident_x86	refuse	refuse
+rel_fat_ident_arm64	refuse	refuse
+rel_dot_path	refuse	refuse
+rel_dot_relative	refuse	refuse
+rel_flat_plist	refuse	refuse
+dev_flat_plist	allow	refuse
+rel_shebang_env	refuse	refuse
+dev_shebang_env_sh	allow	refuse
+rel_embedded_newline	refuse	refuse
