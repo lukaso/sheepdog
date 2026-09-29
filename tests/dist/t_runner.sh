@@ -16,9 +16,12 @@ if [ "$(uname -s)" = Darwin ]; then
   sh "$FX/d/run.sh" >/dev/null 2>&1 && fail "a SKIP on macOS was green" || pass "a SKIP on macOS: red"
 fi
 mk; sh "$FX/d/run.sh" >/dev/null 2>&1 && fail "no cells was green" || pass "no cells: red"
-# TERM with a cell whose child ignores TERM: both record their pids
-mk
-cat > "$FX/d/t_hang.sh" <<H
+# TERM with a cell whose child ignores TERM: both record their pids. Under sh, and under dash when
+# it is there (dash's kill builtin rejects `--`, so the kill form must work in both).
+shells=sh; command -v dash >/dev/null 2>&1 && shells="sh dash"
+for shell in $shells; do
+  mk; rm -f "$FX/cellpid" "$FX/childpid"
+  cat > "$FX/d/t_hang.sh" <<H
 #!/bin/sh
 trap '' TERM
 echo started-cell-output
@@ -26,13 +29,14 @@ echo \$\$ > "$FX/cellpid"
 sh -c 'trap "" TERM; echo \$\$ > "$FX/childpid"; exec sleep 60' &
 wait
 H
-sh "$FX/d/run.sh" > "$FX/o" 2>&1 & rp=$!
-i=0; while [ ! -s "$FX/childpid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-kill -TERM $rp; wait $rp
-grep -q started-cell-output "$FX/o" && pass "TERM: the running cell's output printed" || fail "TERM: output lost"
-sleep 1
-left=""
-for f in cellpid childpid; do p=$(cat "$FX/$f" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null && left="$left $p"; done
-if [ -z "$left" ]; then pass "TERM: no process of the cell is left"
-else fail "TERM: left alive:$left"; for p in $left; do kill -KILL "$p" 2>/dev/null; done; fi
+  $shell "$FX/d/run.sh" > "$FX/o" 2>&1 & rp=$!
+  i=0; while [ ! -s "$FX/childpid" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -TERM $rp; wait $rp
+  grep -q started-cell-output "$FX/o" && pass "$shell, TERM: the running cell's output printed" || fail "$shell, TERM: output lost"
+  sleep 1
+  left=""
+  for f in cellpid childpid; do p=$(cat "$FX/$f" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null && left="$left $p"; done
+  if [ -z "$left" ]; then pass "$shell, TERM: no process of the cell is left"
+  else fail "$shell, TERM: left alive:$left"; for p in $left; do kill -KILL "$p" 2>/dev/null; done; fi
+done
 finish

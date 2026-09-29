@@ -10,12 +10,13 @@ logdir=$(mktemp -d "${TMPDIR:-/tmp}/sd-dist.XXXXXX") || exit 3
 cp="" gp="" cur=""
 # stop the running cell: TERM to its `timeout`, then, after at most 5 s, KILL its whole process
 # group (GNU timeout leads a group of its own; this runner started it and confirmed the group id
-# when it started, so no other group can be hit). Then print what the cell wrote.
+# when it started, so no other group can be hit). `kill -KILL "-$gp"`, not `kill -KILL -- ...`:
+# dash's kill rejects `--`. Then print what the cell wrote.
 stop() {
   if [ -n "$cp" ]; then
     kill -TERM "$cp" 2>/dev/null
     i=0; while kill -0 "$cp" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-    if [ -n "$gp" ] && [ "$gp" -gt 1 ]; then kill -KILL -- "-$gp" 2>/dev/null; else kill -KILL "$cp" 2>/dev/null; fi
+    if [ -n "$gp" ] && [ "$gp" -gt 1 ]; then kill -KILL "-$gp" 2>/dev/null; else kill -KILL "$cp" 2>/dev/null; fi
     [ -n "$cur" ] && [ -f "$cur" ] && { cat "$cur"; echo "(stopped by a signal)"; }
   fi
   rm -rf "$logdir"; exit "$1"
