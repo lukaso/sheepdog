@@ -24,7 +24,7 @@ while IFS="$(printf '\t')" read -r name verdict _install; do
   p=$(fx_build "$name") || { fail "building $name"; continue; }
   door "$verdict" "$p" "$name"; rows=$((rows + 1))
 done < "$FX/table"
-[ "$rows" -ge 39 ] || fail "only $rows fixtures ran"
+[ "$rows" -ge 41 ] || fail "only $rows fixtures ran"
 
 # liars: each command the door could call by name, alone first on PATH (it prints a harmless
 # answer and succeeds), and each as an exported bash function; a test variable set. Every refuse
@@ -93,6 +93,10 @@ for n in rel_embedded_plist rel_upper_embedded rel_fat_plist_arm64 rel_fat_ident
   SD_EXEC_RECORD="$rec" "$FX/door/lib/exec-guard.sh" exec "$p" >/dev/null 2>&1
   [ "$(count "$rec")" = 0 ] && pass "$n refused when lipo fails" || fail "$n let through when lipo fails"
 done
+# the refusal names the real cause (lipo), not a release ID that is not there
+p=$(fx_build dev_bare)
+"$FX/door/lib/exec-guard.sh" check "$p" 2> "$FX/lipo.err"
+grep -q 'lipo' "$FX/lipo.err" && pass "a lipo failure is named in the refusal" || fail "refusal does not name lipo: $(head -1 "$FX/lipo.err")"
 # control: the same copy with a stub that passes through to the real lipo allows the dev files, so
 # the refusals above come from the failing lipo, not from copying the door
 printf '#!/bin/sh\nexec /usr/bin/lipo "$@"\n' > "$FX/stub/lipo"

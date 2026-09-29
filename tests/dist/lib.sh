@@ -121,6 +121,13 @@ fx_build() {
       printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog</string><key>Z</key><dict><key>CFBundleIdentifier</key><string>x</string></dict></dict></plist>\n' > "$d/sect.plist"
       printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
       echo "$d/sheepdog" ;;
+    rel_embedded_newline_nested)
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog&#10;</string><key>Z</key><dict><key>CFBundleIdentifier</key><string>x</string></dict></dict></plist>\n' > "$d/sect.plist"
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
+      echo "$d/sheepdog" ;;
+    rel_unreadable) fx_plist "$d/sect.plist" com.lukaso.sheepdog
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
+      chmod 111 "$d/sheepdog"; echo "$d/sheepdog" ;;
     *) echo "no fixture $1" >&2; exit 3 ;;
   esac
 }

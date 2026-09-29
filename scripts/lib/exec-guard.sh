@@ -115,7 +115,10 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     real=$(resolve "$jp") || refuse "cannot resolve $jp"
     [ -f "$real" ] || refuse "not a file: $jp"
     [ "$(uname -s)" = Darwin ] || return 0
-    release=no
+    release=no why=""
+    mark() { release=yes; why="${why:+$why; }$1"; }
+    # a file the door cannot read (mode 0111: the kernel can still exec it) counts as release
+    [ -r "$real" ] || mark "the door cannot read the file"
     # the slices of a universal file, each thinned into its own file (a thin file is its own)
     # Mach-O by its magic bytes (thin 32/64-bit either endian, fat, fat64)
     archs="" macho=no
@@ -125,28 +128,28 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     if [ $macho = yes ]; then
       if info=$("$LIPO" -info "$real" 2>/dev/null); then
         if printf '%s\n' "$info" | grep -q '^Architectures in the fat file'; then
-          archs=$("$LIPO" -archs "$real" 2>/dev/null) || release=yes
-          [ -n "$archs" ] || release=yes
+          archs=$("$LIPO" -archs "$real" 2>/dev/null) || mark "lipo cannot list the slices"
+          [ -n "$archs" ] || mark "lipo lists no slices"
         fi
       else
-        release=yes   # a Mach-O file lipo cannot read
+        mark "lipo cannot read this Mach-O file (is the Xcode licence accepted? is a developer directory set?)"
       fi
     fi
     # (a)
     if [ -n "$archs" ]; then
       for a in $archs; do
         id=$(codesign -d -v -a "$a" "$real" 2>&1 | sed -n 's/^Identifier=//p')
-        is_rel "$id" && release=yes
+        is_rel "$id" && mark "the $a slice's signature identifier is the release ID"
       done
     else
       id=$(codesign -d -v "$real" 2>&1 | sed -n 's/^Identifier=//p')
-      is_rel "$id" && release=yes
+      is_rel "$id" && mark "its signature identifier is the release ID"
     fi
     # (b), for each spelling of the path
     all=""
     for p in "$jp" "$(lexical "$jp")" "$real"; do
       bl=$(bundles "$p")
-      case $bl in yes*) release=yes ;; esac
+      case $bl in yes*) mark "an Info.plist of an enclosing or beside bundle says the release ID (or cannot be read)" ;; esac
       all="$all$nl$(printf '%s\n' "$bl" | sed 1d)"
     done
     # (c), every slice of a Mach-O file (lipo reads only Mach-O; a script has no section)
@@ -154,7 +157,7 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
     if [ $macho = no ]; then :
     elif [ -n "$archs" ]; then
       for a in $archs; do
-        "$LIPO" -thin "$a" -output "$tmp/slice.$a" "$real" 2>/dev/null || { release=yes; continue; }
+        "$LIPO" -thin "$a" -output "$tmp/slice.$a" "$real" 2>/dev/null || { mark "lipo cannot thin the $a slice"; continue; }
         set -- "$@" "$tmp/slice.$a"
       done
     else
@@ -165,16 +168,18 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
       if [ -n "$out" ]; then
         # every CFBundleIdentifier line (a nested dict may hold one too): any release ID counts
         e=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*"CFBundleIdentifier" *= *"\(.*\)";[[:space:]]*$/\1/p')
-        if [ -z "$e" ]; then release=yes
+        # a key the sed cannot parse (a value split over lines) must not hide behind one it can
+        nk=$(printf '%s\n' "$out" | grep -c '"CFBundleIdentifier"'); nv=$(printf '%s' "$e" | grep -c .)
+        if [ -z "$e" ] || [ "$nv" -lt "$nk" ]; then mark "an embedded Info.plist identifier the door cannot parse"
         else
-          printf '%s\n' "$e" | { rel_any=no; while IFS= read -r v; do is_rel "$v" && rel_any=yes; done; [ $rel_any = yes ]; } && release=yes
+          printf '%s\n' "$e" | { rel_any=no; while IFS= read -r v; do is_rel "$v" && rel_any=yes; done; [ $rel_any = yes ]; } && mark "an embedded Info.plist says the release ID"
         fi
       elif ! grep -q 'does not have a __TEXT,__info_plist' "$tmp/err"; then
-        release=yes   # a section launchctl cannot read
+        mark "an embedded Info.plist section launchctl cannot read"
       fi
     done
     if [ $release = yes ]; then
-      meets "$real" || refuse "it carries the release ID ($SD_RELEASE_ID) without the release signature"
+      meets "$real" || refuse "$why, and it lacks the release signature ($SD_RELEASE_ID requirement)"
       printf '%s\n' "$all" | while IFS= read -r b; do
         [ -n "$b" ] || continue
         meets "$b" || exit 1
