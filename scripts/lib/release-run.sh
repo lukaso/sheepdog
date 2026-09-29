@@ -15,6 +15,8 @@
 # - `run` gets --no-sweep;
 # - BINARY runs through the exec door (SD_EXEC_RECORD is passed to it, so refusals can be tested).
 set -u
+# the tools by name from the system dirs only (Alpine has no /usr/bin/uname or /usr/bin/sed)
+PATH=/usr/bin:/bin; export PATH
 usage() { echo "usage: release-run.sh HOME-DIR BINARY [SUBCOMMAND ARGS...]" >&2; exit 2; }
 no() { echo "release-run: refused: $*" >&2; exit 2; }
 [ $# -ge 2 ] || usage
@@ -26,26 +28,26 @@ h=$(cd -P "$home" && pwd -P) || no "cannot resolve $home"
 # all name the same folder). HOME-DIR may not be the real home or inside it (exit 4), may not hold
 # it (exit 5: a job there could reach it), and must be under a temp root (exit 3).
 # SD_RELEASE_RUN_DRY=1 stops after these checks and before any write (the cells use it).
-u=$(/usr/bin/id -un)
-r=$(/usr/bin/dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | /usr/bin/sed -n 's/^NFSHomeDirectory: *//p')
+u=$(id -un)
+r=$(dscl . -read "/Users/$u" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: *//p')
 [ -n "$r" ] || r=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
 [ -n "$r" ] && [ -d "$r" ] || no "cannot read the real home of $u"
 ino() { # path -> device:inode
-  case $(/usr/bin/uname -s) in Darwin) /usr/bin/stat -f %d:%i "$1" ;; *) stat -c %d:%i "$1" ;; esac
+  case $(uname -s) in Darwin) stat -f %d:%i "$1" ;; *) stat -c %d:%i "$1" ;; esac
 }
 under() { # dir ancestor-inode -> 0 if dir is that folder or inside it
   d=$1
   while :; do
     [ "$(ino "$d")" = "$2" ] && return 0
     [ "$d" = / ] && return 1
-    d=$(/usr/bin/dirname "$d")
+    d=$(dirname "$d")
   done
 }
 ri=$(ino "$r") || no "cannot stat the real home"
 hi=$(ino "$h") || no "cannot stat HOME-DIR"
 under "$h" "$ri" && { echo "release-run: refused: HOME-DIR is the real home or inside it" >&2; exit 4; }
 under "$r" "$hi" && { echo "release-run: refused: HOME-DIR holds the real home" >&2; exit 5; }
-case $(/usr/bin/uname -s) in Darwin) roots="/private/tmp/ /private/var/folders/" ;; *) roots="/tmp/" ;; esac
+case $(uname -s) in Darwin) roots="/private/tmp/ /private/var/folders/" ;; *) roots="/tmp/" ;; esac
 ok=no
 for t in $roots; do case $h/ in "$t"*) ok=yes ;; esac; done
 [ $ok = yes ] || { echo "release-run: refused: HOME-DIR is not under a temp root ($roots)" >&2; exit 3; }
