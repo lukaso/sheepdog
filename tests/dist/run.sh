@@ -3,20 +3,31 @@
 # with its own exit code, and exits 0 only if all passed. A cell that did not run is a failure,
 # and so is a cell that skipped on macOS. Each cell writes to a file (a $( ) capture would wait for
 # any process that kept the output open), printed whole when the cell ends. A TERM or INT to this
-# runner stops the running cell, by the pid recorded here.
+# runner stops the running cell (by the pid recorded here) and prints what it wrote so far.
 set -u
 cd "$(dirname "$0")" || exit 3
 logdir=$(mktemp -d "${TMPDIR:-/tmp}/sd-dist.XXXXXX") || exit 3
-cp=""
+cp="" cur=""
+# stop the running cell (TERM, then KILL after 5 s, by the pid recorded here), print what it wrote
+stop() {
+  if [ -n "$cp" ]; then
+    kill -TERM "$cp" 2>/dev/null
+    i=0; while kill -0 "$cp" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -KILL "$cp" 2>/dev/null
+    [ -n "$cur" ] && [ -f "$cur" ] && { cat "$cur"; echo "(stopped by a signal)"; }
+  fi
+  rm -rf "$logdir"; exit "$1"
+}
 trap 'rm -rf "$logdir"' EXIT
-trap '[ -n "$cp" ] && kill -TERM "$cp" 2>/dev/null; rm -rf "$logdir"; exit 143' TERM
-trap '[ -n "$cp" ] && kill -TERM "$cp" 2>/dev/null; rm -rf "$logdir"; exit 130' INT
+trap 'stop 143' TERM
+trap 'stop 130' INT
 n=0 bad=""
 for t in t_*.sh; do
   [ -f "$t" ] || continue
   n=$((n + 1))
   echo "== $t"
-  timeout 1200 sh "$t" > "$logdir/$n" 2>&1 & cp=$!
+  cur="$logdir/$n"
+  timeout -k 10 1200 sh "$t" > "$cur" 2>&1 & cp=$!
   wait "$cp"; rc=$?; cp=""
   cat "$logdir/$n"
   if [ $rc != 0 ]; then bad="$bad $t"

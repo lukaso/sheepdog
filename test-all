@@ -327,16 +327,23 @@ TXT
   record tcc "manual (steps printed)"
 }
 
-# the native Linux legs run only if the pinned images really are the native platform
-NATIVE_BAD=""
-case " $LEGS " in *" alpine "*|*" debian "*|*" pid1 "*|*" init "*|*" enosys "*|*" sh1 "*|*" other-user "*)
+# the native Linux legs run only if the pinned images really are the native platform. Checked
+# before the first such leg (so after a `pull` leg in the same run), then kept.
+NATIVE_CHECKED="" NATIVE_BAD=""
+native_check() {
+  [ -n "$NATIVE_CHECKED" ] && return
+  NATIVE_CHECKED=1
+  local i a
   for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
-    a=$(img_arch "$i"); [ "$a" = "$NATIVE" ] || NATIVE_BAD="$NATIVE_BAD $i runs as '$a' (want $NATIVE);"
-  done ;;
-esac
+    a=$(img_arch "$i")
+    if [ -z "$a" ]; then NATIVE_BAD="$NATIVE_BAD $i is missing or Docker is unreachable;"
+    elif [ "$a" != "$NATIVE" ]; then NATIVE_BAD="$NATIVE_BAD $i runs as '$a' (want $NATIVE; run ./test-all pull);"; fi
+  done
+}
 for leg in $LEGS; do
   case $leg in alpine|debian|pid1|init|enosys|sh1|other-user)
-    if [ -n "$NATIVE_BAD" ]; then record "$leg" "FAIL (image platform:$NATIVE_BAD run ./test-all pull)"; continue; fi ;;
+    native_check
+    if [ -n "$NATIVE_BAD" ]; then record "$leg" "FAIL (image:$NATIVE_BAD)"; continue; fi ;;
   esac
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
