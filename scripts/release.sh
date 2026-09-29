@@ -190,7 +190,7 @@ build_release() { # mode: unsigned | signed | control
   # install.sh (PHASE3.md S3), with this release's version written in
   files="sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64"
   if [ -f "$src/scripts/install.sh" ]; then
-    sed "s/^SHEEPDOG_VERSION=.*/SHEEPDOG_VERSION=${tag#v}/" "$src/scripts/install.sh" > "$dest/install.sh" && chmod 755 "$dest/install.sh"
+    sh "$src/scripts/lib/render-install.sh" "$src/scripts/install.sh" "${tag#v}" "$dest/install.sh" || die "render install.sh"
     files="$files install.sh"
   fi
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
