@@ -14,3 +14,15 @@ rel_embedded_plist	refuse	refuse
 rel_bundle_symlink	refuse	refuse
 rel_bundle_linker_symlink	refuse	refuse
 rel_bundle_bad_plist	refuse	refuse
+rel_fat_plist_arm64	refuse	refuse
+rel_fat_plist_x86	refuse	refuse
+rel_upper_ident	refuse	refuse
+rel_space_ident	refuse	refuse
+rel_upper_bundle	refuse	refuse
+rel_upper_embedded	refuse	refuse
+rel_lowercase_path	refuse	refuse
+rel_nested_bundle	refuse	refuse
+rel_shebang	refuse	refuse
+rel_dir_symlink	refuse	refuse
+dev_script	allow	refuse
+dev_symlink	allow	refuse

@@ -24,14 +24,43 @@ while IFS="$(printf '\t')" read -r name verdict _install; do
   p=$(fx_build "$name") || { fail "building $name"; continue; }
   door "$verdict" "$p" "$name"; rows=$((rows + 1))
 done < "$FX/table"
-[ "$rows" -ge 14 ] || fail "only $rows fixtures ran"
+[ "$rows" -ge 26 ] || fail "only $rows fixtures ran"
 
-# a lying codesign first on PATH, and a test variable set: the door still refuses
-mkdir -p "$FX/liar"
-printf '#!/bin/sh\necho "Identifier=com.example.harmless" >&2\nexit 0\n' > "$FX/liar/codesign"
-chmod +x "$FX/liar/codesign"
-p=$(fx_build rel_adhoc_bundle)
-PATH="$FX/liar:$PATH" SHEEPDOG_TEST_TAG=0123456789abcdef door refuse "$p" "lying codesign on PATH"
+# liars: each command the door could call by name, alone first on PATH (it prints a harmless
+# answer and succeeds), and each as an exported bash function; a test variable set. Every refuse
+# row must stay refused, and (the control for each liar) an allowed file must still pass, so a
+# refusal is not just the door breaking.
+REFUSE=""
+while IFS="$(printf '\t')" read -r name verdict _install; do
+  [ "$verdict" = refuse ] || continue
+  p=$(fx_build "$name") || continue
+  REFUSE="$REFUSE $p"
+done < "$FX/table"
+OK=$(fx_build dev_bundle)
+count() { /usr/bin/grep -c . "$1"; }
+for c in codesign uname sed grep dirname readlink head lipo plutil launchctl tr cut mktemp rm cat env pwd; do
+  mkdir -p "$FX/liar-$c"
+  printf '#!/bin/sh\necho "Identifier=com.example.harmless"\necho Linux\nexit 0\n' > "$FX/liar-$c/$c"; chmod +x "$FX/liar-$c/$c"
+  bad=0
+  for p in $REFUSE; do
+    rec="$FX/rec.l"; : > "$rec"
+    env PATH="$FX/liar-$c:$PATH" SHEEPDOG_TEST_TAG=0123456789abcdef SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1
+    [ "$(count "$rec")" = 0 ] || { bad=1; echo "  $c on PATH let through: $p"; }
+    : > "$rec"
+    env "BASH_FUNC_$c%%=() { echo Identifier=com.example.harmless; echo Linux; return 0; }" SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1
+    [ "$(count "$rec")" = 0 ] || { bad=1; echo "  function $c let through: $p"; }
+  done
+  [ $bad = 0 ] && pass "a lying $c (PATH and function) lets nothing through" || fail "a lying $c lets a release-ID file through"
+  rec="$FX/rec.c"; : > "$rec"
+  env PATH="$FX/liar-$c:$PATH" SD_EXEC_RECORD="$rec" "$DOOR" exec "$OK" >/dev/null 2>&1; a=$(count "$rec"); : > "$rec"
+  env "BASH_FUNC_$c%%=() { echo Identifier=com.example.harmless; echo Linux; return 0; }" SD_EXEC_RECORD="$rec" "$DOOR" exec "$OK" >/dev/null 2>&1; b=$(count "$rec")
+  [ "$a" = 1 ] && [ "$b" = 1 ] && pass "control: a lying $c does not break an allowed file" || fail "control: a lying $c breaks an allowed file (path $a, function $b)"
+done
+
+# `exec` runs the path the caller typed (a symlink stays a symlink), judged in both forms
+p=$(fx_build dev_symlink); rec="$FX/rec.t"; : > "$rec"
+SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1
+[ "$(cat "$rec")" = "would exec $p" ] && pass "exec keeps the typed path" || fail "recorded: $(cat "$rec")"
 
 # nothing was ever run
 [ -e "$FX/ran" ] && fail "a fixture ran: $(cat "$FX/ran")" || pass "no fixture ran"
