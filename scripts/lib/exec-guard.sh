@@ -49,9 +49,13 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
   conf=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/release.conf
   . "$conf" || exit 2
   rel=$(printf %s "$SD_RELEASE_ID" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-  tmp=$(mktemp -d /private/tmp/sd-exec-guard.XXXXXX 2>/dev/null || mktemp -d) || exit 2
+  # the temp dir is named and the traps set before it is made, so a signal at any point finds a
+  # trap that knows it (only SIGKILL can leave it behind)
+  tmp=/private/tmp/sd-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  [ -d /private/tmp ] || tmp=/tmp/sd-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$tmp"' EXIT
   trap 'rm -rf "$tmp"; exit 1' HUP INT TERM
+  mkdir -m 700 "$tmp" || exit 2
   nl='
 '
   refuse() { echo "sheepdog exec-guard: refused $typed: $*" >&2; exit 1; }

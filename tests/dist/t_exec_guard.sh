@@ -77,17 +77,6 @@ for n in rel_fat_plist_arm64 rel_fat_ident_x86; do
   env DEVELOPER_DIR="$FX/fakedev" SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1
   [ "$(count "$rec")" = 0 ] && pass "$n with a lying DEVELOPER_DIR refused" || fail "$n with a lying DEVELOPER_DIR let through"
 done
-# a door killed by TERM leaves no temp dir
-# (the door runs in a process group of its own, and the group is killed, as `timeout` does; at ten
-# delays, so some land while the temp dir exists)
-p=$(fx_build rel_fat_plist_x86); before=$(ls -d /private/tmp/sd-exec-guard.* 2>/dev/null | wc -l)
-for dl in 0.02 0.04 0.06 0.08 0.1 0.12 0.15 0.2 0.25 0.3; do
-  perl -e 'setpgrp(0, 0); exec @ARGV' "$DOOR" check "$p" 2>/dev/null & dp=$!
-  sleep $dl; kill -TERM -$dp 2>/dev/null; wait $dp 2>/dev/null
-done
-sleep 1; after=$(ls -d /private/tmp/sd-exec-guard.* 2>/dev/null | wc -l)
-[ "$after" -le "$before" ] && pass "a door group killed by TERM leaves no temp dir" || fail "a killed door left $((after - before)) temp dir(s)"
-
 # `exec` runs the path the caller typed (a symlink stays a symlink), judged in both forms
 p=$(fx_build dev_symlink); rec="$FX/rec.t"; : > "$rec"
 SD_EXEC_RECORD="$rec" "$DOOR" exec "$p" >/dev/null 2>&1

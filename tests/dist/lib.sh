@@ -58,8 +58,8 @@ fx_build() {
     rel_bundle_linker_signed) fx_bundle "$d" com.lukaso.sheepdog; echo "$d/Sheepdog.app/Contents/MacOS/sheepdog" ;;
     rel_bundle_unsigned) fx_bundle "$d" com.lukaso.sheepdog; codesign --remove-signature "$d/Sheepdog.app/Contents/MacOS/sheepdog" 2>/dev/null
       echo "$d/Sheepdog.app/Contents/MacOS/sheepdog" ;;
-    rel_embedded_plist) fx_plist "$d/Info.plist" com.lukaso.sheepdog
-      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/Info.plist" || exit 3
+    rel_embedded_plist) fx_plist "$d/sect.plist" com.lukaso.sheepdog
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
       echo "$d/sheepdog" ;;
     rel_bundle_symlink) fx_bundle "$d" com.lukaso.sheepdog; codesign -s - -f "$d/Sheepdog.app" 2>/dev/null
       mkdir -p "$d/bin"; ln -s "../Sheepdog.app/Contents/MacOS/sheepdog" "$d/bin/sheepdog"; echo "$d/bin/sheepdog" ;;
@@ -77,8 +77,8 @@ fx_build() {
     rel_upper_ident) fx_prog "$d/sheepdog"; codesign -s - -f -i COM.LUKASO.SHEEPDOG "$d/sheepdog" 2>/dev/null; echo "$d/sheepdog" ;;
     rel_space_ident) fx_prog "$d/sheepdog"; codesign -s - -f -i "com.lukaso.sheepdog " "$d/sheepdog" 2>/dev/null; echo "$d/sheepdog" ;;
     rel_upper_bundle) fx_bundle "$d" COM.LUKASO.SHEEPDOG; echo "$d/Sheepdog.app/Contents/MacOS/sheepdog" ;;
-    rel_upper_embedded) fx_plist "$d/Info.plist" COM.LUKASO.SHEEPDOG
-      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/Info.plist" || exit 3
+    rel_upper_embedded) fx_plist "$d/sect.plist" COM.LUKASO.SHEEPDOG
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
       echo "$d/sheepdog" ;;
     rel_lowercase_path) fx_bundle "$d" com.lukaso.sheepdog; echo "$d/sheepdog.app/contents/macos/sheepdog" ;;
     rel_nested_bundle) mkdir -p "$d/Out.app/Contents/MacOS"; fx_plist "$d/Out.app/Contents/Info.plist" com.lukaso.sheepdog.dev
@@ -112,8 +112,8 @@ fx_build() {
       printf '#!/usr/bin/env %s\necho hi\n' "$d/Sheepdog.app/Contents/MacOS/sheepdog" > "$d/script"; chmod +x "$d/script"; echo "$d/script" ;;
     dev_shebang_env_sh) printf '#!/usr/bin/env sh\necho hi\n' > "$d/script"; chmod +x "$d/script"; echo "$d/script" ;;
     rel_embedded_newline)
-      printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog&#10;</string></dict></plist>\n' > "$d/Info.plist"
-      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/Info.plist" || exit 3
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.lukaso.sheepdog&#10;</string></dict></plist>\n' > "$d/sect.plist"
+      printf 'int main(){return 0;}\n' > "$d/e.c"; cc -o "$d/sheepdog" "$d/e.c" -sectcreate __TEXT __info_plist "$d/sect.plist" || exit 3
       echo "$d/sheepdog" ;;
     *) echo "no fixture $1" >&2; exit 3 ;;
   esac
