@@ -4,7 +4,7 @@
 # with a stand-in `cask` DSL that records each stanza, and each stanza is checked against what the
 # release makes: the url, with the version resolved, is the published archive (one of the five
 # files publish uploads); `app` is the archive's top directory and the `binary` target an
-# executable file in an archive made by archive.sh; the zap list is sheepdog's own state dir only;
+# executable file in an archive made by archive.sh, installed as `sheepdog`; the zap list is sheepdog's own state dir only;
 # `depends_on macos` matches the bundle's LSMinimumSystemVersion. A bad version or hash (one line
 # or several) is refused with nothing written. No brew command runs here: `brew style` installs
 # gems into the operator's Homebrew, so it and `brew audit` run in the clean-user leg.
@@ -28,11 +28,12 @@ class Rec
   def name(*) = nil
   def desc(*) = nil
   def homepage(h) = $r["homepage"] = h
-  def depends_on(**h) = ($r["depends_on"] ||= {}).merge!(h.transform_keys(&:to_s))
-  def app(a, **_) = ($r["app"] ||= []) << a
-  def binary(b, **_) = ($r["binary"] ||= []) << b
+  # each call with its options, so a repeated stanza or a target: is seen
+  def depends_on(**h) = ($r["depends_on"] ||= []) << h.transform_keys(&:to_s)
+  def app(a, **o) = ($r["app"] ||= []) << [a, o.transform_keys(&:to_s)]
+  def binary(b, **o) = ($r["binary"] ||= []) << [b, o.transform_keys(&:to_s)]
   def appdir = "APPDIR"
-  def zap(**h) = ($r["zap"] ||= {}).merge!(h.transform_keys(&:to_s))
+  def zap(**h) = ($r["zap"] ||= []) << h.transform_keys(&:to_s)
   def caveats(s = nil) = $r["caveats"] = s
   def method_missing(m, *_, **_, &_b) = $r["unknown"] << m.to_s
   def respond_to_missing?(*) = true
@@ -64,19 +65,22 @@ want = "https://github.com/lukaso/sheepdog/releases/download/v%s/sheepdog-macos-
 check(r.get("url") == want, "the url is the release's archive (%s)" % r.get("url"))
 check(r.get("url", "").rsplit("/", 1)[-1] in five, "the url's file is one publish uploads (%s)" % five)
 tops = sorted({x.split()[-1].split("/")[0] for x in rows})
-check(r.get("app") == ["Sheepdog.app"] and tops == ["Sheepdog.app"], "app is the archive's top directory (%s, archive %s)" % (r.get("app"), tops))
-b = r.get("binary") or [""]
-rel = b[0][len("APPDIR/"):] if len(b) == 1 and b[0].startswith("APPDIR/") else None
+a = r.get("app") or []
+check(len(a) == 1 and a[0][0] == "Sheepdog.app" and a[0][1].get("target", "Sheepdog.app") == "Sheepdog.app" and tops == ["Sheepdog.app"],
+      "one app, the archive's top directory, installed under that name (%s, archive %s)" % (a, tops))
+b = r.get("binary") or []
+rel = b[0][0][len("APPDIR/"):] if len(b) == 1 and b[0][0].startswith("APPDIR/") else None
 check(rel is not None and any(x.startswith("-rwx") and x.split()[-1] == rel for x in rows),
-      "the binary target is an executable in the archive (%s)" % b)
-check(r.get("zap") == {"trash": "~/.local/state/sheepdog"}, "zap removes sheepdog's state dir only (%s)" % r.get("zap"))
+      "one binary, an executable in the archive (%s)" % b)
+check(len(b) == 1 and b[0][1].get("target", b[0][0].rsplit("/", 1)[-1]) == "sheepdog", "the command on PATH is named sheepdog (%s)" % b)
+check(r.get("zap") == [{"trash": "~/.local/state/sheepdog"}], "one zap, sheepdog's state dir only (%s)" % r.get("zap"))
 names = {"12": "monterey", "13": "ventura", "14": "sonoma", "15": "sequoia", "26": "tahoe"}
-check(r.get("depends_on") == {"macos": ">= :%s" % names.get(mn.split(".")[0], "?")},
+check(r.get("depends_on") == [{"macos": ">= :%s" % names.get(mn.split(".")[0], "?")}],
       "depends_on macos matches LSMinimumSystemVersion %s (%s)" % (mn, r.get("depends_on")))
 PY
 [ $? = 0 ] || fail "the stanza check did not run"
 cat "$FX/rows"
-n=$(grep -c '^ok' "$FX/rows"); [ "$n" = 8 ] || fail "$n stanza rows passed, not 8"
+n=$(grep -c '^ok' "$FX/rows"); [ "$n" = 9 ] || fail "$n stanza rows passed, not 9"
 FAILS=$((FAILS + $(grep -c '^FAIL' "$FX/rows")))
 
 for bad in "0.1 $H" "v0.1.0 $H" "0.1.0 xyz" "0.1.0 ${H}0"; do

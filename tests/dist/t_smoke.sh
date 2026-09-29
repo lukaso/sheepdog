@@ -10,7 +10,7 @@ set -u
 fx_dir
 (cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
 mkdir -p "$FX/h"
-sm() { env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPDOG_STATE="$FX/h/s" TMPDIR="$FX/h" sh "$SD_ROOT/scripts/smoke.sh" "$1" > "$FX/o" 2>&1; }
+sm() { env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPDOG_STATE="$FX/h/s" TMPDIR="$FX/h" sh "$SD_ROOT/scripts/smoke.sh" "$1" < /dev/null > "$FX/o" 2>&1; }
 B=$FX/target/release/sheepdog
 "$SD_ROOT/scripts/lib/exec-guard.sh" check "$B" || { fail "the door refuses the build"; finish; }
 sm "$B"; r=$?

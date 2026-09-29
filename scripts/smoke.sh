@@ -28,26 +28,33 @@ alive() { rec "$1" && [ "$(start "$p")" = "$s" ]; }
 reap() { for f in "$t/e1" "$t/e2"; do alive "$f" && kill -KILL "$p" 2>/dev/null; done; }
 trap 'reap; rm -rf "${t:?}"' EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
-me=$(ps -o pgid= -p $$ | tr -d ' ')
-# the escapee: fork, a new session, fork again; the grandchild writes its pid and sleeps; the
-# script then writes the record (pid, start time, process group) only if all three were read
+pgid() { # pid -> its process group (Linux: /proc, which busybox and slim images have; macOS: ps)
+  if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f3
+  else ps -o pgid= -p "$1" | tr -d ' '; fi
+}
+me=$(pgid $$)
+# the escapee: fork, a new session, fork again. The grandchild writes its own record (pid, start
+# time, process group) before it becomes `sleep 300` (exec keeps the pid and the start time), so
+# every escapee that runs has a record for reap; the record is written only when all three were read
+cat > "$t/me.sh" <<'E'
+f=$1 p=$$
+if [ -r "/proc/$p/stat" ]; then st=$(sed 's/.*) //' "/proc/$p/stat"); s=$(echo "$st" | cut -d' ' -f20); g=$(echo "$st" | cut -d' ' -f3)
+else s=$(LC_ALL=C ps -o lstart= -p "$p"); g=$(ps -o pgid= -p "$p" | tr -d ' '); fi
+[ -n "$s" ] && [ -n "$g" ] && printf '%s\n%s\n%s\n' "$p" "$s" "$g" > "$f.w" && mv "$f.w" "$f"
+exec sleep 300
+E
 cat > "$t/esc.sh" <<'E'
 #!/bin/sh
-f=$1
+f=$1 m=${1%/*}/me.sh
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh -c 'sh -c "echo \$\$ > \"$0.p\"; exec sleep 300" "$0" &' "$f" &
+  setsid sh -c 'sh "$1" "$0" &' "$f" "$m" &
 else
-  perl -MPOSIX -e 'my $f = shift; my $p = fork(); if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; my $q = fork(); if ($q == 0) { open(my $h, ">", "$f.p"); print $h "$$\n"; close $h; exec "sleep", "300"; } exit 0; } waitpid($p, 0);' "$f"
+  perl -MPOSIX -e 'my ($f, $m) = @ARGV; my $p = fork(); if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; my $q = fork(); if ($q == 0) { exec "sh", $m, $f; } exit 0; } waitpid($p, 0);' "$f" "$m"
 fi
-i=0; while [ ! -s "$f.p" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-p=$(cat "$f.p" 2>/dev/null)
-case $p in ''|*[!0-9]*) exit 0 ;; esac
-if [ -r "/proc/$p/stat" ]; then s=$(sed 's/.*) //' "/proc/$p/stat" | cut -d' ' -f20); else s=$(LC_ALL=C ps -o lstart= -p "$p"); fi
-g=$(ps -o pgid= -p "$p" | tr -d ' ')
-[ -n "$s" ] && [ -n "$g" ] && printf '%s\n%s\n%s\n' "$p" "$s" "$g" > "$f.w" && mv "$f.w" "$f"
+i=0; while [ ! -s "$f" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 E
 w=$(command -v "$SD" 2>/dev/null) || w=$SD
-echo "smoke: testing $w ($("$SD" --version 2>&1 | head -1))"
+echo "smoke: testing $w ($("$SD" --version < /dev/null 2>&1 | head -1))"
 "$SD" run -- sh -c 'exit 7' >/dev/null 2>&1; rc=$?
 [ $rc = 7 ] && ok "cell 1: the exit code passes through" || bad "cell 1: exit $rc, want 7"
 # cell 3: the root starts the escapee and ends; sheepdog must kill it, not wait for it

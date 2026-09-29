@@ -8,6 +8,7 @@
 #   - wget (if present), then curl (added with the image's package manager): installed, as root
 #     into /usr/local/bin and as a plain user into ~/.local/bin; the installed binary runs a job and
 #     passes its exit code through; the PATH hint when ~/.local/bin is not on PATH;
+#   - scripts/smoke.sh passes on the installed binary (with this image's ps);
 #   - a checksum mismatch: refused, nothing installed.
 set -u
 fails=0
@@ -50,6 +51,10 @@ round() { # label
 if command -v wget >/dev/null 2>&1; then round wget; fi
 if command -v apk >/dev/null 2>&1; then apk add -q curl >/dev/null 2>&1; else (apt-get update -qq && apt-get install -y -qq curl) >/dev/null 2>&1; fi
 command -v curl >/dev/null 2>&1 && round curl || bad "curl could not be added"
+# S7's smoke of the installed binary, with this image's ps (busybox's has no -p; slim has none)
+if [ -x /usr/local/bin/sheepdog ]; then
+  sh /scripts/smoke.sh /usr/local/bin/sheepdog > /tmp/sm 2>&1 && ok "smoke.sh passes on the installed binary" || bad "smoke: $(tr '\n' ' ' < /tmp/sm)"
+else bad "smoke: nothing installed to test"; fi
 grep -q "GET /$art" /tmp/good.log && grep -q 'GET /SHA256SUMS' /tmp/good.log && ok "the server's log shows the real downloads" || bad "no GET in the server's log"
 
 rm -f /usr/local/bin/sheepdog
