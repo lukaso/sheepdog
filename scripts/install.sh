@@ -68,8 +68,14 @@ case $(uname -s) in
 esac
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sheepdog-install.XXXXXX") || die "no temp dir"
-stage=""
-cleanup() { rm -rf "$tmp"; [ -n "$stage" ] && rm -rf "$stage"; }
+stage="" old="" app=""
+# on any exit or signal: if the old app was moved aside and no app is in place, put it back first
+cleanup() {
+  if [ -n "$old" ] && [ -e "$old" ] && [ -n "$app" ] && [ ! -e "$app" ]; then
+    mv "$old" "$app" 2>/dev/null || { echo "sheepdog install: the old app is at $old" >&2; stage=""; }
+  fi
+  rm -rf "$tmp"; [ -n "$stage" ] && rm -rf "$stage"
+}
 trap cleanup EXIT
 trap 'cleanup; exit 1' HUP INT TERM
 
@@ -95,13 +101,14 @@ if [ "$(uname -s)" = Darwin ]; then
   /bin/sh -p "$tmp/door/lib/exec-guard.sh" check "$new/Contents/MacOS/sheepdog" || die "the exec door refuses Sheepdog.app; nothing installed"
   # two moves, not one atomic swap: between them there is no app, and a sheepdog starting then
   # falls back as PLAN.md §4.4 says
-  old=""
   if [ -e "$app" ]; then mv "$app" "$stage/Sheepdog.app.old" || die "cannot move the old app aside"; old=$stage/Sheepdog.app.old; fi
   if ! mv "$new" "$app"; then
-    # put the old one back before the cleanup removes the staging dir
-    [ -n "$old" ] && mv "$old" "$app"
-    die "cannot move Sheepdog.app into $apps${old:+ (the old one is back in place)}"
+    # put the old one back; if that fails too, keep it where it is and say where
+    if [ -n "$old" ] && mv "$old" "$app"; then old=""; die "cannot move Sheepdog.app into $apps (the old one is back in place)"; fi
+    [ -n "$old" ] && { keep=$old; old=""; stage=""; die "cannot move Sheepdog.app into $apps; the old app is at $keep"; }
+    die "cannot move Sheepdog.app into $apps"
   fi
+  old=""
   rm -rf "$stage"; stage=""
   bin=$HOME/.local/bin
   mkdir -p "$bin" && ln -sf "$app/Contents/MacOS/sheepdog" "$bin/sheepdog" || die "cannot link $bin/sheepdog"

@@ -105,7 +105,14 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
             ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$@" ;;
     net) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
             ${SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$SSH_AUTH_SOCK"} ${GIT_SSH_COMMAND:+GIT_SSH_COMMAND="$GIT_SSH_COMMAND"} \
-            ${GH_CONFIG_DIR:+GH_CONFIG_DIR="$GH_CONFIG_DIR"} "$@" ;;
+            ${GH_CONFIG_DIR:+GH_CONFIG_DIR="$GH_CONFIG_DIR"} ${XDG_CONFIG_HOME:+XDG_CONFIG_HOME="$XDG_CONFIG_HOME"} \
+            ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
+            ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
+            ${ALL_PROXY:+ALL_PROXY="$ALL_PROXY"} ${all_proxy:+all_proxy="$all_proxy"} \
+            ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} "$@" ;;
+    # the dry publish: a fresh temp HOME and nothing else of the caller's, so even a real gh reached
+    # through a stand-in would have no login
+    dry) env -i HOME="$DRYHOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" "$@" ;;
   esac
 }
 cargo_env() { # CARGO_HOME TARGET_DIR command... (the cargo class)
@@ -130,7 +137,6 @@ build_release() { # mode: unsigned | signed | control
   case $mode in unsigned) dest=$out/$tag-unsigned ;; signed) dest=$out/$tag ;; control) dest=$out/$tag-control ;; esac
   short=$(git -C "$root" rev-parse --short=12 "$commit")
   [ -e "$dest" ] && die "$dest exists (a release output directory is never reused)"
-  mkdir -p "$dest" || die "cannot make $dest"
   scratch=$(mktemp -d /private/tmp/sd-release.XXXXXX 2>/dev/null || mktemp -d) || die "no scratch dir"
   trap 'git -C "$root" worktree remove --force "$scratch/src" >/dev/null 2>&1; rm -rf "$scratch"' EXIT
   trap 'exit 1' HUP INT TERM
@@ -156,13 +162,8 @@ build_release() { # mode: unsigned | signed | control
   (cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" cargo fetch --locked -q) || die "cargo fetch (mac)"
   rustc_mac=$(cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" rustc -V) || die "rustc -V (mac)"
   case $rustc_mac in "rustc $pin "*) ;; *) die "the Mac compiler is '$rustc_mac', not the pinned $pin" ;; esac
-  for t in aarch64-apple-darwin x86_64-apple-darwin; do
-    (cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" cargo build -q --release --locked --offline --bin sheepdog --target $t) \
-      || die "cargo build $t"
-  done
-
-  # Linux, all of it before any signing: a failure here must not cost a notarization
-  step "the Linux builds"
+  # the Linux images, checked before anything is made (a failed precondition leaves no $dest)
+  step "the Linux images"
   amd64=sd-amd64-base:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)
   docker_env image inspect "$amd64" >/dev/null 2>&1 || amd64=sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)
   docker_env image inspect "$amd64" >/dev/null 2>&1 || die "no local amd64 image of the pinned base (run ./test-all pull, or ./test-all amd64)"
@@ -171,6 +172,14 @@ build_release() { # mode: unsigned | signed | control
     tar -cf "$scratch/empty.tar" -T /dev/null && docker_env import --platform "linux/$i" "$scratch/empty.tar" "sd-scratch:empty-$i" >/dev/null \
       || die "cannot make the empty image sd-scratch:empty-$i"
   done
+  mkdir -p "$dest" || die "cannot make $dest"
+  for t in aarch64-apple-darwin x86_64-apple-darwin; do
+    (cd "$src" && cargo_env "$scratch/cargo-mac" "$scratch/target-mac" cargo build -q --release --locked --offline --bin sheepdog --target $t) \
+      || die "cargo build $t"
+  done
+
+  # Linux, all of it before any signing: a failure here must not cost a notarization
+  step "the Linux builds"
   mkdir -p "$scratch/cargo-linux"
   docker_env run --rm --pull=never -v "$src":/src:ro -v "$scratch/cargo-linux":/sdhome -e CARGO_HOME=/sdhome -w /src "$SD_IMG_ALPINE" \
     cargo fetch --locked -q || die "cargo fetch (linux)"
@@ -213,9 +222,10 @@ build_release() { # mode: unsigned | signed | control
     nn=$(cat "$scratch/nonce")
     set -- --bin "$scratch/sheepdog" --version "$xyz" --build "$c" --tag "$tag" --commit "$short" --dest "$dest" --real "$nn" --nonce-file "$scratch/nonce" --parent-pid "$$"
     [ "$mode" = control ] && set -- "$@" --no-notarize
+    # in the foreground: a background child of a non-interactive sh ignores INT, so ctrl-C would
+    # not reach it (measured); env execs sign.sh, so its parent is still this shell
     env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
-      ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$S/lib/sign.sh" "$@" &
-    sp=$!; wait $sp || die "signing failed"
+      ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$S/lib/sign.sh" "$@" || die "signing failed"
   fi
 
   # install.sh (PHASE3.md S3), rendered with this release's version and the door
@@ -265,45 +275,53 @@ confirm() { # prompt -> 0 on the tag typed back
 publish_exec() { # dir
   d=$1
   pt=$(mktemp -d /private/tmp/sd-publish.XXXXXX) || die "no temp dir"
-  trap 'rm -rf "$pt"' EXIT; trap 'rm -rf "$pt"; exit 1' HUP INT TERM
-  tool net "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
-  tool net "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
+  trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
+  tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
   sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
   echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
   set -- $(sed -n 's/^POST [^ ]* //p' "$pt/plan")
-  id=$(tool net "$GH" api -X POST repos/lukaso/sheepdog/releases "$@" --jq .id) || die "gh: cannot make the draft"
+  id=$(tool "$NETC" "$GH" api -X POST repos/lukaso/sheepdog/releases "$@" --jq .id) || die "gh: cannot make the draft"
   case $id in ''|*[!0-9]*) die "gh: no release id ($id)" ;; esac
   echo "release: draft $id made"
   for f in $(sed -n 's/^UPLOAD //p' "$pt/plan"); do
-    tool net "$GH" api -X POST -H 'Content-Type: application/octet-stream' \
+    tool "$NETC" "$GH" api -X POST -H 'Content-Type: application/octet-stream' \
       "https://uploads.github.com/repos/lukaso/sheepdog/releases/$id/assets?name=$f" --input "$d/$f" --jq .id >/dev/null \
       || die "gh: upload of $f failed (the draft $id is not public; delete it on GitHub)"
   done
-  tool net "$GH" api "repos/lukaso/sheepdog/releases/$id" --jq '.assets[] | "\(.id) \(.name)"' > "$pt/assets" || die "gh: cannot read the draft"
+  tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases/$id" --jq '.assets[] | "\(.id) \(.name)"' > "$pt/assets" || die "gh: cannot read the draft"
   [ "$(awk '{print $2}' "$pt/assets" | sort | tr '\n' ' ')" = "SHA256SUMS install.sh sheepdog-linux-aarch64 sheepdog-linux-x86_64 sheepdog-macos-universal.tar.gz " ] \
     || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
   while read -r aid name; do
-    tool net "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
+    tool "$NETC" "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
     [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$(shasum -a 256 "$d/$name" | cut -d' ' -f1)" ] || die "the uploaded $name differs from the local one; the draft $id stays a draft"
   done < "$pt/assets"
-  tool net "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
+  tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
   cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload; the draft $id stays a draft"
   confirm "release: the draft $id holds the five files, each matching. Type the tag again to make it public:" || die "not confirmed; the draft $id stays a draft"
-  tool net "$GH" api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
+  tool "$NETC" "$GH" api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
   echo "release: $tag published"
 }
 publish() {
   verify "$out/$tag"
-  GH=gh GITCMD=git DRY=no publish_exec "$out/$tag"
+  GH=gh GITCMD=git DRY=no NETC=net publish_exec "$out/$tag"
 }
 publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
+  # a stand-in is a script (not a symlink, not a binary), whose real directory is a fixture dir;
+  # and every call runs with a fresh temp HOME and nothing else of the caller's (the `dry` class)
   for v in SD_PUBLISH_DRY_GH SD_PUBLISH_DRY_GIT; do
     eval "p=\${$v:-}"
-    case $p in /private/tmp/sd-p3-fixtures.*/*) [ -x "$p" ] || die "$v is not executable" ;; *) die "$v must be a stand-in under /private/tmp/sd-p3-fixtures.*" ;; esac
+    [ -n "$p" ] && [ -f "$p" ] && [ ! -L "$p" ] && [ -x "$p" ] || die "$v is not an executable file (and not a symlink)"
+    pd=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P) || die "$v: cannot resolve its directory"
+    case $pd/ in /private/tmp/sd-p3-fixtures.*/) ;; *) die "$v must be a stand-in in a /private/tmp/sd-p3-fixtures.* directory, not in $pd" ;; esac
+    [ "$(head -c 2 "$p")" = '#!' ] || die "$v must be a script stand-in"
+    eval "$v=\$pd/\$(basename \"\$p\")"
   done
-  echo "release: __publish-dry (stand-ins; verify not run)"
-  GH=$SD_PUBLISH_DRY_GH GITCMD=$SD_PUBLISH_DRY_GIT DRY=yes publish_exec "$out/$tag"
+  DRYHOME=$(mktemp -d /private/tmp/sd-dryhome.XXXXXX) || die "no temp HOME"
+  echo "release: __publish-dry (stand-ins; verify not run; a temp HOME)"
+  GH=$SD_PUBLISH_DRY_GH GITCMD=$SD_PUBLISH_DRY_GIT DRY=yes NETC=dry publish_exec "$out/$tag"
+  rm -rf "$DRYHOME"
 }
 
 # --- npm-check: before any `npm publish` (PHASE3.md §5 step 5) ----------------------------------

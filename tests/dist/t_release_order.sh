@@ -19,8 +19,9 @@ b() { rm -f "$S/calls"; rm -rf "$FX/out"
   (cd "$REPO" && env PATH="$S:$PATH" HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 sh scripts/release.sh build --out "$FX/out" v0.1.0-rc.1) > "$FX/o" 2>&1; }
 echo "rustc 1.0.0 (000000000 2020-01-01)" > "$S/rustc.v"; b; r=$?
 [ $r = 1 ] && grep -q "pinned $pin" "$FX/o" && ! grep -q '^docker' "$S/calls" && pass "a compiler off the pin: refused before any Linux step" || fail "off-pin: rc=$r $(tail -1 "$FX/o")"
+[ ! -e "$FX/out/v0.1.0-rc.1-unsigned" ] && pass "a failed precondition leaves no output directory (the next run is not blocked)" || fail "an output directory was left"
 echo "rustc $pin (000000000 2026-01-01)" > "$S/rustc.v"; b; r=$?
-[ $r = 1 ] && grep -q 'step: the Linux builds' "$FX/o" && ! grep -q 'step: the macOS bundle' "$FX/o" && ! grep -q '^lipo' "$S/calls" \
+[ $r = 1 ] && grep -q 'step: the Linux ' "$FX/o" && ! grep -q 'step: the macOS bundle' "$FX/o" && ! grep -q '^lipo' "$S/calls" \
   && pass "a failing docker: stopped at the Linux step, before the bundle" || fail "docker failing: rc=$r $(grep step "$FX/o" | tr '\n' ' ')"
 [ "$(g worktree list | grep -c .)" = 1 ] && pass "no worktree left after a failed build" || fail "a worktree left"
 finish

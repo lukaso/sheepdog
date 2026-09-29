@@ -17,9 +17,14 @@ out=$FX/out
   timeout 3000 sh scripts/release.sh build --out "$out" v0.1.0-rc.1) > "$FX/log" 2>&1 & bp=$!
 # once the tag's worktree exists, break the shared checkout's helpers: the build must use the tag's
 i=0; until grep -q '^release: building' "$FX/log" 2>/dev/null || [ $i -gt 600 ]; do sleep 0.5; i=$((i + 1)); done
-for h in scripts/bundle.sh scripts/lib/archive.sh scripts/lib/npm-pack.sh scripts/lib/render-install.sh; do
+# (every helper the build runs from $S, listed from release.sh itself)
+helpers=$(grep -o '"\$S/[a-z/._-]*' "$SD_ROOT/scripts/release.sh" | sed 's#"\$S/#scripts/#' | sort -u | grep -v 'release.conf$')
+[ -n "$helpers" ] || fail "no helpers found in release.sh"
+for h in $helpers; do
+  [ -f "$REPO/$h" ] || { fail "no $h in the repo"; continue; }
   printf '#!/bin/sh\necho CHECKOUT-HELPER-USED >&2\nexit 1\n' > "$REPO/$h"
 done
+echo "broke the checkout's: $(echo $helpers)"
 wait $bp; rc=$?
 [ $rc = 0 ] && pass "build: rc 0" || { fail "build: rc=$rc"; tail -20 "$FX/log"; finish; }
 grep -q CHECKOUT-HELPER-USED "$FX/log" && fail "a helper ran from the shared checkout" || pass "every helper ran from the tag's worktree (the checkout's were broken mid-build)"
@@ -42,6 +47,7 @@ v=$("$SD_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepdog
 case $v in *"$short"*) pass "the Mac binary names the tag's commit" ;; *) fail "the Mac binary says: $v" ;; esac
 . "$SD_ROOT/scripts/release.conf"
 # control for the static check: a glibc build has a PT_INTERP (so the check can fire)
+[ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ] || echo "SKIP-ROW: no glibc build (./test-all debian makes one); the PT_INTERP control did not run"
 if [ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ]; then
   timeout 120 docker run --rm --pull=never --network none -v "$SD_ROOT/target-linux-gnu/debug/sheepdog":/b:ro "$SD_IMG_ALPINE" sh -c 'readelf -l /b | grep -q INTERP' \
     && pass "control: a glibc build shows a PT_INTERP" || fail "control: the glibc build shows no PT_INTERP"

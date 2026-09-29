@@ -61,8 +61,8 @@ printf '%s\trefs/tags/v0.1.0\n' "$C" > "$FX/r5"
 ok "$FX/o" "$FX/r5" && pass "a lightweight remote tag on the commit: accepted" || fail "lightweight: rc=$r"
 echo v0.1.0 > "$FX/rel2"; no "$FX/o" "$FX/remote" "$FX/rel2" && pass "a release or draft that already uses the tag: refused" || fail "existing release: rc=$r"
 
-mkout "$FX/o"; mkdir -p "$FX/o/sub/v0.1.0-control"; printf '{\n  "control": true\n}\n' > "$FX/o/sub/v0.1.0-control/MANIFEST.json"
-no "$FX/o" && pass "a control manifest nested inside: refused" || fail "nested control: rc=$r"
+mkout "$FX/o"; mkdir -p "$FX/o/a sub/v0.1.0-control"; printf '{\n  "control": true\n}\n' > "$FX/o/a sub/v0.1.0-control/MANIFEST.json"
+no "$FX/o" && grep -q 'a sub/v0.1.0-control/MANIFEST.json' "$FX/err" && pass "a control manifest nested inside (a space in the path): refused, named" || fail "nested control: rc=$r $(cat "$FX/err")"
 # an rc tag is a prerelease (never the "latest" release)
 fx_release 0.1.1 2 v0.1.1-rc.1; C2=$(g rev-parse "v0.1.1-rc.1^{commit}")
 mkout "$FX/o2"; sed -i.b "s/v0.1.0/v0.1.1-rc.1/; s/$C/$C2/" "$FX/o2/MANIFEST.json"

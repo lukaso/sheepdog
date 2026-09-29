@@ -107,8 +107,9 @@ env PATH="$S:$PATH" SD_ASK_SCRIPT="$FX/ask.in" SD_ASK_RECORD="$S/calls" \
 [ $rc = 3 ] && ! grep -q -e '^codesign' -e '^xcrun' "$S/calls" 2>/dev/null && pass "a real HOME: refused (3), no signing tool ran" || fail "real HOME: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 # (b) the real mode's parent: sign.sh must be a direct child of `release.sh build --sign`, in any of
 # the ways the operator may start it, with that parent's pid and its nonce. A stand-in release.sh
-# runs sign.sh as its child; past the guard, the real mode announces the dialogs (then stops at its
-# question, as /dev/tty is not there: exit 1, not 3).
+# runs sign.sh as its child, with no controlling terminal and the shims first on PATH: past the
+# parent check, real mode refuses the shims (the system's tools only), so nothing runs.
+nott() { perl -MPOSIX -e 'my $p = fork(); die unless defined $p; if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; exec @ARGV or die; } waitpid($p, 0); exit($? >> 8)' "$@"; }
 mkdir -p "$FX/fake/scripts"
 cat > "$FX/fake/scripts/release.sh" <<F
 #!/bin/sh
@@ -119,8 +120,8 @@ F
 chmod 755 "$FX/fake/scripts/release.sh"
 form() { # label cmd... (run from $FX/fake)
   l=$1; shift; rm -f "$S/calls"
-  (cd "$FX/fake" && env HOME="$FX/home" PATH="$S:$PATH" "$@") > "$FX/out.f" 2>&1; rc=$?
-  [ $rc != 3 ] && grep -q 'expect keychain dialogs' "$FX/out.f" && pass "parent '$l': past the guard" || fail "parent '$l': rc=$rc $(grep refused "$FX/out.f" | head -1)"
+  (cd "$FX/fake" && nott env HOME="$FX/home" PATH="$S:$PATH" "$@") > "$FX/out.f" 2>&1 < /dev/null; rc=$?
+  [ $rc = 3 ] && grep -q 'non-system' "$FX/out.f" && [ ! -e "$S/calls" ] && pass "parent '$l': past the parent check, then the shims refused, nothing ran" || fail "parent '$l': rc=$rc $(grep refused "$FX/out.f" | head -1)"
 }
 form "scripts/release.sh build --sign" scripts/release.sh build --sign v0.1.0-rc.1
 form "./scripts/release.sh build --sign" ./scripts/release.sh build --sign v0.1.0-rc.1

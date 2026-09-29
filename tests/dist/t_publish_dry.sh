@@ -49,7 +49,7 @@ printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote
 pub() { # tag answers -> rc; output in $FX/o
   rm -rf "$FX/calls" "$FX"/env.* "$FX/up"; printf '%s\n' "$2" > "$FX/ask"
   (cd "$REPO" && env -u LC_ALL LANG=en_GB.UTF-8 LC_COLLATE=en_GB.UTF-8 HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" NPM_TOKEN="$DECOY" \
+    GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" NPM_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" \
     SD_PUBLISH_DRY_GH="$FX/gh" SD_PUBLISH_DRY_GIT="$FX/git" SD_ASK_SCRIPT="$FX/ask" SD_ASK_RECORD="$FX/calls" \
     sh scripts/release.sh __publish-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
@@ -65,7 +65,7 @@ pub v0.1.0 v0.1.0; r=$?
 [ "$(grep -c '^git ls-remote https://github.com/lukaso/sheepdog refs/tags/v0.1.0\*$' "$FX/calls")" = 2 ] \
   && pass "the tag is read from github.com/lukaso/sheepdog itself (twice)" || fail "ls-remote: $(grep ls-remote "$FX/calls" | head -1)"
 bad=""; for f in "$FX"/env.*; do for k in $(sed 's/=.*//' "$f"); do
-  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|SSH_AUTH_SOCK|GIT_SSH_COMMAND|GH_CONFIG_DIR|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac
+  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac
 done; done
 [ -z "$bad" ] && pass "gh and git got only the named environment" || fail "extra environment:$(printf '%s\n' $bad | sort -u | tr '\n' ' ')"
 grep -rl "$DECOY" "$FX"/env.* "$FX/calls" "$FX/o" >/dev/null 2>&1 && fail "a decoy token reached gh, git or the output" || pass "no decoy token reached gh, git or the output"
@@ -84,7 +84,35 @@ mkout "$FX/out/v0.1.1-rc.1" v0.1.1-rc.1 "$C2"
 pub v0.1.1-rc.1 v0.1.1-rc.1; r=$?
 [ $r = 0 ] && grep -q '^gh api -X POST repos/lukaso/sheepdog/releases -F draft=true -F prerelease=true ' "$FX/calls" && pass "an rc tag: the draft is a prerelease" || fail "rc: rc=$r $(grep POST "$FX/calls" | head -1)"
 
-rm -f "$FX/calls"
-(cd "$REPO" && env SD_PUBLISH_DRY_GH="$(command -v gh || echo /opt/homebrew/bin/gh)" SD_PUBLISH_DRY_GIT="$FX/git" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "__publish-dry refuses a gh outside the fixtures (nothing ran)" || fail "real gh accepted: rc=$r"
+# __publish-dry refuses every way to reach a gh outside the fixtures. The "real gh" here is a
+# recording stand-in outside them (never the real one), run with a temp HOME; it must never be called.
+OUT=$(mktemp -d /private/tmp/sd-outside.XXXXXX); trap 'rm -rf "$OUT" "$FX"' EXIT
+printf '#!/bin/sh\necho "OUTSIDE $*" >> "%s/called"\nenv > "%s/env"\nexit 0\n' "$OUT" "$OUT" > "$OUT/gh"; chmod +x "$OUT/gh"
+ln -s "$OUT/gh" "$FX/gh-link"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$OUT/gh" > "$FX/gh-wrap"; chmod +x "$FX/gh-wrap"
+for spec in "outside:$OUT/gh" "symlink:$FX/gh-link" "dotdot:$FX/../$(basename "$OUT")/gh"; do
+  l=${spec%%:*} p=${spec#*:}; rm -f "$OUT/called"
+  (cd "$REPO" && env HOME="$FX/ghome" SD_PUBLISH_DRY_GH="$p" SD_PUBLISH_DRY_GIT="$FX/git" SD_ASK_SCRIPT="$FX/ask" SD_ASK_RECORD="$FX/calls2" \
+    sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
+  [ $r != 0 ] && [ ! -e "$OUT/called" ] && pass "__publish-dry, a $l gh: refused, the outside gh never called" || fail "__publish-dry, $l: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
+done
+# a wrapper inside the fixtures that execs a gh outside them cannot be seen before it runs: what
+# it reaches runs with a fresh temp HOME and no token or transport variable, so a real gh would
+# have no login and could not write
+rm -f "$OUT/called" "$OUT/env"
+(cd "$REPO" && env HOME="$FX/ghome" GH_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" SD_PUBLISH_DRY_GH="$FX/gh-wrap" \
+  SD_PUBLISH_DRY_GIT="$FX/git" SD_ASK_SCRIPT="$FX/ask" SD_ASK_RECORD="$FX/calls2" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1
+if [ -e "$OUT/env" ]; then
+  h=$(sed -n 's/^HOME=//p' "$OUT/env")
+  case $h in /private/tmp/sd-*) ! grep -q -e '^GH_TOKEN=' -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' -e '^GITHUB_TOKEN=' "$OUT/env" \
+      && pass "a wrapper reaching an outside gh: that gh ran with a temp HOME and no token or transport" || fail "wrapper: the outside gh got a token or transport" ;;
+    *) fail "wrapper: the outside gh's HOME is '$h'" ;; esac
+else pass "a wrapper reaching an outside gh: not reached"; fi
+# the dry run's gh and git get a fresh temp HOME, and no GH_CONFIG_DIR or SSH_AUTH_SOCK: even a
+# real gh that got this far would have no login
+pub v0.1.1-rc.1 v0.1.1-rc.1
+h=$(sed -n 's/^HOME=//p' "$FX/env.gh.0"); case $h in /private/tmp/sd-*) pass "the dry gh's HOME is a fresh temp dir ($h)" ;; *) fail "the dry gh's HOME is '$h'" ;; esac
+grep -q -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' "$FX"/env.gh.* "$FX"/env.git.* && fail "the dry gh or git got GH_CONFIG_DIR or SSH_AUTH_SOCK" || pass "the dry gh and git get no GH_CONFIG_DIR or SSH_AUTH_SOCK"
+n=$(ls -d /private/tmp/sd-dryhome.* 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" = 0 ] && pass "no dry HOME is left, after the refused runs too" || fail "$n dry HOME dirs left"
 finish

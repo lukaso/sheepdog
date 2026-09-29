@@ -60,9 +60,8 @@ mv_() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" 
 [ "$(mv_ mode)" = signed ] || die "the manifest's mode is '$(mv_ mode)', not signed"
 [ "$(mv_ control)" = false ] || die "the manifest is a control build"
 # a control build's output nested anywhere below is refused too
-for nm in $(find "$out" -mindepth 2 -name MANIFEST.json 2>/dev/null); do
-  grep -q '"control": *true' "$nm" && die "a control build's manifest lies inside $out ($nm)"
-done
+nested=$(find "$out" -mindepth 2 -name MANIFEST.json -exec grep -l '"control": *true' {} + 2>/dev/null | head -1)
+[ -z "$nested" ] || die "a control build's manifest lies inside $out ($nested)"
 mc=$(mv_ commit)
 
 # the upload set and SHA256SUMS

@@ -9,7 +9,8 @@
 # The guard, before any codesign, xcrun or security call:
 #   real mode (--real): only when its parent is `release.sh build --sign` (however it was started:
 #     the parent's pid must be the one passed, and its arguments `...release.sh build ... --sign`),
-#     which passed a nonce it wrote to a 0600 file of this user's; otherwise refused;
+#     which passed a nonce it wrote to a 0600 file of this user's, and with the system's codesign,
+#     xcrun, spctl and ditto first on PATH; otherwise refused;
 #   dry mode: only when the real key cannot be reached: the real /usr/bin/security (by absolute
 #     path) finds exactly 0 signing identities and does not list the real login keychain (an empty
 #     or failed answer refuses), and codesign/xcrun/spctl/ditto are not the system's; otherwise
@@ -60,6 +61,10 @@ if [ -n "$nonce" ] || [ -n "$nfile" ] || [ -n "$ppid" ]; then
   [ "$(cat "$nfile")" = "$nonce" ] || guard "the nonce does not match"
   pargs=$(/bin/ps -o args= -p "$PPID" 2>/dev/null)
   case $pargs in *"release.sh build"*" --sign"*) ;; *) guard "not called by release.sh build --sign (parent: $pargs)" ;; esac
+  # the real tools only: a shim first on PATH must not answer for codesign or notarytool
+  for t in codesign:/usr/bin/codesign xcrun:/usr/bin/xcrun spctl:/usr/sbin/spctl ditto:/usr/bin/ditto; do
+    [ "$(command -v "${t%%:*}" 2>/dev/null)" = "${t#*:}" ] || guard "real mode with a non-system ${t%%:*} on PATH ($(command -v "${t%%:*}" 2>/dev/null))"
+  done
 else
   real=no
   u=$(/usr/bin/id -un)
