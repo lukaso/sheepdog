@@ -8,9 +8,13 @@
 #                                                  file NAME holding TEXT, then the end: Python's
 #                                                  tarfile and macOS tar stop at the null block,
 #                                                  npm's tar (two null blocks for the end) reads on
-#   tgz-edit.py SRC DST raw-append NAME TYPE,MAGIC,PREFIX   SRC's entries, then one raw header
-#                                                  (typeflag TYPE; MAGIC ustar00 or gnu; PREFIX
-#                                                  or - for none) holding "x", then the end
+#   tgz-edit.py SRC DST raw-append NAME TYPE,MAGIC,PREFIX[,LINK]   SRC's entries, then one raw
+#                                                  header (typeflag TYPE; MAGIC ustar00 or gnu;
+#                                                  PREFIX or - for none; a link name) holding "x",
+#                                                  then the end
+#   tgz-edit.py SRC DST noend - -                  SRC's entries and no end blocks
+#   tgz-edit.py SRC DST short NAME -               SRC's entries, then a header for 5000 bytes
+#                                                  followed by 1 byte, and the stream ends
 #   tgz-edit.py SRC DST badsum NAME -              SRC's entries, then a header whose checksum is
 #                                                  wrong, then the end
 #   tgz-edit.py SRC DST replace NAME TEXT          NAME's content replaced by TEXT
@@ -25,8 +29,9 @@ def entries_raw(path):  # SRC's entries with no end blocks
             t.addfile(m, s.extractfile(m) if m.isreg() else None)
     return buf.getvalue()
 
-def header(nm, typ, magic, prefix, size, badsum=False):
+def header(nm, typ, magic, prefix, size, badsum=False, link=""):
     h = bytearray(512)
+    h[157:157 + len(link)] = link.encode()
     h[0:len(nm)] = nm.encode(); h[100:108] = b"0000644\0"; h[108:116] = b"0000000\0"; h[116:124] = b"0000000\0"
     h[124:136] = ("%011o\0" % size).encode(); h[136:148] = b"00000000000\0"; h[156:157] = typ.encode()
     h[257:265] = b"ustar\x0000" if magic == "ustar00" else b"ustar  \0"
@@ -41,8 +46,12 @@ def finish(raw):
     open(dst, "wb").write(gzip.compress(raw)); sys.exit(0)
 
 if op in ("raw-append", "badsum"):
-    typ, magic, prefix = ("0", "ustar00", "-") if op == "badsum" else arg.split(",")
-    finish(entries_raw(src) + header(name, typ, magic, prefix, 1, badsum=(op == "badsum")) + b"x" + b"\0" * 511)
+    f = (["0", "ustar00", "-"] if op == "badsum" else arg.split(",")) + [""]
+    finish(entries_raw(src) + header(name, f[0], f[1], f[2], 1, badsum=(op == "badsum"), link=f[3]) + b"x" + b"\0" * 511)
+if op == "noend":
+    open(dst, "wb").write(gzip.compress(entries_raw(src))); sys.exit(0)
+if op == "short":
+    open(dst, "wb").write(gzip.compress(entries_raw(src) + header(name, "0", "ustar00", "-", 5000) + b"x")); sys.exit(0)
 if op in ("replace", "json-set"):
     with tarfile.open(dst, "w:gz", format=tarfile.PAX_FORMAT) as out, tarfile.open(src) as t:
         for m in t.getmembers():

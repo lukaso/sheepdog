@@ -5,13 +5,20 @@
 # on which they all agree is accepted: plain ustar headers (magic "ustar\0" "00", a valid
 # checksum, an empty prefix field, no link name), type 0 (and 5 in the release archive), names
 # from [A-Za-z0-9._+-] and "/", unique without case (APFS), nothing but zero bytes after the
-# first null block. Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
+# first null block. The mode, size and checksum fields must be spaces, octal digits and a NUL or
+# space ending inside the field (uid, gid and mtime are not read: npm pack leaves uid and gid all
+# NUL, and none of the three changes a path, a size, a mode or a file's content), and every byte of the name after its first NUL
+# must be NUL: node-tar reads looser forms differently (tests/dist/t_tar_readers.sh compares the
+# two readers). Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
 #   npm-same.py packages DIR VERSION REF   the four .tgz files in DIR: that shape; exactly the files
 #       npm-pack.sh writes; the license texts and the main package's launcher equal the files in
 #       REF (a directory: the tag's LICENSE-MIT, LICENSE-APACHE and launcher); each Linux
 #       package's binary equals DIR's sheepdog-linux-<arch>; executables 0755; each package.json
-#       holds only the keys npm-pack.sh writes (no scripts), this name and VERSION, and the main
-#       one its bin and its optional dependencies pinned to VERSION
+#       equals, key for key, the one `pkgjson` writes (no scripts; the main one's bin and optional
+#       dependencies pinned to VERSION)
+#   npm-same.py pkgjson KIND VERSION        prints the package.json of KIND (main, darwin,
+#       linux-arm64, linux-x64): npm-pack.sh writes each package's from this, and `packages`
+#       compares against it
 #   npm-same.py same TGZ ARCHIVE           the darwin package's Sheepdog.app equals the release
 #       archive's, file by file: path, mode and content; the executable 0755
 # Exit 0, or 1 with the reason on stderr.
@@ -22,10 +29,11 @@ def die(msg):
 
 NAME = re.compile(r"^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*/?$")
 
+NUM = re.compile(rb"^ *[0-7]+[ \0]+$")
+
 def octal(b, what, field, o):
-    s = b.strip(b"\0 ")
-    try: return int(s or b"0", 8)
-    except ValueError: die("%s: an unreadable %s field at byte %d" % (what, field, o))
+    if not NUM.match(b): die("%s: the %s field is not plain octal at byte %d: %r" % (what, field, o, b))
+    return int(b.strip(b"\0 "), 8)
 
 def plain(path, what, allow_dirs):
     try: data = gzip.decompress(open(path, "rb").read())
@@ -42,7 +50,8 @@ def plain(path, what, allow_dirs):
         if h[257:265] != b"ustar\x0000": die("%s: not a plain ustar header at byte %d" % (what, o))
         if h[345:500].strip(b"\0"): die("%s: a ustar prefix at byte %d" % (what, o))
         typ = h[156:157].decode("latin-1")
-        raw = h[0:100].split(b"\0", 1)[0]
+        raw, _, tail = h[0:100].partition(b"\0")
+        if tail.strip(b"\0"): die("%s: bytes after the end of the name at byte %d" % (what, o))
         name = raw.decode("latin-1")
         parts = name.rstrip("/").split("/")
         if any(p.startswith("._") for p in parts): die("%s: an AppleDouble entry: %s" % (what, name))
@@ -64,37 +73,45 @@ def plain(path, what, allow_dirs):
 
 def ref(p): return open(p, "rb").read()
 
+LIC = ["LICENSE-MIT", "LICENSE-APACHE"]
+def pkgjson(kind, nv):
+    """The package.json npm-pack.sh writes for KIND, as a dict (key order is the file's order)."""
+    lic = "MIT OR Apache-2.0"
+    if kind == "main":
+        return {"name": "@lukaso/sheepdog", "version": nv,
+                "description": "Run a command and kill every process it started, escapees included",
+                "license": lic, "bin": {"sheepdog": "bin/sheepdog"}, "files": ["bin"] + LIC,
+                "optionalDependencies": {"@lukaso/sheepdog-" + k: nv for k in ("darwin-universal", "linux-arm64", "linux-x64")}}
+    if kind == "darwin":
+        return {"name": "@lukaso/sheepdog-darwin-universal", "version": nv, "license": lic,
+                "os": ["darwin"], "cpu": ["arm64", "x64"], "files": ["Sheepdog.app"] + LIC}
+    if kind in ("linux-arm64", "linux-x64"):
+        return {"name": "@lukaso/sheepdog-" + kind, "version": nv, "license": lic,
+                "os": ["linux"], "cpu": [kind[len("linux-"):]], "files": ["bin"] + LIC}
+    die("no package kind %s" % kind)
+
 def packages(d, nv, r):
-    lic = {n: ref(os.path.join(r, n)) for n in ("LICENSE-MIT", "LICENSE-APACHE")}
-    deps = {"@lukaso/sheepdog-" + k: nv for k in ("darwin-universal", "linux-arm64", "linux-x64")}
-    kinds = [("sheepdog", "main"), ("sheepdog-darwin-universal", "darwin"),
-             ("sheepdog-linux-arm64", "aarch64"), ("sheepdog-linux-x64", "x86_64")]
-    for pk, kind in kinds:
+    lic = {n: ref(os.path.join(r, n)) for n in LIC}
+    for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
+        pk = "sheepdog" if kind == "main" else "sheepdog-darwin-universal" if kind == "darwin" else "sheepdog-" + kind
         fn = "lukaso-%s-%s.tgz" % (pk, nv)
         f = plain(os.path.join(d, fn), fn, False)
         for n in f:
             if not n.startswith("package/"): die("%s: an entry outside package/: %s" % (fn, n))
-        want = {"package/package.json", "package/LICENSE-MIT", "package/LICENSE-APACHE"}
+        want = {"package/package.json"} | {"package/" + n for n in LIC}
         want |= {n for n in f if n.startswith("package/Sheepdog.app/")} if kind == "darwin" else {"package/bin/sheepdog"}
         if set(f) != want: die("%s: the files are %s, not %s" % (fn, sorted(f), sorted(want)))
         for n, b in lic.items():
             if f["package/" + n][2] != b: die("%s: %s differs from the repo's (at the tag)" % (fn, n))
         try: pj = json.loads(f["package/package.json"][2])
         except ValueError: die("%s: package.json is not JSON" % fn)
-        keys = {"name", "version", "description", "license", "bin", "files", "optionalDependencies"} if kind == "main" \
-            else {"name", "version", "license", "os", "cpu", "files"}
-        for k in sorted(set(pj) - keys): die("%s: package.json: key %s is not allowed" % (fn, k))
-        if pj.get("name") != "@lukaso/" + pk or pj.get("version") != nv: die("%s: package.json names %s %s" % (fn, pj.get("name"), pj.get("version")))
-        if kind == "main":
-            if pj.get("bin") != {"sheepdog": "bin/sheepdog"}: die("%s: package.json: bin is %r" % (fn, pj.get("bin")))
-            if pj.get("optionalDependencies") != deps: die("%s: package.json: optionalDependencies are %r, not pinned to %s" % (fn, pj.get("optionalDependencies"), nv))
-            exp, src = ref(os.path.join(r, "launcher")), "the repo's launcher (at the tag)"
-        elif kind in ("aarch64", "x86_64"):
-            exp, src = ref(os.path.join(d, "sheepdog-linux-" + kind)), "sheepdog-linux-" + kind
-        if kind != "darwin":
-            m, _, b = f["package/bin/sheepdog"]
-            if b != exp: die("%s: bin/sheepdog differs from %s" % (fn, src))
-            if m & 0o777 != 0o755: die("%s: bin/sheepdog's mode is %o, not 755" % (fn, m))
+        if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))
+        if kind == "darwin": continue
+        exp, src = (ref(os.path.join(r, "launcher")), "the repo's launcher (at the tag)") if kind == "main" \
+            else (ref(os.path.join(d, "sheepdog-linux-" + arch)), "sheepdog-linux-" + arch)
+        m, _, b = f["package/bin/sheepdog"]
+        if b != exp: die("%s: bin/sheepdog differs from %s" % (fn, src))
+        if m & 0o777 != 0o755: die("%s: bin/sheepdog's mode is %o, not 755" % (fn, m))
 
 def same(tgz, arc):
     p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False).items() if n.startswith("package/Sheepdog.app/")}
@@ -109,7 +126,9 @@ def same(tgz, arc):
     exe = "Sheepdog.app/Contents/MacOS/sheepdog"
     if exe not in p or p[exe][0] & 0o777 != 0o755: die("the executable's mode is not 0755")
 
-if len(sys.argv) == 5 and sys.argv[1] == "packages": packages(*sys.argv[2:5])
-elif len(sys.argv) == 4 and sys.argv[1] == "same": same(*sys.argv[2:4])
-else:
-    sys.stderr.write("usage: npm-same.py packages DIR VERSION REF | same TGZ ARCHIVE\n"); sys.exit(2)
+if __name__ == "__main__":
+    if len(sys.argv) == 5 and sys.argv[1] == "packages": packages(*sys.argv[2:5])
+    elif len(sys.argv) == 4 and sys.argv[1] == "pkgjson": print(json.dumps(pkgjson(sys.argv[2], sys.argv[3]), indent=2))
+    elif len(sys.argv) == 4 and sys.argv[1] == "same": same(*sys.argv[2:4])
+    else:
+        sys.stderr.write("usage: npm-same.py packages DIR VERSION REF | same TGZ ARCHIVE | pkgjson KIND VERSION\n"); sys.exit(2)

@@ -56,10 +56,19 @@ for v in "DT|add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outsid
          "DT|badsum|$P/Resources/bs|-|bad header checksum" \
          "DT|raw-append|$P/MacOS/SHEEPDOG|0,ustar00,-|appears twice (case ignored)" \
          "DT|replace|package/LICENSE-MIT|not the license|LICENSE-MIT differs from the repo" \
-         "DT|json-set|package/package.json|scripts={\"postinstall\": \"echo hi\"}|package.json: key scripts" \
+         "DT|json-set|package/package.json|scripts={\"postinstall\": \"echo hi\"}|package.json is not the one npm-pack.sh writes: .*\"scripts\"" \
          "MT|replace|package/bin/sheepdog|#!/bin/sh|bin/sheepdog differs from the repo's launcher" \
          "MT|json-set|package/package.json|optionalDependencies={\"@lukaso/sheepdog-darwin-universal\": \"*\"}|optionalDependencies" \
-         "XT|replace|package/bin/sheepdog|#!/bin/sh|bin/sheepdog differs from sheepdog-linux-x86_64"; do
+         "XT|replace|package/bin/sheepdog|#!/bin/sh|bin/sheepdog differs from sheepdog-linux-x86_64" \
+         "MT|add|package/binding.gyp|{}|the files are" \
+         "DT|add|package/.npmrc|x|the files are" \
+         "XT|json-set|package/package.json|os=[\"darwin\"]|package.json is not" \
+         "MT|replace|package/package.json|not json|package.json is not" \
+         "MT|mode|package/bin/sheepdog|644|bin/sheepdog's mode is 644" \
+         "DT|raw-append|$P/Resources/lk|0,ustar00,-,target|a link name" \
+         "DT|raw-append|$P/Resources/tr/|0,ustar00,-|a file name ending in /" \
+         "DT|noend|-|-|ends without an end block" \
+         "DT|short|$P/Resources/sh|-|is cut short"; do
   k=${v%%|*} rest=${v#*|}; op=${rest%%|*} rest=${rest#*|}; nm=${rest%%|*} rest=${rest#*|}; arg=${rest%%|*} why=${rest#*|}
   eval "t=\$$k"
   mk signed false; python3 "$E" "$D/$t" "$FX/e.tgz" "$op" "$nm" "$arg" && mv "$FX/e.tgz" "$D/$t" && resum "$t" || fail "could not make the $op variant of $t"
