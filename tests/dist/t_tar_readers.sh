@@ -10,7 +10,7 @@ set -u
 fx_dir
 T=$(npm root -g 2>/dev/null)/npm/node_modules/tar/lib/header.js
 [ -f "$T" ] || { fail "no npm-bundled node-tar at $T"; finish; }
-python3 - "$SD_ROOT/scripts/lib/npm-same.py" "$FX" <<'PY' > "$FX/rows"
+python3 -B - "$SD_ROOT/scripts/lib/npm-same.py" "$FX" <<'PY' > "$FX/rows"
 import sys, gzip, importlib.util, json
 spec = importlib.util.spec_from_file_location("ns", sys.argv[1]); ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
 fx = sys.argv[2]
@@ -36,7 +36,7 @@ for k, h in cases.items():
     open(p, "wb").write(gzip.compress(h + body + b"\0" * 1024 + b"\0" * 8192))
     try:
         f = ns.plain(p, k, False); acc = True; name, size = list(f)[0], len(list(f.values())[0][2])
-    except SystemExit:
+    except (SystemExit, Exception):  # a crash is a refusal too: release.sh stops on it
         acc, name, size = False, None, None
     open(p + ".h", "wb").write(h)
     out[k] = {"accepted": acc, "name": name, "size": size, "hdr": p + ".h"}

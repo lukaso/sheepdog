@@ -3,3 +3,4 @@ target/
 target-linux/
 target-linux-gnu/
 /target-linux-amd64
+__pycache__/
