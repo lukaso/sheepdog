@@ -342,8 +342,8 @@ npm_check() { # dir
   [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
   [ "$mode" = signed ] || die "the manifest's mode is '$mode', not signed"
   [ "$ctl" = false ] || die "the manifest is a control build"
-  for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
-    f=lukaso-$p-$nv.tgz
+  for f in sheepdog-macos-universal.tar.gz lukaso-sheepdog-$nv.tgz lukaso-sheepdog-darwin-universal-$nv.tgz \
+           lukaso-sheepdog-linux-arm64-$nv.tgz lukaso-sheepdog-linux-x64-$nv.tgz; do
     [ -f "$d/$f" ] || die "missing $f"
     h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
     grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
@@ -357,8 +357,11 @@ npm_check() { # dir
   rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"
   rt_staple_ok "$b" || die "stapler: the darwin package's bundle has no valid staple ticket"
   rt_spctl_ok "$b" || die "spctl: Gatekeeper rejects the darwin package's bundle"
-  c1=$(rt_cdhash "$b"); c2=$(rt_cdhash "$nt/a/Sheepdog.app")
-  [ -n "$c1" ] && [ "$c1" = "$c2" ] || die "the darwin package's bundle ($c1) is not the release archive's ($c2)"
+  # the same bundle: the archive's meets the requirement too, and the two are byte-identical (a
+  # CDHash is read from the embedded signature, not recomputed, so equal CDHashes prove nothing)
+  a=$nt/a/Sheepdog.app
+  rt_meets "$a" || die "codesign: the release archive's bundle does not meet the release requirement"
+  /usr/bin/diff -r -q "$b" "$a" > "$nt/diff" 2>&1 || die "the darwin package's bundle is not the release archive's bundle: $(head -3 "$nt/diff" | tr '\n' ' ')"
   rm -rf "$nt"; trap - EXIT
   echo "release: the npm tarballs of $tag check out; publish them, platform packages first"
 }
