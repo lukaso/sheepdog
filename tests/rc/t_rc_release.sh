@@ -89,7 +89,18 @@ DT=lukaso-sheepdog-darwin-universal-${tag#v}.tgz
 cpy "$RC" xm && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xm/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 644 \
   && setsum xm "$DT" || fail "the 0644 variant could not be made"
 rel npm-check --out "$FX/xm" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'mode' "$FX/o" && pass "npm-check: the npm package's executable at 0644 refused (its mode)" || fail "npm-check 0644: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q 'Sheepdog.app/Contents/MacOS/sheepdog has mode 644, the archive.s 755' "$FX/o" && pass "npm-check: the npm package's executable at 0644 refused (its mode differs from the archive's)" || fail "npm-check 0644: $r $(tail -1 "$FX/o")"
+# (g) a non-executable file's mode differs (Info.plist 0600 in the package): only the mode comparison
+cpy "$RC" xg && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xg/$tag/$DT" mode package/Sheepdog.app/Contents/Info.plist 600 \
+  && setsum xg "$DT" || fail "the 0600 variant could not be made"
+rel npm-check --out "$FX/xg" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'Info.plist has mode 600, the archive.s 644' "$FX/o" && pass "npm-check: a file whose mode differs from the archive's refused" || fail "npm-check 0600: $r $(tail -1 "$FX/o")"
+# (h) the executable at 0644 in both tarballs (manifest updated): equal, and still refused
+cpy "$RC" xh && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xh/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 644 \
+  && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xh/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/sheepdog 644 \
+  && setsum xh "$DT" && setsum xh sheepdog-macos-universal.tar.gz || fail "the both-0644 variant could not be made"
+rel npm-check --out "$FX/xh" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "the executable's mode is not 0755" "$FX/o" && pass "npm-check: the executable at 0644 in both tarballs refused (not 0755)" || fail "npm-check both 0644: $r $(tail -1 "$FX/o")"
 # (f) the same as the rc, as npm reads it, but with an AppleDouble entry (manifest updated)
 cpy "$RC" xd && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xd/$tag/$DT" add package/Sheepdog.app/Contents/MacOS/._sheepdog x \
   && setsum xd "$DT" || fail "the AppleDouble variant could not be made"
