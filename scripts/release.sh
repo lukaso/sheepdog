@@ -342,19 +342,24 @@ npm_check() { # dir
   [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
   [ "$mode" = signed ] || die "the manifest's mode is '$mode', not signed"
   [ "$ctl" = false ] || die "the manifest is a control build"
-  for f in sheepdog-macos-universal.tar.gz lukaso-sheepdog-$nv.tgz lukaso-sheepdog-darwin-universal-$nv.tgz \
+  for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 lukaso-sheepdog-$nv.tgz lukaso-sheepdog-darwin-universal-$nv.tgz \
            lukaso-sheepdog-linux-arm64-$nv.tgz lukaso-sheepdog-linux-x64-$nv.tgz; do
     [ -f "$d/$f" ] || die "missing $f"
     h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
     grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
   done
-  # the package's shape, read raw, before anything unpacks it (npm-same.py says why)
-  npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
-  dt=$d/lukaso-sheepdog-darwin-universal-$nv.tgz
-  npy shape "$dt" || die "the darwin package's shape is refused (above)"
   nt=/private/tmp/sd-npmcheck.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
-  mkdir -m 700 "$nt" "$nt/p" || die "no temp dir"
+  mkdir -m 700 "$nt" "$nt/p" "$nt/ref" || die "no temp dir"
+  # the four packages, read raw, before anything unpacks them (npm-same.py says why), against the
+  # tag's license texts and launcher
+  for x in LICENSE-MIT LICENSE-APACHE npm/sheepdog/bin/sheepdog; do
+    git -C "$root" show "$tag:$x" > "$nt/ref/$(basename "$x")" 2>/dev/null || die "cannot read $x at $tag"
+  done
+  mv "$nt/ref/sheepdog" "$nt/ref/launcher"
+  npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
+  dt=$d/lukaso-sheepdog-darwin-universal-$nv.tgz
+  npy packages "$d" "$nv" "$nt/ref" || die "an npm package is refused (above)"
   tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"
   b=$nt/p/package/Sheepdog.app
   rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"

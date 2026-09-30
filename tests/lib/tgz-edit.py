@@ -8,8 +8,52 @@
 #                                                  file NAME holding TEXT, then the end: Python's
 #                                                  tarfile and macOS tar stop at the null block,
 #                                                  npm's tar (two null blocks for the end) reads on
-import sys, tarfile, io, gzip
+#   tgz-edit.py SRC DST raw-append NAME TYPE,MAGIC,PREFIX   SRC's entries, then one raw header
+#                                                  (typeflag TYPE; MAGIC ustar00 or gnu; PREFIX
+#                                                  or - for none) holding "x", then the end
+#   tgz-edit.py SRC DST badsum NAME -              SRC's entries, then a header whose checksum is
+#                                                  wrong, then the end
+#   tgz-edit.py SRC DST replace NAME TEXT          NAME's content replaced by TEXT
+#   tgz-edit.py SRC DST json-set NAME KEY=JSON     NAME (a JSON file) with KEY set to JSON
+import sys, tarfile, io, gzip, json
 src, dst, op, name, arg = sys.argv[1:6]
+
+def entries_raw(path):  # SRC's entries with no end blocks
+    buf = io.BytesIO(); t = tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT)
+    with tarfile.open(path) as s:
+        for m in s.getmembers():
+            t.addfile(m, s.extractfile(m) if m.isreg() else None)
+    return buf.getvalue()
+
+def header(nm, typ, magic, prefix, size, badsum=False):
+    h = bytearray(512)
+    h[0:len(nm)] = nm.encode(); h[100:108] = b"0000644\0"; h[108:116] = b"0000000\0"; h[116:124] = b"0000000\0"
+    h[124:136] = ("%011o\0" % size).encode(); h[136:148] = b"00000000000\0"; h[156:157] = typ.encode()
+    h[257:265] = b"ustar\x0000" if magic == "ustar00" else b"ustar  \0"
+    if prefix != "-": h[345:345 + len(prefix)] = prefix.encode()
+    h[148:156] = b"        "
+    c = sum(h) + (1 if badsum else 0)
+    h[148:156] = ("%06o\0 " % c).encode()
+    return bytes(h)
+
+def finish(raw):
+    raw += b"\0" * 1024; raw += b"\0" * (-len(raw) % 10240)
+    open(dst, "wb").write(gzip.compress(raw)); sys.exit(0)
+
+if op in ("raw-append", "badsum"):
+    typ, magic, prefix = ("0", "ustar00", "-") if op == "badsum" else arg.split(",")
+    finish(entries_raw(src) + header(name, typ, magic, prefix, 1, badsum=(op == "badsum")) + b"x" + b"\0" * 511)
+if op in ("replace", "json-set"):
+    with tarfile.open(dst, "w:gz", format=tarfile.PAX_FORMAT) as out, tarfile.open(src) as t:
+        for m in t.getmembers():
+            f = t.extractfile(m) if m.isreg() else None
+            if m.name == name:
+                if op == "replace": b = arg.encode()
+                else:
+                    d = json.loads(f.read()); k, v = arg.split("=", 1); d[k] = json.loads(v); b = json.dumps(d, indent=2).encode()
+                m.size = len(b); f = io.BytesIO(b)
+            out.addfile(m, f)
+    sys.exit(0)
 if op == "after-null":
     buf = io.BytesIO()
     t = tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT)
