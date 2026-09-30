@@ -31,6 +31,8 @@
 #                the commit override, the npm launcher; PHASE3.md §3)
 #   pull         (not automatic) fetch the pinned images from the registry; the one step that
 #                reaches it (Docker Desktop may show a keychain prompt for its credential helper)
+#   rc           (not automatic) the rc leg: tests/rc against the operator's rc output, read
+#                only; SD_RC_DIR=<out>/vX.Y.Z-rc.N and SD_RC_CONTROL_DIR=<same>-control (PHASE3.md §3)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
 #                operator's Developer ID and a click in System Settings; prints the steps
 #
@@ -52,7 +54,7 @@ img_arch() {
   timeout 60 docker run --rm --pull=never --network none ${2:+--platform "$2"} "$1" uname -m 2>/dev/null
 }
 ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened dist-linux"
-[ "${1:-}" = "--list" ] && { echo "$ALL pull tcc"; exit 0; }
+[ "${1:-}" = "--list" ] && { echo "$ALL pull rc tcc"; exit 0; }
 LEGS="${*:-$ALL}"
 LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
 mkdir -p "$LOGDIR"
@@ -334,6 +336,12 @@ leg_pull() {
   [ $ok = 1 ] && record pull PASS || record pull "FAIL ($LOGDIR/pull.log)"
 }
 
+leg_rc() {
+  [ "$(uname -s)" = Darwin ] || { record rc "FAIL (macOS only)"; return; }
+  bg_wait timeout -k 30 3600 env SD_RC_DIR="${SD_RC_DIR:-}" SD_RC_CONTROL_DIR="${SD_RC_CONTROL_DIR:-}" sh tests/rc/run.sh > "$LOGDIR/rc.log" 2>&1 \
+    && record rc PASS || record rc "FAIL ($LOGDIR/rc.log)"
+}
+
 leg_tcc() {
   cat <<'TXT'
 The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
@@ -366,7 +374,7 @@ for leg in $LEGS; do
   case $leg in
     macos) leg_macos ;; alpine) leg_alpine ;; debian) leg_debian ;; amd64) leg_amd64 ;;
     pid1) leg_pid1 ;; init) leg_init ;; enosys) leg_enosys ;; sh1) leg_sh1 ;; other-user) leg_other_user ;;
-    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; dist-linux) leg_dist_linux ;; pull) leg_pull ;; tcc) leg_tcc ;;
+    release) leg_release ;; bundle) leg_bundle ;; hardened) leg_hardened ;; dist-linux) leg_dist_linux ;; pull) leg_pull ;; rc) leg_rc ;; tcc) leg_tcc ;;
     *) echo "unknown leg: $leg (./test-all --list)"; exit 2 ;;
   esac
 done
