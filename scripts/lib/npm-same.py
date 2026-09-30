@@ -7,7 +7,8 @@
 # from [A-Za-z0-9._+-] and "/", unique without case (APFS), nothing but zero bytes after the
 # first null block; the padding after each file's data all zero. The numeric fields must be spaces,
 # octal digits and a NUL or space ending inside the field (uid, gid, mtime, devmajor and devminor
-# may also be all NUL), and every byte of the name after its first NUL must be NUL. An npm package's
+# may also be all NUL), every byte of the name after its first NUL must be NUL, and no entry (a
+# directory of the release archive included) may have setuid, setgid or sticky bits. An npm package's
 # headers must moreover be byte for byte the header npm pack writes for that name, mode and size:
 # node-tar throws on a field it cannot read, warns, and reads on a block later, so no header byte
 # may be free (tests/dist/t_tar_readers.sh lists whole packages with npm's own tar and compares). Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
