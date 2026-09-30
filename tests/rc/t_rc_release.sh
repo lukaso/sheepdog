@@ -106,6 +106,16 @@ cpy "$RC" xd && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xd/$tag/
   && setsum xd "$DT" || fail "the AppleDouble variant could not be made"
 rel npm-check --out "$FX/xd" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q 'AppleDouble' "$FX/o" && pass "npm-check: an AppleDouble entry in the npm package refused" || fail "npm-check AppleDouble: $r $(tail -1 "$FX/o")"
+# (i) an entry after one null block, in the package and in the release archive (manifest updated):
+#     npm's tar reads on past a single null block, tarfile and macOS tar stop there
+cpy "$RC" xn && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xn/$tag/$DT" after-null package/Sheepdog.app/Contents/Resources/marker.txt x \
+  && setsum xn "$DT" || fail "the null-block package could not be made"
+rel npm-check --out "$FX/xn" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'after the end' "$FX/o" && pass "npm-check: an entry after one null block in the package refused" || fail "npm-check null block (package): $r $(tail -1 "$FX/o")"
+cpy "$RC" xo && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xo/$tag/sheepdog-macos-universal.tar.gz" after-null Sheepdog.app/Contents/Resources/marker.txt x \
+  && setsum xo sheepdog-macos-universal.tar.gz || fail "the null-block archive could not be made"
+rel npm-check --out "$FX/xo" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'after the end' "$FX/o" && pass "npm-check: an entry after one null block in the release archive refused" || fail "npm-check null block (archive): $r $(tail -1 "$FX/o")"
 rel npm-check --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q "mode is 'control'" "$FX/o" && pass "npm-check: the control refused by its manifest's mode" || fail "npm-check control: $r $(tail -1 "$FX/o")"
 sed -e 's/"mode": "control"/"mode": "signed"/' -e 's/"control": true/"control": false/' "$FX/c/$tag/MANIFEST.json" > "$FX/m" && mv "$FX/m" "$FX/c/$tag/MANIFEST.json"

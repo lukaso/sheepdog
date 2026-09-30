@@ -1,7 +1,8 @@
 # The npm darwin package against the release archive, read raw, entry by entry (PHASE3.md §5 step
 # 5). macOS tar folds AppleDouble (._) entries into xattrs and hides them from -t; npm drops the
 # first path part and skips links; so neither tar's listing nor an extraction shows what npm
-# installs. Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
+# installs. And tarfile (like macOS tar) ends the archive at the FIRST null block, while npm's tar
+# needs two and reads on past one: so everything after the last entry read must be zero bytes. Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
 #   npm-same.py shape TGZ            the package holds only regular files, all under package/: no
 #                                    link, directory entry, ._ name, xattr header, duplicate or odd
 #                                    path; outside package/Sheepdog.app/ exactly package.json and
@@ -11,7 +12,7 @@
 #                                    package's Sheepdog.app equals the archive's: path, mode and
 #                                    content; the executable is 0755
 # Exit 0, or 1 with the reason on stderr.
-import sys, tarfile, hashlib
+import sys, tarfile, hashlib, gzip, io
 
 def die(msg):
     sys.stderr.write("npm-same: " + msg + "\n"); sys.exit(1)
@@ -19,10 +20,18 @@ def die(msg):
 def raw(path, what, allow_dirs, prefix):
     files = {}; seen = set()
     try:
-        t = tarfile.open(path, "r:gz")
+        data = gzip.decompress(open(path, "rb").read())
+        t = tarfile.open(fileobj=io.BytesIO(data), mode="r:")
         members = t.getmembers()
     except Exception as e:
         die("%s: cannot read %s (%s)" % (what, path, e))
+    # the end: nothing but zero bytes after the last entry tarfile read (its data padded to 512)
+    end = 0
+    if members:
+        last = members[-1]
+        end = last.offset_data + (-(-last.size // 512) * 512 if last.isreg() else 0)
+    if data[end:].strip(b"\0"):
+        die("%s: data after the end of the archive (an entry after a single null block?)" % what)
     for m in members:
         n = m.name
         if n in seen: die("%s: %s appears twice" % (what, n))

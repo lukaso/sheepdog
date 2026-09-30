@@ -44,7 +44,8 @@ E="$SD_ROOT/tests/lib/tgz-edit.py"; DT=lukaso-sheepdog-darwin-universal-$nv.tgz
 resum() { h=$(shasum -a 256 "$D/$DT" | cut -d' ' -f1); sed "s/\(\"name\": \"$DT\", \"sha256\": \"\)[0-9a-f]*/\1$h/" "$D/MANIFEST.json" > "$D/m.n" && mv "$D/m.n" "$D/MANIFEST.json"; }
 for v in "add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outside package/" \
          "add|package/Sheepdog.app/Contents/MacOS/._sheepdog|x|AppleDouble" \
-         "symlink|package/Sheepdog.app/Contents/MacOS/link|sheepdog|not a regular file"; do
+         "symlink|package/Sheepdog.app/Contents/MacOS/link|sheepdog|not a regular file" \
+         "after-null|package/Sheepdog.app/Contents/Resources/marker.txt|x|after the end"; do
   op=${v%%|*} rest=${v#*|}; nm=${rest%%|*} rest=${rest#*|}; arg=${rest%%|*} why=${rest#*|}
   mk signed false; python3 "$E" "$D/$DT" "$FX/e.tgz" "$op" "$nm" "$arg" && mv "$FX/e.tgz" "$D/$DT" && resum || fail "could not make the $op variant"
   nc; r=$?
