@@ -82,6 +82,7 @@ def plain(path, what, allow_dirs, canonical=False):
         if key in seen: die("%s: %s appears twice (case ignored)" % (what, name))
         seen.add(key)
         size = octal(h[124:136], what, "size", o); mode = octal(h[100:108], what, "mode", o) & 0o7777
+        if mode & 0o7000: die("%s: %s's mode %o has setuid, setgid or sticky bits" % (what, name, mode))
         if typ == "5":
             if size: die("%s: a directory with data: %s" % (what, name))
             o += 512; continue
@@ -91,7 +92,6 @@ def plain(path, what, allow_dirs, canonical=False):
         if data[o + 512 + size:o + 512 + -(-size // 512) * 512].strip(b"\0"): die("%s: data in the padding after %s" % (what, name))
         if canonical and h != npm_header(raw, octal(h[100:108], what, "mode", o), size):
             die("%s: %s: not the header npm pack writes for it (as measured on %s; a newer npm pack is the likely cause)" % (what, name, NPM))
-        if mode & 0o7000: die("%s: %s's mode %o has setuid, setgid or sticky bits" % (what, name, mode))
         files[name] = (mode, hashlib.sha256(body).hexdigest(), body)
         o += 512 + -(-size // 512) * 512
 

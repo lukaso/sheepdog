@@ -112,6 +112,11 @@ cpy "$RC" xk && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-uni
   && setsum xk sheepdog-macos-universal.tar.gz || fail "the archive-setuid variant could not be made"
 rel npm-check --out "$FX/xk" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q "the release archive: Sheepdog.app/Contents/MacOS/sheepdog's mode 4755 has setuid" "$FX/o" && pass "npm-check: the executable setuid in the release archive refused" || fail "npm-check archive setuid: $r $(tail -1 "$FX/o")"
+# (l) a directory of the release archive setuid (Contents/MacOS/ at 4755; manifest updated)
+cpy "$RC" xl && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xl/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/ 4755 \
+  && setsum xl sheepdog-macos-universal.tar.gz || fail "the directory-setuid variant could not be made"
+rel npm-check --out "$FX/xl" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "the release archive: Sheepdog.app/Contents/MacOS/'s mode 4755 has setuid" "$FX/o" && pass "npm-check: a setuid directory in the release archive refused" || fail "npm-check directory setuid: $r $(tail -1 "$FX/o")"
 # (f) the same as the rc, as npm reads it, but with an AppleDouble entry (manifest updated)
 cpy "$RC" xd && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xd/$tag/$DT" add package/Sheepdog.app/Contents/MacOS/._sheepdog x \
   && setsum xd "$DT" || fail "the AppleDouble variant could not be made"
