@@ -5,11 +5,12 @@
 # on which they all agree is accepted: plain ustar headers (magic "ustar\0" "00", a valid
 # checksum, an empty prefix field, no link name), type 0 (and 5 in the release archive), names
 # from [A-Za-z0-9._+-] and "/", unique without case (APFS), nothing but zero bytes after the
-# first null block. The mode, size and checksum fields must be spaces, octal digits and a NUL or
-# space ending inside the field (uid, gid and mtime are not read: npm pack leaves uid and gid all
-# NUL, and none of the three changes a path, a size, a mode or a file's content), and every byte of the name after its first NUL
-# must be NUL: node-tar reads looser forms differently (tests/dist/t_tar_readers.sh compares the
-# two readers). Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
+# first null block; the padding after each file's data all zero. The numeric fields must be spaces,
+# octal digits and a NUL or space ending inside the field (uid, gid, mtime, devmajor and devminor
+# may also be all NUL), and every byte of the name after its first NUL must be NUL. An npm package's
+# headers must moreover be byte for byte the header npm pack writes for that name, mode and size:
+# node-tar throws on a field it cannot read, warns, and reads on a block later, so no header byte
+# may be free (tests/dist/t_tar_readers.sh lists whole packages with npm's own tar and compares). Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
 #   npm-same.py packages DIR VERSION REF   the four .tgz files in DIR: that shape; exactly the files
 #       npm-pack.sh writes; the license texts and the main package's launcher equal the files in
 #       REF (a directory: the tag's LICENSE-MIT, LICENSE-APACHE and launcher); each Linux
@@ -29,13 +30,24 @@ def die(msg):
 
 NAME = re.compile(r"^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*/?$")
 
-NUM = re.compile(rb"^ *[0-7]+[ \0]+$")
+NUM = re.compile(rb" *[0-7]+[ \0]+")
 
-def octal(b, what, field, o):
-    if not NUM.match(b): die("%s: the %s field is not plain octal at byte %d: %r" % (what, field, o, b))
+def octal(b, what, field, o, empty_ok=False):
+    if empty_ok and not b.strip(b"\0"): return 0
+    if not NUM.fullmatch(b): die("%s: the %s field is not plain octal at byte %d: %r" % (what, field, o, b))
     return int(b.strip(b"\0 "), 8)
 
-def plain(path, what, allow_dirs):
+def npm_header(name, mode, size):
+    """The header npm pack (node-tar) writes for a file: every byte but name, mode, size and the
+    checksum is fixed (measured on the rc.1 packages)."""
+    h = bytearray(512)
+    h[0:len(name)] = name; h[100:108] = b"%06o \0" % mode; h[124:136] = b"%010o \0" % size
+    h[136:148] = b"3560116604 \0"; h[156:157] = b"0"; h[257:265] = b"ustar\x0000"
+    h[329:337] = b"000000 \0"; h[337:345] = b"000000 \0"
+    h[148:156] = b" " * 8; h[148:156] = b"%06o \0" % sum(h)
+    return bytes(h)
+
+def plain(path, what, allow_dirs, canonical=False):
     try: data = gzip.decompress(open(path, "rb").read())
     except Exception as e: die("%s: cannot read %s (%s)" % (what, path, e))
     files, seen, o = {}, set(), 0
@@ -45,6 +57,8 @@ def plain(path, what, allow_dirs):
         if h == b"\0" * 512:
             if data[o:].strip(b"\0"): die("%s: data after the end of the archive (an entry after a single null block?)" % what)
             return files
+        for fld, a, b in (("uid", 108, 116), ("gid", 116, 124), ("mtime", 136, 148), ("devmajor", 329, 337), ("devminor", 337, 345)):
+            octal(h[a:b], what, fld, o, empty_ok=True)
         if octal(h[148:156], what, "checksum", o) != sum(h[:148]) + 8 * 32 + sum(h[156:]):
             die("%s: bad header checksum at byte %d" % (what, o))
         if h[257:265] != b"ustar\x0000": die("%s: not a plain ustar header at byte %d" % (what, o))
@@ -68,6 +82,9 @@ def plain(path, what, allow_dirs):
         if name.endswith("/"): die("%s: a file name ending in /: %s" % (what, name))
         body = data[o + 512:o + 512 + size]
         if len(body) < size: die("%s: %s is cut short" % (what, name))
+        if data[o + 512 + size:o + 512 + -(-size // 512) * 512].strip(b"\0"): die("%s: data in the padding after %s" % (what, name))
+        if canonical and h != npm_header(raw, octal(h[100:108], what, "mode", o), size):
+            die("%s: %s: not the header npm pack writes for it" % (what, name))
         files[name] = (mode, hashlib.sha256(body).hexdigest(), body)
         o += 512 + -(-size // 512) * 512
 
@@ -95,7 +112,7 @@ def packages(d, nv, r):
     for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
         pk = "sheepdog" if kind == "main" else "sheepdog-darwin-universal" if kind == "darwin" else "sheepdog-" + kind
         fn = "lukaso-%s-%s.tgz" % (pk, nv)
-        f = plain(os.path.join(d, fn), fn, False)
+        f = plain(os.path.join(d, fn), fn, False, canonical=True)
         for n in f:
             if not n.startswith("package/"): die("%s: an entry outside package/: %s" % (fn, n))
         want = {"package/package.json"} | {"package/" + n for n in LIC}
@@ -114,7 +131,7 @@ def packages(d, nv, r):
         if m & 0o777 != 0o755: die("%s: bin/sheepdog's mode is %o, not 755" % (fn, m))
 
 def same(tgz, arc):
-    p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False).items() if n.startswith("package/Sheepdog.app/")}
+    p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False, canonical=True).items() if n.startswith("package/Sheepdog.app/")}
     a = {n: v[:2] for n, v in plain(arc, "the release archive", True).items()}
     for n in a:
         if not n.startswith("Sheepdog.app/"): die("the release archive: an entry outside Sheepdog.app/: %s" % n)
