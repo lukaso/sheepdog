@@ -89,18 +89,29 @@ DT=lukaso-sheepdog-darwin-universal-${tag#v}.tgz
 cpy "$RC" xm && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xm/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 644 \
   && setsum xm "$DT" || fail "the 0644 variant could not be made"
 rel npm-check --out "$FX/xm" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'Sheepdog.app/Contents/MacOS/sheepdog has mode 644, the archive.s 755' "$FX/o" && pass "npm-check: the npm package's executable at 0644 refused (its mode differs from the archive's)" || fail "npm-check 0644: $r $(tail -1 "$FX/o")"
-# (g) a non-executable file's mode differs (Info.plist 0600 in the package): only the mode comparison
-cpy "$RC" xg && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xg/$tag/$DT" mode package/Sheepdog.app/Contents/Info.plist 600 \
-  && setsum xg "$DT" || fail "the 0600 variant could not be made"
+[ $r = 1 ] && grep -q "Sheepdog.app/Contents/MacOS/sheepdog's mode is 644, not 755" "$FX/o" && pass "npm-check: the npm package's executable at 0644 refused (its exact mode)" || fail "npm-check 0644: $r $(tail -1 "$FX/o")"
+# (g) a non-executable file's mode differs in the release archive only (Info.plist 0600): only the
+#     comparison with the archive sees it
+cpy "$RC" xg && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xg/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/Info.plist 600 \
+  && setsum xg sheepdog-macos-universal.tar.gz || fail "the archive-0600 variant could not be made"
 rel npm-check --out "$FX/xg" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'Info.plist has mode 600, the archive.s 644' "$FX/o" && pass "npm-check: a file whose mode differs from the archive's refused" || fail "npm-check 0600: $r $(tail -1 "$FX/o")"
-# (h) the executable at 0644 in both tarballs (manifest updated): equal, and still refused
-cpy "$RC" xh && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xh/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 644 \
-  && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xh/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/sheepdog 644 \
-  && setsum xh "$DT" && setsum xh sheepdog-macos-universal.tar.gz || fail "the both-0644 variant could not be made"
+[ $r = 1 ] && grep -q 'Info.plist has mode 644, the archive.s 600' "$FX/o" && pass "npm-check: a file whose mode differs in the release archive refused" || fail "npm-check archive 0600: $r $(tail -1 "$FX/o")"
+# (h) the executable at 0644 in the release archive only
+cpy "$RC" xh && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xh/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/sheepdog 644 \
+  && setsum xh sheepdog-macos-universal.tar.gz || fail "the archive-0644 variant could not be made"
 rel npm-check --out "$FX/xh" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q "the executable's mode is not 0755" "$FX/o" && pass "npm-check: the executable at 0644 in both tarballs refused (not 0755)" || fail "npm-check both 0644: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q 'Contents/MacOS/sheepdog has mode 755, the archive.s 644' "$FX/o" && pass "npm-check: the executable at 0644 in the release archive refused" || fail "npm-check archive 0644: $r $(tail -1 "$FX/o")"
+# (j) the executable setuid (4755) in both tarballs (manifest updated): equal, and refused
+cpy "$RC" xj && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xj/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 4755 \
+  && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xj/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/sheepdog 4755 \
+  && setsum xj "$DT" && setsum xj sheepdog-macos-universal.tar.gz || fail "the setuid variant could not be made"
+rel npm-check --out "$FX/xj" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "Contents/MacOS/sheepdog's mode 4755 has setuid" "$FX/o" && pass "npm-check: the executable setuid in both tarballs refused" || fail "npm-check setuid: $r $(tail -1 "$FX/o")"
+# (k) the executable setuid in the release archive only (manifest updated): the archive side refuses
+cpy "$RC" xk && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xk/$tag/sheepdog-macos-universal.tar.gz" mode Sheepdog.app/Contents/MacOS/sheepdog 4755 \
+  && setsum xk sheepdog-macos-universal.tar.gz || fail "the archive-setuid variant could not be made"
+rel npm-check --out "$FX/xk" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "the release archive: Sheepdog.app/Contents/MacOS/sheepdog's mode 4755 has setuid" "$FX/o" && pass "npm-check: the executable setuid in the release archive refused" || fail "npm-check archive setuid: $r $(tail -1 "$FX/o")"
 # (f) the same as the rc, as npm reads it, but with an AppleDouble entry (manifest updated)
 cpy "$RC" xd && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xd/$tag/$DT" add package/Sheepdog.app/Contents/MacOS/._sheepdog x \
   && setsum xd "$DT" || fail "the AppleDouble variant could not be made"

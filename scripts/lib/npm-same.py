@@ -14,21 +14,23 @@
 #   npm-same.py packages DIR VERSION REF   the four .tgz files in DIR: that shape; exactly the files
 #       npm-pack.sh writes; the license texts and the main package's launcher equal the files in
 #       REF (a directory: the tag's LICENSE-MIT, LICENSE-APACHE and launcher); each Linux
-#       package's binary equals DIR's sheepdog-linux-<arch>; executables 0755; each package.json
+#       package's binary equals DIR's sheepdog-linux-<arch>; modes exactly 0755 for the
+#       executable and 0644 for every other file (no setuid bits anywhere); each package.json
 #       equals, key for key, the one `pkgjson` writes (no scripts; the main one's bin and optional
 #       dependencies pinned to VERSION)
 #   npm-same.py pkgjson KIND VERSION        prints the package.json of KIND (main, darwin,
 #       linux-arm64, linux-x64): npm-pack.sh writes each package's from this, and `packages`
 #       compares against it
 #   npm-same.py same TGZ ARCHIVE           the darwin package's Sheepdog.app equals the release
-#       archive's, file by file: path, mode and content; the executable 0755
+#       archive's, file by file: path, mode and content (`packages` has fixed the package's modes)
 # Exit 0, or 1 with the reason on stderr.
-import sys, gzip, hashlib, json, os, re
+import sys, hashlib, json, os, re, zlib
 
 def die(msg):
     sys.stderr.write("npm-same: " + msg + "\n"); sys.exit(1)
 
-NAME = re.compile(r"^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*/?$")
+NAME = re.compile(r"[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*/?")
+NPM = "npm 11.6.0 (node-tar 6.2.1)"  # whose npm pack the header rule was measured on
 
 NUM = re.compile(rb" *[0-7]+[ \0]+")
 
@@ -48,8 +50,12 @@ def npm_header(name, mode, size):
     return bytes(h)
 
 def plain(path, what, allow_dirs, canonical=False):
-    try: data = gzip.decompress(open(path, "rb").read())
+    # exactly one gzip member and nothing after it: Python reads on past a zero byte into another
+    # member, node's zlib and libarchive stop there
+    try:
+        z = zlib.decompressobj(31); data = z.decompress(open(path, "rb").read())
     except Exception as e: die("%s: cannot read %s (%s)" % (what, path, e))
+    if not z.eof or z.unused_data: die("%s: not one gzip stream (%s)" % (what, "cut short" if not z.eof else "bytes after it"))
     files, seen, o = {}, set(), 0
     while True:
         if o + 512 > len(data): die("%s: the archive ends without an end block" % what)
@@ -69,7 +75,7 @@ def plain(path, what, allow_dirs, canonical=False):
         name = raw.decode("latin-1")
         parts = name.rstrip("/").split("/")
         if any(p.startswith("._") for p in parts): die("%s: an AppleDouble entry: %s" % (what, name))
-        if not NAME.match(name) or any(p in (".", "..") for p in parts): die("%s: a name outside [A-Za-z0-9._+-/]: %r" % (what, raw))
+        if not NAME.fullmatch(name) or any(p in (".", "..") for p in parts): die("%s: a name outside [A-Za-z0-9._+-/]: %r" % (what, raw))
         if typ not in (("0", "5") if allow_dirs else ("0",)): die("%s: type %r is not allowed (%s)" % (what, typ, name))
         if h[157:257].strip(b"\0"): die("%s: a link name on %s" % (what, name))
         key = name.rstrip("/").lower()
@@ -84,7 +90,8 @@ def plain(path, what, allow_dirs, canonical=False):
         if len(body) < size: die("%s: %s is cut short" % (what, name))
         if data[o + 512 + size:o + 512 + -(-size // 512) * 512].strip(b"\0"): die("%s: data in the padding after %s" % (what, name))
         if canonical and h != npm_header(raw, octal(h[100:108], what, "mode", o), size):
-            die("%s: %s: not the header npm pack writes for it" % (what, name))
+            die("%s: %s: not the header npm pack writes for it (as measured on %s; a newer npm pack is the likely cause)" % (what, name, NPM))
+        if mode & 0o7000: die("%s: %s's mode %o has setuid, setgid or sticky bits" % (what, name, mode))
         files[name] = (mode, hashlib.sha256(body).hexdigest(), body)
         o += 512 + -(-size // 512) * 512
 
@@ -123,12 +130,15 @@ def packages(d, nv, r):
         try: pj = json.loads(f["package/package.json"][2])
         except ValueError: die("%s: package.json is not JSON" % fn)
         if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))
+        # exact modes: 0755 for the executable, 0644 for everything else
+        exe = "package/Sheepdog.app/Contents/MacOS/sheepdog" if kind == "darwin" else "package/bin/sheepdog"
+        for n, (m, _, _b) in f.items():
+            want = 0o755 if n == exe else 0o644
+            if m != want: die("%s: %s's mode is %o, not %o" % (fn, n[len("package/"):], m, want))
         if kind == "darwin": continue
         exp, src = (ref(os.path.join(r, "launcher")), "the repo's launcher (at the tag)") if kind == "main" \
             else (ref(os.path.join(d, "sheepdog-linux-" + arch)), "sheepdog-linux-" + arch)
-        m, _, b = f["package/bin/sheepdog"]
-        if b != exp: die("%s: bin/sheepdog differs from %s" % (fn, src))
-        if m & 0o777 != 0o755: die("%s: bin/sheepdog's mode is %o, not 755" % (fn, m))
+        if f["package/bin/sheepdog"][2] != exp: die("%s: bin/sheepdog differs from %s" % (fn, src))
 
 def same(tgz, arc):
     p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False, canonical=True).items() if n.startswith("package/Sheepdog.app/")}
@@ -140,8 +150,6 @@ def same(tgz, arc):
     for n in sorted(p):
         if p[n][0] != a[n][0]: die("the darwin package's bundle is not the release archive's bundle: %s has mode %o, the archive's %o" % (n, p[n][0], a[n][0]))
         if p[n][1] != a[n][1]: die("the darwin package's bundle is not the release archive's bundle: %s differs in content" % n)
-    exe = "Sheepdog.app/Contents/MacOS/sheepdog"
-    if exe not in p or p[exe][0] & 0o777 != 0o755: die("the executable's mode is not 0755")
 
 if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "packages": packages(*sys.argv[2:5])

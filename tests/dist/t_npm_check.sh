@@ -64,11 +64,15 @@ for v in "DT|add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outsid
          "DT|add|package/.npmrc|x|the files are" \
          "XT|json-set|package/package.json|os=[\"darwin\"]|package.json is not" \
          "MT|replace|package/package.json|not json|package.json is not" \
-         "MT|mode|package/bin/sheepdog|644|bin/sheepdog's mode is 644" \
+         "MT|mode|package/bin/sheepdog|644|bin/sheepdog's mode is 644, not 755" \
          "DT|raw-append|$P/Resources/lk|0,ustar00,-,target|a link name" \
          "DT|raw-append|$P/Resources/tr/|0,ustar00,-|a file name ending in /" \
          "DT|noend|-|-|ends without an end block" \
-         "DT|short|$P/Resources/sh|-|is cut short"; do
+         "DT|short|$P/Resources/sh|-|is cut short" \
+         "MT|mode|package/bin/sheepdog|4755|bin/sheepdog's mode 4755 has setuid" \
+         "XT|mode|package/bin/sheepdog|6755|bin/sheepdog's mode 6755 has setuid" \
+         "DT|mode|package/LICENSE-MIT|4644|LICENSE-MIT's mode 4644 has setuid" \
+         "MT|mode|package/package.json|666|package.json's mode is 666, not 644"; do
   k=${v%%|*} rest=${v#*|}; op=${rest%%|*} rest=${rest#*|}; nm=${rest%%|*} rest=${rest#*|}; arg=${rest%%|*} why=${rest#*|}
   eval "t=\$$k"
   mk signed false; python3 "$E" "$D/$t" "$FX/e.tgz" "$op" "$nm" "$arg" && mv "$FX/e.tgz" "$D/$t" && resum "$t" || fail "could not make the $op variant of $t"

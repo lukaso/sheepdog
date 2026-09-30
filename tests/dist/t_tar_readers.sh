@@ -19,7 +19,8 @@ mkdir -p "$FX/pk" "$FX/h" && cp "$SD_ROOT/LICENSE-MIT" "$FX/pk/" && printf '{"na
 (cd "$FX/pk" && env HOME="$FX/h" npm_config_cache="$FX/h/c" npm_config_userconfig=/dev/null npm pack --silent --pack-destination "$FX" > /dev/null) || { fail "npm pack"; finish; }
 BASE=$FX/lukaso-t-0.0.1.tgz
 [ -s "$BASE" ] || { fail "no $BASE"; finish; }
-python3 -B - "$SD_ROOT/scripts/lib/npm-same.py" "$BASE" "$FX" <<'PY' > "$FX/rows"
+# the interpreter npm-check runs (its gzip code differs between versions)
+/usr/bin/python3 -I -B - "$SD_ROOT/scripts/lib/npm-same.py" "$BASE" "$FX" <<'PY' > "$FX/rows"
 import sys, gzip, io, json, importlib.util, contextlib
 spec = importlib.util.spec_from_file_location("ns", sys.argv[1]); ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
 base, fx = sys.argv[2], sys.argv[3]
@@ -61,10 +62,15 @@ cases["size with a trailing newline"] = setf(raw, P, 124, 136, b"0000000074 \n")
 o8 = at(raw, P); h8 = bytearray(raw[o8:o8 + 512]); h8[148:156] = b" " * 8
 cases["checksum of 8 digits"] = setf(raw, P, 148, 156, b"%08o" % sum(h8), fix=False)
 cases["a plain uid of 0 (npm pack leaves it NUL)"] = setf(raw, P, 108, 116, b"0000000\0")
+# two gzip members with a zero byte between: Python reads both, node's zlib and libarchive stop at
+# the zero byte (package.json is in the second member)
+gz_split = gzip.compress(raw[:at(raw, P)]) + b"\0" + gzip.compress(raw[at(raw, P):])
+cases["a name ending in a newline"] = setf(raw, P, 0, 100, b"package/package.json\n".ljust(100, b"\0"))
 cases["bytes after the name's NUL"] = setf(raw, P, 0, 100, b"package/package.json\0\nx".ljust(100, b"\0"))
 out = {}
-for i, (k, d) in enumerate(cases.items()):
-    p = "%s/c%d.tgz" % (fx, i); open(p, "wb").write(gzip.compress(d))
+gz = {"a second gzip member after a zero byte": gz_split}
+for i, (k, d) in enumerate(list(cases.items()) + list(gz.items())):
+    p = "%s/c%d.tgz" % (fx, i); open(p, "wb").write(d if k in gz else gzip.compress(d))
     err = io.StringIO()
     try:
         with contextlib.redirect_stderr(err): f = ns.plain(p, k, False, canonical=True)
@@ -89,14 +95,15 @@ for (const k of Object.keys(rows)) {
 }
 console.log(JSON.stringify(out));
 JS
-python3 -B - "$FX/rows" "$FX/node.json" <<'PY' > "$FX/cmp"
+/usr/bin/python3 -I -B - "$FX/rows" "$FX/node.json" <<'PY' > "$FX/cmp"
 import sys, json
 p = json.load(open(sys.argv[1])); n = json.load(open(sys.argv[2]))
 def row(ok, msg): print(("ok: " if ok else "FAIL: ") + msg)
 why = {"a header in the padding (plain fields)": "data in the padding", 'size with "_"': "not plain octal", 'size with "0o"': "not plain octal",
        "size with a leading NUL": "not plain octal", "size in base-256": "not plain octal", "size with a trailing newline": "not plain octal",
        "checksum of 8 digits": "not plain octal", "bytes after the name's NUL": "after the end of the name",
-       "a plain uid of 0 (npm pack leaves it NUL)": "not the header npm pack writes"}
+       "a plain uid of 0 (npm pack leaves it NUL)": "not the header npm pack writes",
+       "a second gzip member after a zero byte": "not one gzip stream", "a name ending in a newline": "a name outside"}
 c = p["control"]
 row(c["accepted"] and c["entries"] == ["package/LICENSE-MIT", "package/package.json"] and n["control"] == {"entries": c["entries"], "warns": []},
     "control: a real npm pack output is accepted, and node-tar lists the same entries with no warning (%s / %s)" % (c, n["control"]))
@@ -109,6 +116,6 @@ for k in p:
 PY
 [ $? = 0 ] || fail "the comparison did not run"
 cat "$FX/cmp"
-[ "$(grep -c '^ok' "$FX/cmp")" -ge 15 ] || fail "fewer than 15 rows passed (the control and 14 refusals)"
+[ "$(grep -c '^ok' "$FX/cmp")" -ge 17 ] || fail "fewer than 17 rows passed (the control and 16 refusals)"
 FAILS=$((FAILS + $(grep -c '^FAIL' "$FX/cmp")))
 finish
