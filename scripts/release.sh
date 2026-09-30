@@ -348,20 +348,23 @@ npm_check() { # dir
     h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
     grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
   done
+  # the package's shape, read raw, before anything unpacks it (npm-same.py says why)
+  npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
+  dt=$d/lukaso-sheepdog-darwin-universal-$nv.tgz
+  npy shape "$dt" || die "the darwin package's shape is refused (above)"
   nt=/private/tmp/sd-npmcheck.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
-  mkdir -m 700 "$nt" "$nt/p" "$nt/a" || die "no temp dir"
-  tar -xzf "$d/lukaso-sheepdog-darwin-universal-$nv.tgz" -C "$nt/p" || die "cannot unpack the darwin package"
-  tar -xzf "$d/sheepdog-macos-universal.tar.gz" -C "$nt/a" || die "cannot unpack the release archive"
+  mkdir -m 700 "$nt" "$nt/p" || die "no temp dir"
+  tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"
   b=$nt/p/package/Sheepdog.app
   rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"
   rt_staple_ok "$b" || die "stapler: the darwin package's bundle has no valid staple ticket"
   rt_spctl_ok "$b" || die "spctl: Gatekeeper rejects the darwin package's bundle"
-  # the same bundle: the archive's meets the requirement too, and the two are byte-identical (a
-  # CDHash is read from the embedded signature, not recomputed, so equal CDHashes prove nothing)
-  a=$nt/a/Sheepdog.app
-  rt_meets "$a" || die "codesign: the release archive's bundle does not meet the release requirement"
-  /usr/bin/diff -r -q "$b" "$a" > "$nt/diff" 2>&1 || die "the darwin package's bundle is not the release archive's bundle: $(head -3 "$nt/diff" | tr '\n' ' ')"
+  # the release archive: its own check (only files and directories, the bundle signed and
+  # stapled), then the same files as the package, read raw: path, mode and content (a CDHash is
+  # read from the embedded signature, not recomputed, so equal CDHashes prove nothing)
+  "$root/scripts/lib/archive.sh" check "$d/sheepdog-macos-universal.tar.gz" --signed || die "the release archive fails its check (above)"
+  npy same "$dt" "$d/sheepdog-macos-universal.tar.gz" || die "the darwin package's bundle is not the release archive's bundle (above)"
   rm -rf "$nt"; trap - EXIT
   echo "release: the npm tarballs of $tag check out; publish them, platform packages first"
 }

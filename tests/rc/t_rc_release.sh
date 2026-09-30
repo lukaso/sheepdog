@@ -24,7 +24,11 @@ tag=$(basename "$RC")
 [ "$(basename "$CT")" = "$tag-control" ] || fail "the control dir is not $tag-control: $CT"
 rel() { (cd "$SD_ROOT" && env HOME="$FX/h" sh scripts/release.sh "$@" < /dev/null); }
 # copy DIR to $FX/<name>/$tag; setsum NAME FILE: write FILE's sha256 into that copy's manifest
-cpy() { mkdir -p "$FX/$2/$tag" && cp -R "$1/." "$FX/$2/$tag/"; }
+cpy() { # a source with a symlink is refused (a later write into the copy would go through it)
+  [ -z "$(find "$1" -type l)" ] || { fail "cpy: $1 holds a symlink"; return 1; }
+  mkdir -p "$FX/$2/$tag" && cp -R "$1/." "$FX/$2/$tag/"; }
+mkdir -p "$FX/sl" && ln -s /nonexistent "$FX/sl/l" && (FAILS=0; cpy "$FX/sl" slc >/dev/null; [ $FAILS = 1 ]) && [ ! -e "$FX/slc" ] \
+  && pass "cpy refuses a source that holds a symlink" || fail "cpy copied a source with a symlink"
 setsum() {
   m=$FX/$1/$tag/MANIFEST.json h=$(shasum -a 256 "$FX/$1/$tag/$2" | cut -d' ' -f1)
   sed "s/\(\"name\": \"$2\", \"sha256\": \"\)[0-9a-f]*/\1$h/" "$m" > "$m.n" && mv "$m.n" "$m"
@@ -68,12 +72,29 @@ rel npm-check --out "$FX/xa" "$tag" > "$FX/o" 2>&1; r=$?
 # (b) the same tampered archive with the manifest updated: its bundle fails the requirement
 setsum xa sheepdog-macos-universal.tar.gz
 rel npm-check --out "$FX/xa" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q "codesign: the release archive's bundle" "$FX/o" && pass "npm-check: a tampered release archive (manifest updated) refused by codesign" || fail "npm-check tampered archive: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q "Sheepdog.app/Contents/Info.plist differs in content" "$FX/o" && pass "npm-check: a tampered release archive (manifest updated) refused (its Info.plist differs)" || fail "npm-check tampered archive: $r $(tail -1 "$FX/o")"
 # (c) the control's archive (Developer ID signed, meets the requirement) with the manifest updated:
 #     not the npm package's bundle, byte for byte
 cpy "$RC" xc; cp "$CT/sheepdog-macos-universal.tar.gz" "$FX/xc/$tag/sheepdog-macos-universal.tar.gz" && setsum xc sheepdog-macos-universal.tar.gz || fail "the control's archive could not be put in the copy"
 rel npm-check --out "$FX/xc" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q "is not the release archive's bundle" "$FX/o" && pass "npm-check: another Developer ID bundle in the release archive refused (not byte-identical)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q "is not the release archive's bundle" "$FX/o" && pass "npm-check: another Developer ID bundle in the release archive refused (not the same files)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
+# (d) the release archive holds only a symlink to a bundle elsewhere (manifest updated)
+cpy "$RC" xs && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xs/$tag/sheepdog-macos-universal.tar.gz" only-symlink Sheepdog.app ../p/package/Sheepdog.app \
+  && setsum xs sheepdog-macos-universal.tar.gz || fail "the symlink archive could not be made"
+rel npm-check --out "$FX/xs" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'neither files nor directories' "$FX/o" && pass "npm-check: a release archive holding a symlink refused by the archive check" || fail "npm-check symlink archive: $r $(tail -1 "$FX/o")"
+# (e) the npm package's executable at 0644 (manifest updated): npm installs it so, and the launcher
+#     cannot run it
+DT=lukaso-sheepdog-darwin-universal-${tag#v}.tgz
+cpy "$RC" xm && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xm/$tag/$DT" mode package/Sheepdog.app/Contents/MacOS/sheepdog 644 \
+  && setsum xm "$DT" || fail "the 0644 variant could not be made"
+rel npm-check --out "$FX/xm" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'mode' "$FX/o" && pass "npm-check: the npm package's executable at 0644 refused (its mode)" || fail "npm-check 0644: $r $(tail -1 "$FX/o")"
+# (f) the same as the rc, as npm reads it, but with an AppleDouble entry (manifest updated)
+cpy "$RC" xd && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xd/$tag/$DT" add package/Sheepdog.app/Contents/MacOS/._sheepdog x \
+  && setsum xd "$DT" || fail "the AppleDouble variant could not be made"
+rel npm-check --out "$FX/xd" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q 'AppleDouble' "$FX/o" && pass "npm-check: an AppleDouble entry in the npm package refused" || fail "npm-check AppleDouble: $r $(tail -1 "$FX/o")"
 rel npm-check --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q "mode is 'control'" "$FX/o" && pass "npm-check: the control refused by its manifest's mode" || fail "npm-check control: $r $(tail -1 "$FX/o")"
 sed -e 's/"mode": "control"/"mode": "signed"/' -e 's/"control": true/"control": false/' "$FX/c/$tag/MANIFEST.json" > "$FX/m" && mv "$FX/m" "$FX/c/$tag/MANIFEST.json"
@@ -94,11 +115,11 @@ sh "$G" check "$FX/d/Sheepdog.app/Contents/MacOS/sheepdog" 2> "$FX/o" && pass "t
 cp -R "$FX/d" "$FX/d1" && perl -pi -e 's/<string>APPL<\/string>/<string>APPl<\/string>/' "$FX/d1/Sheepdog.app/Contents/Info.plist"
 grep -q APPl "$FX/d1/Sheepdog.app/Contents/Info.plist" || fail "the Info.plist byte was not changed"
 sh "$G" check "$FX/d1/Sheepdog.app/Contents/MacOS/sheepdog" 2> "$FX/o" && fail "the door allows a changed Info.plist"
-grep -q 'lacks the release signature' "$FX/o" && pass "the door refuses the rc with a changed Info.plist byte (no release signature)" || fail "changed Info.plist: $(head -c 200 "$FX/o")"
+grep -q ', and it lacks the release signature (' "$FX/o" && ! grep -q 'enclosing bundle lacks' "$FX/o" && pass "the door refuses the rc with a changed Info.plist byte (no release signature)" || fail "changed Info.plist: $(head -c 200 "$FX/o")"
 cp -R "$FX/d" "$FX/d2" && mkdir -p "$FX/d2/Sheepdog.app/Contents/Resources" && echo extra > "$FX/d2/Sheepdog.app/Contents/Resources/extra.txt"
 [ -f "$FX/d2/Sheepdog.app/Contents/Resources/extra.txt" ] && [ -f "$FX/d2/Sheepdog.app/Contents/MacOS/sheepdog" ] || fail "the added-file copy was not made"
 sh "$G" check "$FX/d2/Sheepdog.app/Contents/MacOS/sheepdog" 2> "$FX/o" && fail "the door allows an added file"
-grep -q 'lacks the release signature' "$FX/o" && pass "the door refuses the rc with an added file (no release signature)" || fail "added file: $(head -c 200 "$FX/o")"
+grep -q ', and it lacks the release signature (' "$FX/o" && ! grep -q 'enclosing bundle lacks' "$FX/o" && pass "the door refuses the rc with an added file (no release signature)" || fail "added file: $(head -c 200 "$FX/o")"
 # the rc bundle, intact, inside an unsigned outer bundle
 mkdir -p "$FX/d3/Out.app/Contents/MacOS" && cp -R "$FX/d/Sheepdog.app" "$FX/d3/Out.app/Contents/MacOS/" && fx_plist "$FX/d3/Out.app/Contents/Info.plist" com.example.outer
 in3=$FX/d3/Out.app/Contents/MacOS/Sheepdog.app

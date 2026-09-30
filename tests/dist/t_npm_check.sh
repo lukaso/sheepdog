@@ -20,7 +20,8 @@ mk() { # mode control
   "$SD_ROOT/scripts/lib/archive.sh" make "$app" "$D/sheepdog-macos-universal.tar.gz" || exit 3
   for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
     rm -rf "$FX/pk/$p"; mkdir -p "$FX/pk/$p"
-    case $p in sheepdog-darwin-universal) tar -xzf "$D/sheepdog-macos-universal.tar.gz" -C "$FX/pk/$p"; fl='"Sheepdog.app"' ;;
+    case $p in sheepdog-darwin-universal) tar -xzf "$D/sheepdog-macos-universal.tar.gz" -C "$FX/pk/$p"; cp "$SD_ROOT/LICENSE-MIT" "$SD_ROOT/LICENSE-APACHE" "$FX/pk/$p/"
+        fl='"Sheepdog.app", "LICENSE-MIT", "LICENSE-APACHE"' ;;
       *) mkdir -p "$FX/pk/$p/bin"; printf '#!/bin/sh\n' > "$FX/pk/$p/bin/sheepdog"; chmod 755 "$FX/pk/$p/bin/sheepdog"; fl='"bin"' ;; esac
     printf '{"name":"@lukaso/%s","version":"%s","files":[%s]}\n' "$p" "$nv" "$fl" > "$FX/pk/$p/package.json"
     (cd "$FX/pk/$p" && env npm_config_cache="$FX/npmc" HOME="$FX/ghome" npm pack --silent --pack-destination "$D" >/dev/null) || exit 3
@@ -37,6 +38,18 @@ mk signed false; echo x >> "$D/lukaso-sheepdog-linux-x64-$nv.tgz"; nc; r=$?
 mk signed false; echo x >> "$D/sheepdog-macos-universal.tar.gz"; nc; r=$?
 [ $r = 1 ] && grep -q 'sheepdog-macos-universal.tar.gz does not match its manifest hash' "$FX/o" && pass "a release archive not matching its manifest hash: refused" || fail "archive hash: rc=$r $(tail -1 "$FX/o")"
 mk signed false; rm "$D/lukaso-sheepdog-$nv.tgz"; nc; r=$?; [ $r = 1 ] && grep -q "missing" "$FX/o" && pass "a missing tarball: refused (named missing)" || fail "missing: rc=$r $(tail -1 "$FX/o")"
+# the darwin package's shape, read raw (macOS tar hides AppleDouble entries; npm drops the first
+# path part): each variant with its manifest hash updated, so the hash check passes
+E="$SD_ROOT/tests/lib/tgz-edit.py"; DT=lukaso-sheepdog-darwin-universal-$nv.tgz
+resum() { h=$(shasum -a 256 "$D/$DT" | cut -d' ' -f1); sed "s/\(\"name\": \"$DT\", \"sha256\": \"\)[0-9a-f]*/\1$h/" "$D/MANIFEST.json" > "$D/m.n" && mv "$D/m.n" "$D/MANIFEST.json"; }
+for v in "add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outside package/" \
+         "add|package/Sheepdog.app/Contents/MacOS/._sheepdog|x|AppleDouble" \
+         "symlink|package/Sheepdog.app/Contents/MacOS/link|sheepdog|not a regular file"; do
+  op=${v%%|*} rest=${v#*|}; nm=${rest%%|*} rest=${rest#*|}; arg=${rest%%|*} why=${rest#*|}
+  mk signed false; python3 "$E" "$D/$DT" "$FX/e.tgz" "$op" "$nm" "$arg" && mv "$FX/e.tgz" "$D/$DT" && resum || fail "could not make the $op variant"
+  nc; r=$?
+  [ $r = 1 ] && grep -q "$why" "$FX/o" && ! grep -q codesign "$FX/o" && pass "the darwin package with $op $nm: refused ($why), before any real-tool check" || fail "$op $nm: rc=$r $(tail -1 "$FX/o")"
+done
 mk signed false; nc; r=$?
 [ $r = 1 ] && grep -q 'codesign' "$FX/o" && pass "an unsigned bundle in the darwin package: refused, by codesign" || fail "unsigned bundle: rc=$r $(tail -1 "$FX/o")"
 finish
