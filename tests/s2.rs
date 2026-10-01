@@ -288,8 +288,9 @@ fn one_tick_of_scan_calls() -> Duration {
 /// job (the difference is the scan; start-up is in both). Its cost is system calls per process
 /// per tick, which grows with the number of processes and with the machine's load, so on macOS it
 /// is measured against one tick's worth of the same calls made by this test at the same time
-/// (the minimum of several, taken between the samples): the 3 s job has 12 ticks, and the scan may
-/// cost at most SCAN_K times the reference for each. On Linux (the containers hold tens of
+/// (the minimum of several, each SCANS ticks' worth summed, taken between the samples): the 3 s
+/// job scans SCANS more times than the instant one, and may cost at most SCAN_K times the
+/// reference. On Linux (the containers hold tens of
 /// processes) the budget is 1 % of one core or 3 % per 1000 of this user's processes, whichever is
 /// larger. Minimum of 3 samples each, so contention from other tests cannot inflate the result.
 #[test]
@@ -306,27 +307,36 @@ fn s2_the_scan_cost_stays_in_its_budget() {
         Duration::from_micros(us(ru.ru_utime) + us(ru.ru_stime))
     }
     let _ = cpu(&["true"]); // warm-up (the first launch is scanned by the OS)
+    // the reference: SCANS ticks' worth of the calls, summed (so its noise is the scan's)
     #[cfg(target_os = "macos")]
-    let mut refs = vec![one_tick_of_scan_calls()];
+    const SCANS: u32 = 11;
+    #[cfg(target_os = "macos")]
+    let reference = || (0..SCANS).map(|_| one_tick_of_scan_calls()).sum::<Duration>();
+    #[cfg(target_os = "macos")]
+    let mut refs = vec![reference()];
     let mut base = Vec::new();
     let mut job = Vec::new();
     for _ in 0..3 {
         base.push(cpu(&["true"]));
         job.push(cpu(&["/bin/sleep", "3"]));
         #[cfg(target_os = "macos")]
-        refs.push(one_tick_of_scan_calls());
+        refs.extend([reference(), reference()]);
     }
     let (base, job) = (*base.iter().min().unwrap(), *job.iter().min().unwrap());
     let scan = job.saturating_sub(base);
     #[cfg(target_os = "macos")]
     {
-        // measured with about 960 of the user's processes (2026-10-01): 1.14-1.61 at a load
-        // average of 22, 1.27-1.40 at 55-64; a scan doing each tick's work twice measured
-        // 2.17-2.63, and a 125 ms tick 3.30: both over
-        const SCAN_K: f64 = 2.0;
-        let r = *refs.iter().min().unwrap();
-        let ratio = scan.as_secs_f64() / 12.0 / r.as_secs_f64();
-        assert!(ratio < SCAN_K, "the scan used {scan:?} of CPU in a 3 s run: {ratio:.2} times one tick's worth of its calls ({r:?}) per tick, over {SCAN_K} (start-up {base:?})");
+        // the 3 s job scans SCANS more times than the instant one (15 against 4, counted
+        // 2026-10-01: each wait restarts after its scan, so 12 timer ticks take a little over 3 s).
+        // Measured with about 900 of the user's processes at load averages of 67-98 (the
+        // reference the median of 7): 1.31-1.47; a scan doing each tick's work twice 1.90-2.50,
+        // a 125 ms tick 2.42-2.63: both over SCAN_K
+        const SCAN_K: f64 = 1.8;
+        // the median of 7: one fast sample (less contention for a moment) must not set the bar
+        refs.sort();
+        let r = refs[refs.len() / 2];
+        let ratio = scan.as_secs_f64() / r.as_secs_f64();
+        assert!(ratio < SCAN_K, "the scan used {scan:?} of CPU in a 3 s run: {ratio:.2} times {SCANS} ticks' worth of its calls ({r:?}), over {SCAN_K} (start-up {base:?})");
     }
     #[cfg(target_os = "linux")]
     {
