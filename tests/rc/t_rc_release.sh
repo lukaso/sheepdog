@@ -1,14 +1,16 @@
 #!/bin/sh
 # PHASE3.md §3 `rc` leg, the release checks, against the operator's rc output (SD_RC_DIR) and its
 # control (SD_RC_CONTROL_DIR), read only:
-#   - verify (the executor's real-tool step): the rc accepted; the control refused by stapler,
-#     and Gatekeeper (spctl) rejects the control's bundle too; a copy of the rc without its staple
-#     ticket refused by stapler even with a DEVELOPER_DIR whose xcrun says yes to everything;
+#   - verify (the executor's real-tool step): the rc accepted; the control refused by its control
+#     marker (rc.1's, which predates the marker: by stapler), and Gatekeeper (spctl) rejects the
+#     control's bundle too; a copy of the rc without its staple ticket refused by stapler even with
+#     a DEVELOPER_DIR whose xcrun says yes to everything;
 #   - npm-check: the rc accepted; a copy whose release archive does not match the manifest
 #     refused by its hash; a tampered archive (the manifest updated) refused by the comparison;
 #     the control's archive in the release's place refused by the archive check (no staple
 #     ticket); the control refused by its mode; a copy of the control with the mode and control
-#     flag cleared refused by stapler;
+#     flag cleared refused by its marker (rc.1's: by stapler); the rc without its staple ticket in
+#     both tarballs (manifest updated) refused by stapler, so that check has a row on any rc;
 #   - the control is not the release: it carries the control marker, and its CDHash differs on
 #     both slices (rc.1's control does neither: it was built from a tag before the marker);
 #   - the planner accepts the rc's manifest (with this checkout's tag as the remote tag) and its
