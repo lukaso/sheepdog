@@ -8,8 +8,10 @@
 #     (control: no hint when it is on PATH);
 #   - the installed sheepdog, after the door: a job's process is the app's executable, its exit
 #     code passes through, and scripts/smoke.sh passes, all of its state under a temp HOME;
-#   - a second install over the first replaces the app (a planted file is gone), the link still
-#     resolves, and nothing is left in Applications or TMPDIR;
+#   - after every install, nothing but Sheepdog.app is in Applications, and install.sh used its
+#     TMPDIR and left it the same directory (not a link, the same inode), empty (controls for both);
+#   - a second install over the first replaces the app (a planted file is gone) and the link still
+#     resolves;
 #   - refused, with nothing installed and nothing left in Applications or TMPDIR: a copy of the rc
 #     whose archive holds a tampered bundle (codesign), and the control (Gatekeeper: only a control
 #     that carries the control marker can show this; rc.1's shares rc.1's notarized CDHash).
@@ -27,7 +29,7 @@ mkdir -p "$FX/tb" && tar -xzf "$RC/$ARC" -C "$FX/tb" && perl -pi -e 's/<string>A
   && mv "$FX/srvt/$ARC.new" "$FX/srvt/$ARC" && h=$(shasum -a 256 "$FX/srvt/$ARC" | cut -d' ' -f1) \
   && sed "s/^[0-9a-f]\{64\}  $ARC\$/$h  $ARC/" "$FX/srvt/SHA256SUMS" > "$FX/srvt/S" && mv "$FX/srvt/S" "$FX/srvt/SHA256SUMS" \
   && grep -q "^$h  $ARC\$" "$FX/srvt/SHA256SUMS" || fail "the tampered copy could not be made"
-SPS=""; trap 'for s in $SPS; do kill $s 2>/dev/null; done; rm -rf "$FX"' EXIT
+SPS=""; trap 'for s in $SPS; do { kill $s; wait $s; } 2>/dev/null; done; rm -rf "$FX"' EXIT
 serve() { # dir: its port into dir.port
   p=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
   (cd "$1" && exec python3 -m http.server "$p" --bind 127.0.0.1) > "$1.log" 2>&1 & SPS="$SPS $!"
@@ -37,14 +39,39 @@ serve() { # dir: its port into dir.port
 serve "$FX/srv"; serve "$FX/srvc"; serve "$FX/srvt"
 n=0
 inst() { # served-dir HOME [extra PATH] -> rc; output in $FX/o; install.sh's TMPDIR in $TD (fresh;
-  # its mtime before the install in $TDM)
-  n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"; TDM=$(stat -f %Fm "$TD"); sleep 0.01
+  # its mtime and inode before the install in $TDM, $TDI)
+  n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"; TDM=$(stat -f %Fm "$TD") TDI=$(stat -f %i "$TD"); sleep 0.01
   env -i PATH="${3:+$3:}/usr/bin:/bin:/usr/sbin" HOME="$2" TMPDIR="$TD" SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
 }
-clean() { # what -> install.sh used TMPDIR (its mtime moved) and left nothing in it
-  [ "$(stat -f %Fm "$TD")" != "$TDM" ] && [ -z "$(ls -A "$TD")" ] && pass "$1: install.sh used TMPDIR and left nothing in it" \
-    || fail "$1: TMPDIR mtime $TDM -> $(stat -f %Fm "$TD"), left: $(ls -A "$TD" | tr '\n' ' ')"
+tmp_ok() { # dir mtime inode -> rc 0: still the same directory (not a link, the same inode), used by
+  # install.sh (its mtime moved) and left with nothing in it
+  [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f %i "$1" 2>/dev/null)" = "$3" ] && [ "$(stat -f %Fm "$1" 2>/dev/null)" != "$2" ] \
+    && [ -z "$(ls -A "$1" 2>/dev/null)" ]
 }
+clean() { # what
+  tmp_ok "$TD" "$TDM" "$TDI" && pass "$1: install.sh used TMPDIR and left nothing in it" \
+    || fail "$1: TMPDIR $(ls -ld "$TD" 2>&1); inode $TDI -> $(stat -f %i "$TD" 2>&1), mtime $TDM -> $(stat -f %Fm "$TD" 2>&1), left: $(ls -A "$TD" 2>&1 | tr '\n' ' ')"
+}
+# controls of tmp_ok: a dir used and emptied passes; removed, removed and made again, replaced by a
+# link to an empty dir, not used, or with a file left, each fails
+tc() { # what expect(ok|bad) setup-command
+  d=$FX/tc.$2.$(printf '%s' "$1" | tr -c 'a-z' _); mkdir -p "$d"; m=$(stat -f %Fm "$d") i=$(stat -f %i "$d"); sleep 0.01
+  eval "$3"
+  if tmp_ok "$d" "$m" "$i"; then [ $2 = ok ] && pass "control: TMPDIR $1 passes" || fail "control: TMPDIR $1 passes the check"
+  else [ $2 = bad ] && pass "control: TMPDIR $1 fails the check" || fail "control: TMPDIR $1 fails the check"; fi
+}
+tc "used and emptied" ok ': > "$d/x"; rm "$d/x"'
+tc "removed" bad 'rm -rf "$d"'
+tc "removed and made again" bad 'rm -rf "$d"; mkdir "$d"; [ "$(stat -f %i "$d")" != "$i" ] || fail "control: the re-made TMPDIR kept its inode (the row would prove nothing)"'
+tc "replaced by a link to an empty dir" bad 'rm -rf "$d"; mkdir "$d.e"; ln -s "$d.e" "$d"'
+tc "not used" bad ':'
+tc "with a file left" bad ': > "$d/x"'
+apps_left() { ls -A "$1/Applications" 2>&1 | grep -v '^Sheepdog.app$'; } # home -> what else is in its Applications
+apps() { # home what
+  left=$(apps_left "$1"); [ -z "$left" ] && pass "$2: nothing but Sheepdog.app in Applications" || fail "$2: left in Applications: $left"
+}
+mkdir -p "$FX/ac/Applications/Sheepdog.app"; [ -z "$(apps_left "$FX/ac")" ] || fail "control: Applications with only Sheepdog.app is not clean"
+mkdir "$FX/ac/Applications/.Sheepdog.app.stage"; [ -n "$(apps_left "$FX/ac")" ] && pass "control: a staging directory left in Applications is found" || fail "control: a staging directory left in Applications is not found"
 xyz=${RC##*/}; xyz=${xyz#v}; xyz=${xyz%%-*}
 c12=$(sed -n 's/^ *"commit": *"\([0-9a-f]\{12\}\).*/\1/p' "$RC/MANIFEST.json")
 [ -n "$c12" ] || fail "no commit in the rc's manifest"
@@ -55,6 +82,7 @@ inst "$FX/srv" "$H"; r=$?
   && pass "install.sh installs the rc: sheepdog $xyz ($c12), the responsibility API active" || fail "install: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
 grep -q "$H/.local/bin is not on your PATH" "$FX/o" && pass "the PATH hint names ~/.local/bin" || fail "no PATH hint naming $H/.local/bin"
 clean "the first install"
+apps "$H" "the first install"
 mkdir -p "$FX/x" && tar -xzf "$RC/$ARC" -C "$FX/x" || fail "cannot unpack the rc"
 if [ -d "$A" ] && [ ! -L "$A" ] && python3 "$SD_ROOT/tests/lib/tree-same.py" "$A" "$FX/x/Sheepdog.app" > "$FX/d" 2>&1; then pass "the installed app is a directory, the release archive's bundle (paths, types, modes, content)"
 else fail "the installed app: $(ls -ld "$A" 2>&1) $(head -3 "$FX/d" 2>/dev/null | tr '\n' ' ')"; fi
@@ -70,7 +98,7 @@ env -i PATH=/usr/bin:/bin HOME="$J" XDG_STATE_HOME="$J/x" SHEEPDOG_STATE="$J/s" 
 # shell (/bin/sh runs bash here)
 runs() { /usr/sbin/lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
 i=0; f=$(runs $jp)
-while case $f in */sh|*/bash|*/dash|*/env|'') true ;; *) false ;; esac && kill -0 $jp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); f=$(runs $jp); done
+while case $f in */sh|*/bash|*/dash|*/zsh|*/env|'') true ;; *) false ;; esac && kill -0 $jp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); f=$(runs $jp); done
 fr=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")
 [ "$fr" = "$(cd -P "$A/Contents/MacOS" && pwd -P)/sheepdog" ] && pass "the job's process runs the installed app's executable (pid $jp)" || fail "pid $jp runs '$f'"
 kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null
@@ -83,14 +111,14 @@ job sh "$SD_ROOT/scripts/smoke.sh" "$L" < /dev/null > "$FX/sm" 2>&1; r=$?
 inst "$FX/srv" "$H"; r=$?
 [ $r = 0 ] && [ ! -e "$A/Contents/planted" ] && [ -d "$A" ] && [ ! -L "$A" ] && pass "a second install replaces the app" || fail "second install: rc=$r planted=$(ls "$A/Contents/planted" 2>&1)"
 [ "$(readlink "$L")" = "$A/Contents/MacOS/sheepdog" ] && [ -x "$L" ] && pass "the link still resolves" || fail "the link after the second install: $(ls -l "$L" 2>&1)"
-left=$(ls -A "$H/Applications" | grep -v '^Sheepdog.app$')
-[ -z "$left" ] && pass "no staging directory or old app left in Applications" || fail "left in Applications: $left"
+apps "$H" "the second install"
 clean "the second install"
 # control of the PATH hint: ~/.local/bin on PATH, no hint
 H3=$FX/home3; mkdir -p "$H3"
 inst "$FX/srv" "$H3" "$H3/.local/bin"; r=$?
 [ $r = 0 ] && ! grep -q 'is not on your PATH' "$FX/o" && pass "control: no PATH hint when ~/.local/bin is on PATH" || fail "PATH-hint control: rc=$r $(tail -1 "$FX/o")"
 clean "the PATH-hint control install"
+apps "$H3" "the PATH-hint control install"
 # refused: nothing installed, nothing left
 refused() { # home what reason
   [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ ! -L "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \

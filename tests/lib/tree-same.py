@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# Test helper: tree-same.py A B -> exit 0 if the two directory trees are the same: every entry's
-# path, type, mode (all 12 bits), a file's content (sha256) and a link's target; lstat throughout
-# (a link is compared as a link, never followed). Otherwise exit 1, naming up to 5 differences.
+# Test helper: tree-same.py A B -> exit 0 if the two directory trees are the same: the root's own
+# mode, and every entry's path, type, mode (all 12 bits), a file's content (sha256) and a link's
+# target; lstat throughout (a link is compared as a link, never followed). Otherwise exit 1, naming
+# up to 5 differences. Its cell: tests/dist/t_tree_same.sh.
 import os, sys, stat, hashlib
 def tree(r):
-    out = {}
+    st = os.lstat(r); out = {".": (stat.S_IFMT(st.st_mode), st.st_mode & 0o7777)}
     for d, ds, fs in os.walk(r):
         for n in ds + fs:
             p = os.path.join(d, n); st = os.lstat(p); k = os.path.relpath(p, r)
