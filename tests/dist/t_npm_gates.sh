@@ -10,9 +10,10 @@
 #     refuses: any bad copy of the launcher whatever order find returns it in, a PATH entry that
 #     reaches an unjudged launcher (a link or a pnpm shim), a shim that names no launcher, a shim
 #     whose `$basedir//bin/sh` exists, a shim that is not pnpm 10.18.2's text though its exec lines
-#     name the good launcher (a line before them, an exec with no arguments, the launcher as another
-#     file's argument, a trailing comment, a command in NODE_PATH, a $ in the target, pnpm 10.2.1's
-#     shim), a launcher copy that differs from the package's, an entry that is neither a link nor
+#     name the good launcher (a line before them, an exec with no arguments, a trailing comment,
+#     pnpm 10.2.1's shim), pnpm 10.18.2's text whose target or NODE_PATH holds a forbidden character
+#     (a command in NODE_PATH, a $ in the target, the launcher as another file's argument: its
+#     quotes), a launcher copy that differs from the package's, an entry that is neither a link nor
 #     a shim, and a layout that resolves to nothing; a copy that resolves to nothing beside a good
 #     one passes (it runs nothing);
 #   - runs_one_of: the judged file itself passes; a wrapper that spawns it (alive, its child
@@ -232,9 +233,14 @@ perl -e 'exec {"/bin/sleep"} $ARGV[0], "5" or die' "$J" & q=$!; PIDS="$PIDS $q";
 if [ "$(pcomm $q)" = "$J" ]; then
   runs_one_of $q "$J" && fail "control: a process with the judged file's argv[0] that runs /bin/sleep passed" || pass "control: argv[0] that names the judged file, running /bin/sleep, fails the process check (ps shows the lie)"
 else fail "control: ps does not show the argv[0] lie ('$(pcomm $q)'): the row would prove nothing"; fi
-# nothing the cell started outlives it (the wrapper's child too)
+# nothing the cell started outlives it (the wrapper's child too); control: the same pgrep lists the
+# wrapper and its child while they live
+fxp=$FX/
+live=$(pgrep -f "$fxp")
+printf '%s\n' "$live" | grep -qx "$w" && printf '%s\n' "$live" | grep -qx "$k" \
+  && pass "control: the leftover check lists the live wrapper and its child" || fail "control: pgrep -f '$fxp' does not list the live wrapper $w and its child $k ('$live')"
 for p in $PIDS; do { kill $p; wait $p; } 2>/dev/null; done
-i=0; while [ -n "$(pgrep -f "$FX/")" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
-left=$(pgrep -fl "$FX/")
-[ -z "$left" ] && pass "no fixture process is left" || { fail "fixture processes left: $left"; for x in $(pgrep -f "$FX/"); do kill "$x"; done; }
+i=0; while [ -n "$(pgrep -f "$fxp")" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+left=$(pgrep -fl "$fxp")
+[ -z "$left" ] && pass "no fixture process is left" || { fail "fixture processes left: $left"; for x in $(pgrep -f "$fxp"); do kill "$x"; done; }
 finish

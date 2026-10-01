@@ -88,7 +88,7 @@ npm_gate() {
     ng_np=$(sed -n 's/^  export NODE_PATH="\(.*\)"$/\1/p' "$3" | head -1)
     case $ng_t$ng_np in
       *[\"\$\`\\]*|'') echo "the pnpm shim $3 names a target or NODE_PATH with a quote, \$, backquote or backslash, or none" ;;
-      *) if [ "$(printf '%s\n' "$ng_t" | wc -l | tr -d ' ')" = 1 ] && npm_pnpm_shim "$ng_t" "$ng_np" | cmp -s - "$3"; then ng_a0=$(dirname "$3")/$ng_t
+      *) if npm_pnpm_shim "$ng_t" "$ng_np" | cmp -s - "$3"; then ng_a0=$(dirname "$3")/$ng_t
          else echo "the pnpm shim $3 is not the text pnpm 10.18.2 writes"; fi ;;
     esac
     [ -n "$ng_a0" ] || ng_bad=1
