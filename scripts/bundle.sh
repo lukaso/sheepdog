@@ -1,18 +1,24 @@
 #!/bin/sh
 # Make Sheepdog.app around a sheepdog binary (PHASE3.md S0).
 #
-#   scripts/bundle.sh BINARY OUT-DIR VERSION BUILD-NUMBER [--release-id]
+#   scripts/bundle.sh BINARY OUT-DIR VERSION BUILD-NUMBER [--release-id [--control]]
 #
 # VERSION is X.Y.Z and BUILD-NUMBER a positive integer (PHASE3.md D4: Apple's bundle versions are
 # dotted integers, and plutil does not check them). The bundle ID is com.lukaso.sheepdog.dev
 # unless --release-id is given (PHASE3.md D5): only the signing path passes it, and it signs the
-# bundle in the same step, under /private/tmp. The bundle is not signed here.
+# bundle in the same step, under /private/tmp. The bundle is not signed here. --control (with
+# --release-id only) adds the key SheepdogControlBuild = true, so a control build's CDHash differs
+# from the release's: the build is reproducible, and a control of the same commit would otherwise
+# share the release's CDHashes and pass Gatekeeper on Apple's online ticket (measured with rc.1).
 set -u
-usage() { echo "usage: bundle.sh BINARY OUT-DIR VERSION BUILD-NUMBER [--release-id]" >&2; exit 2; }
-[ $# -eq 4 ] || [ $# -eq 5 ] || usage
+usage() { echo "usage: bundle.sh BINARY OUT-DIR VERSION BUILD-NUMBER [--release-id [--control]]" >&2; exit 2; }
+[ $# -ge 4 ] && [ $# -le 6 ] || usage
 bin=$1 out=$2 version=$3 build=$4
-id=com.lukaso.sheepdog.dev
-if [ $# -eq 5 ]; then [ "$5" = --release-id ] || usage; id=com.lukaso.sheepdog; fi
+id=com.lukaso.sheepdog.dev ctl=""
+if [ $# -ge 5 ]; then [ "$5" = --release-id ] || usage; id=com.lukaso.sheepdog; fi
+if [ $# -eq 6 ]; then [ "$6" = --control ] || usage; ctl='	<key>SheepdogControlBuild</key>
+	<true/>
+'; fi
 echo "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
   || { echo "bundle.sh: version must be X.Y.Z (dotted integers): '$version'" >&2; exit 2; }
 echo "$build" | grep -Eq '^[1-9][0-9]*$' \
@@ -53,7 +59,7 @@ cat > "$app/Contents/Info.plist" <<EOF || exit 1
 	<string>12.0</string>
 	<key>LSUIElement</key>
 	<true/>
-</dict>
+${ctl}</dict>
 </plist>
 EOF
 /usr/bin/plutil -lint "$app/Contents/Info.plist" >/dev/null || { rm -rf "$app"; exit 1; }

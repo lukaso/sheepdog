@@ -44,6 +44,14 @@ cpy "$CT" c
 rel verify --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "verify: the control refused by stapler" || fail "verify control: $r $(tail -1 "$FX/o")"
 mkdir -p "$FX/cb" && tar -xzf "$CT/sheepdog-macos-universal.tar.gz" -C "$FX/cb" || fail "cannot unpack the control"
+# the control must differ from the release: its marker, and so its CDHashes (a reproducible build
+# of the same commit shares them, and Gatekeeper then finds the release's notarization online)
+mkdir -p "$FX/rb" && tar -xzf "$RC/sheepdog-macos-universal.tar.gz" -C "$FX/rb" || fail "cannot unpack the rc"
+[ "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$FX/cb/Sheepdog.app/Contents/Info.plist" 2>/dev/null)" = true ] \
+  && pass "the control carries the control marker" || fail "the control has no control marker (built from a tag before the marker: rc.1's is; use the next rc's control)"
+cdh() { for a in arm64 x86_64; do /usr/bin/codesign -d -vvv --arch $a "$1" 2>&1 | sed -n 's/^CDHash=//p'; done | tr '\n' ' '; }
+c1=$(cdh "$FX/rb/Sheepdog.app") c2=$(cdh "$FX/cb/Sheepdog.app")
+[ -n "$c1" ] && [ "$c1" != "$c2" ] && pass "the control's CDHashes differ from the rc's" || fail "the control shares the rc's CDHashes ($c1/ $c2)"
 # the spctl row counts only for a bundle that is there and meets the requirement (a missing one
 # is rejected too)
 if [ -d "$FX/cb/Sheepdog.app" ] && rt_meets "$FX/cb/Sheepdog.app"; then
@@ -77,7 +85,7 @@ rel npm-check --out "$FX/xa" "$tag" > "$FX/o" 2>&1; r=$?
 #     not the npm package's bundle, byte for byte
 cpy "$RC" xc; cp "$CT/sheepdog-macos-universal.tar.gz" "$FX/xc/$tag/sheepdog-macos-universal.tar.gz" && setsum xc sheepdog-macos-universal.tar.gz || fail "the control's archive could not be put in the copy"
 rel npm-check --out "$FX/xc" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q "is not the release archive's bundle" "$FX/o" && pass "npm-check: another Developer ID bundle in the release archive refused (not the same files)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q "the release archive fails its check" "$FX/o" && pass "npm-check: the control's archive in the release's place refused (no staple ticket: the archive check)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
 # (d) the release archive holds only a symlink to a bundle elsewhere (manifest updated)
 cpy "$RC" xs && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xs/$tag/sheepdog-macos-universal.tar.gz" only-symlink Sheepdog.app ../p/package/Sheepdog.app \
   && setsum xs sheepdog-macos-universal.tar.gz || fail "the symlink archive could not be made"

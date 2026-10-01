@@ -113,7 +113,9 @@ if [ $notarize = yes ]; then
   [ -f "$k" ] || die "no notary keychain at $k: do PHASE3.md D2 step 3 first"
 fi
 
-app=$("$lib/../bundle.sh" "$bin" "$tmp/b" "$version" "$build" --release-id) || die "bundle.sh"
+# a control build carries the control marker (bundle.sh says why)
+if [ $notarize = yes ]; then app=$("$lib/../bundle.sh" "$bin" "$tmp/b" "$version" "$build" --release-id) || die "bundle.sh"
+else app=$("$lib/../bundle.sh" "$bin" "$tmp/b" "$version" "$build" --release-id --control) || die "bundle.sh"; fi
 tool codesign --force --options runtime --timestamp -s "$SD_SIGN_IDENTITY" "$app" || die "codesign"
 got=$(tool codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')
 want=$(/usr/bin/csreq -r="$SD_RELEASE_REQUIREMENT" -t 2>/dev/null)

@@ -40,7 +40,10 @@ $2
 EOF
   chmod +x "$S/$1"
 }
+# the codesign stand-in keeps the Info.plist of the bundle it is asked to sign (the bundle itself is
+# deleted when sign.sh ends)
 shim codesign 'case "$*" in
+  *"--force"*) for a; do l=$a; done; cp "$l/Contents/Info.plist" "'"$S"'/signed.plist" 2>/dev/null ;;
   *"-d -r-"*) grep -v "^#" "'"$SD_ROOT"'/tests/fixtures/codesign-dr-devid.txt" ;;
   *"-d -v"*) echo "CodeDirectory v=20500 flags=0x10000(runtime)" >&2 ;;
 esac; exit 0'
@@ -104,8 +107,14 @@ grep -q 'refused' "$FX/out.n" && pass "the refusal is the door's" || fail "no do
 ls -d /private/tmp/sd-sign.* >/dev/null 2>&1 && fail "a signing temp dir is left" || pass "no signing temp dir left"
 ls "$FX/dest.n" | grep -q Sheepdog.app && fail "a bundle was left in the output" || pass "no bundle left in the output"
 
-# 2. the control mode: no notarytool, no question
+[ -f "$S/signed.plist" ] && [ -z "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" ] \
+  && pass "the notarizing run's bundle has no control marker" || fail "the notarizing run's bundle: $(cat "$S/signed.plist" 2>/dev/null | grep -c SheepdogControlBuild) markers"
+# 2. the control mode: no notarytool, no question; the bundle carries the control marker (its
+#    CDHash then differs from the release's: a reproducible build would otherwise share it, and
+#    Apple's online ticket would make the control pass Gatekeeper)
+rm -f "$S/signed.plist"
 run c --no-notarize; rc=$?
+[ "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" = true ] && pass "the control bundle carries the control marker" || fail "the control bundle has no control marker"
 [ $rc = 5 ] && pass "control run ends at the door's refusal (5)" || fail "control run: rc=$rc $(tail -2 "$FX/out.c" | tr '\n' ' ')"
 grep -q notarytool "$S/calls" && fail "the control mode called notarytool" || pass "the control mode calls no notarytool"
 ! grep -q -e '^announce' -e '^security lock-keychain' -e '^security unlock-keychain' "$S/calls" && pass "the control mode announces nothing and touches no keychain" || fail "the control mode announced or touched a keychain: $(grep -e announce -e keychain "$S/calls" | tr '\n' ';')"
