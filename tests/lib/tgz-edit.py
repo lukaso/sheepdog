@@ -19,6 +19,7 @@
 #                                                   followed by 1 byte, and the stream ends
 #   tgz-edit.py SRC DST replace NAME TEXT           NAME's content replaced by TEXT
 #   tgz-edit.py SRC DST json-set NAME KEY=JSON      NAME (a JSON file) with KEY set to JSON
+#   tgz-edit.py SRC DST remove NAME -               SRC without the entry NAME
 import sys, gzip, json, os, importlib.util
 src, dst, op, name, arg = sys.argv[1:6]
 spec = importlib.util.spec_from_file_location("ns", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../scripts/lib/npm-same.py"))
@@ -65,6 +66,9 @@ if op == "raw-append":
 if op == "badsum": finish(raw(E) + header(name, badsum=True) + pad(b"x"))
 if op == "noend": finish(raw(E), end=False)
 if op == "short": finish(raw(E) + header(name, size=5000) + b"x", end=False)
+if op == "remove":
+    assert any(n == N for n, h, b in E), "no entry " + name
+    finish(raw([e for e in E if e[0] != N]))
 if op in ("mode", "replace", "json-set"):
     out = []
     for n, h, b in E:

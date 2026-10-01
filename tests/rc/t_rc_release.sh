@@ -43,9 +43,16 @@ mkdir -p "$FX/h"
 rel verify --out "$(dirname "$RC")" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 0 ] && pass "verify: the rc is signed, notarized and stapled" || fail "verify rc: $r $(tail -1 "$FX/o")"
 cpy "$CT" c
-rel verify --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "verify: the control refused by stapler" || fail "verify control: $r $(tail -1 "$FX/o")"
 mkdir -p "$FX/cb" && tar -xzf "$CT/sheepdog-macos-universal.tar.gz" -C "$FX/cb" || fail "cannot unpack the control"
+# a marked control (rc.2 on) is refused by its marker before any real tool; rc.1's, which predates
+# the marker, by stapler (the marker row below says which this control is)
+marked=no; /usr/bin/plutil -extract SheepdogControlBuild raw -o - "$FX/cb/Sheepdog.app/Contents/Info.plist" >/dev/null 2>&1 && marked=yes
+rel verify --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
+if [ $marked = yes ]; then
+  [ $r = 1 ] && grep -q 'the archive holds a control build' "$FX/o" && ! grep -q -e codesign -e stapler "$FX/o" && pass "verify: the (marked) control refused by its marker" || fail "verify control: $r $(tail -1 "$FX/o")"
+else
+  [ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "verify: the (unmarked) control refused by stapler" || fail "verify control: $r $(tail -1 "$FX/o")"
+fi
 # the control must differ from the release: its marker, and so its CDHashes (a reproducible build
 # of the same commit shares them, and Gatekeeper then finds the release's notarization online)
 mkdir -p "$FX/rb" && tar -xzf "$RC/sheepdog-macos-universal.tar.gz" -C "$FX/rb" || fail "cannot unpack the rc"
@@ -149,7 +156,18 @@ rel npm-check --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
 sed -e 's/"mode": "control"/"mode": "signed"/' -e 's/"control": true/"control": false/' "$FX/c/$tag/MANIFEST.json" > "$FX/m" && mv "$FX/m" "$FX/c/$tag/MANIFEST.json"
 grep -q '"control": false' "$FX/c/$tag/MANIFEST.json" && grep -q '"mode": "signed"' "$FX/c/$tag/MANIFEST.json" || fail "the control manifest was not cleared"
 rel npm-check --out "$FX/c" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "npm-check: the control with its flag cleared refused by stapler" || fail "npm-check cleared control: $r $(tail -1 "$FX/o")"
+if [ $marked = yes ]; then
+  [ $r = 1 ] && grep -q 'the darwin package holds a control build' "$FX/o" && ! grep -q -e codesign -e stapler "$FX/o" && pass "npm-check: the (marked) control with its flag cleared refused by its marker" || fail "npm-check cleared control: $r $(tail -1 "$FX/o")"
+else
+  [ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "npm-check: the (unmarked) control with its flag cleared refused by stapler" || fail "npm-check cleared control: $r $(tail -1 "$FX/o")"
+fi
+# npm-check's stapler refusal on real Developer ID bytes, on any rc: the rc without its staple
+# ticket in both tarballs (manifest updated)
+cpy "$RC" xu && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/$DT" "$FX/xu/$tag/$DT" remove package/Sheepdog.app/Contents/CodeResources - \
+  && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xu/$tag/sheepdog-macos-universal.tar.gz" remove Sheepdog.app/Contents/CodeResources - \
+  && setsum xu "$DT" && setsum xu sheepdog-macos-universal.tar.gz || fail "the unstapled rc could not be made"
+rel npm-check --out "$FX/xu" "$tag" > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "stapler: the darwin package's bundle has no valid staple ticket" "$FX/o" && pass "npm-check: the rc without its staple ticket refused by stapler" || fail "npm-check unstapled rc: $r $(tail -1 "$FX/o")"
 
 # the planner
 t=$(cd "$SD_ROOT" && git rev-parse "$tag") && c=$(cd "$SD_ROOT" && git rev-parse "$tag^{commit}") || fail "no local tag $tag"
