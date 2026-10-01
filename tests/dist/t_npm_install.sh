@@ -8,9 +8,9 @@
 #   - the installed executable is the local tarball's (byte for byte), and the door allows it;
 #   - before anything runs, every installed copy of the executable is the tarball's and has the
 #     exec door's yes, and tests/lib/npm-gates.sh's npm_gate passes: the launcher the PATH entry
-#     reaches, and every installed copy of it, is the package's launcher (this tree's: the gate's
-#     copy of its resolution is checked against it in t_npm_gates.sh) and resolves to one of those
-#     judged files; else nothing of that manager runs; with SD_NPM_RC_DIR every installed bundle
+#     reaches (a link, or pnpm 10.18.2's exact shim), and every copy of it at a package path, is the
+#     package's launcher (this tree's: the gate's copy of its resolution is checked against it in
+#     t_npm_gates.sh) and resolves to one of those judged files; else nothing of that manager runs; with SD_NPM_RC_DIR every installed bundle
 #     is the release archive's, file by file (tests/lib/tree-same.py), and its staple validates;
 #   - the process started through the PATH entry runs one of those judged files (lsof's txt entry;
 #     same pid: the sh launcher execs), and TERM to that pid ends the job's whole tree, a setsid

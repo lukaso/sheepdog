@@ -6,15 +6,19 @@
 #     (run through a link, as a pnpm shim runs it, and through a link chain) for each layout:
 #     nested, hoisted, both, a linked platform package, a linked executable, a nested one that is
 #     not executable, none;
-#   - npm_gate passes a good npm layout and a good pnpm shim; it refuses: any bad copy of the
-#     launcher whatever order find returns it in, a PATH entry that reaches an unjudged launcher
-#     (a link or a pnpm shim), a shim that names no launcher, a shim whose `$basedir//bin/sh`
-#     exists, a launcher copy that differs from the package's, an entry that is neither a link nor
+#   - npm_gate passes a good npm layout and a good pnpm shim (pnpm 10.18.2's measured text); it
+#     refuses: any bad copy of the launcher whatever order find returns it in, a PATH entry that
+#     reaches an unjudged launcher (a link or a pnpm shim), a shim that names no launcher, a shim
+#     whose `$basedir//bin/sh` exists, a shim that is not pnpm 10.18.2's text though its exec lines
+#     name the good launcher (a line before them, an exec with no arguments, the launcher as another
+#     file's argument, a trailing comment, a command in NODE_PATH, a $ in the target, pnpm 10.2.1's
+#     shim), a launcher copy that differs from the package's, an entry that is neither a link nor
 #     a shim, and a layout that resolves to nothing; a copy that resolves to nothing beside a good
 #     one passes (it runs nothing);
 #   - runs_one_of: the judged file itself passes; a wrapper that spawns it (alive, its child
 #     passing), a decoy at a path named like it, and a process whose argv[0] is the judged path
-#     but which runs another file (ps shows the lie) all fail.
+#     but which runs another file (ps shows the lie) all fail;
+#   - no process the cell started outlives it.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
@@ -69,27 +73,56 @@ npm_home() { # home: an npm global install; INSTS its executable
   mkdir -p "$1/prefix/bin" && ln -s ../lib/node_modules/@lukaso/sheepdog/bin/sheepdog "$1/prefix/bin/sheepdog"
   INSTS=$(real "$p/node_modules/@lukaso/sheepdog-darwin-universal/$X")
 }
-shim() { # shim-path launcher-path-relative-to-the-shim's-dir: pnpm's global shim, in the shape pnpm
-  # 10.2.1 wrote (measured); cell 18 puts the pinned 10.18.2's own shim through the gate
-  cat > "$1" <<SH
+# pnpm's global shim for a #!/bin/sh bin: the text pnpm 10.18.2 writes (measured 2026-10-02 with
+# the pinned pnpm on a throwaway package), with @T@ the launcher's path relative to the shim's dir
+# and @NP@ the NODE_PATH value; and 10.2.1's (measured 2026-10-02), to show another version's shim
+# is refused
+cat > "$FX/shim.1018" <<'SH'
 #!/bin/sh
-basedir=\$(dirname "\$(echo "\$0" | sed -e 's,\\\\,/,g')")
+basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
 
-case \`uname\` in
-    *CYGWIN*) basedir=\`cygpath -w "\$basedir"\`;;
+case `uname` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=`cygpath -w "$basedir"`
+        fi
+    ;;
 esac
 
-if [ -z "\$NODE_PATH" ]; then
-  export NODE_PATH="/nonexistent"
+if [ -z "$NODE_PATH" ]; then
+  export NODE_PATH="@NP@"
 else
-  export NODE_PATH="/nonexistent:\$NODE_PATH"
+  export NODE_PATH="@NP@:$NODE_PATH"
 fi
-if [ -x "\$basedir//bin/sh" ]; then
-  exec "\$basedir//bin/sh"  "\$basedir/$2" "\$@"
+if [ -x "$basedir//bin/sh" ]; then
+  exec "$basedir//bin/sh"  "$basedir/@T@" "$@"
 else
-  exec /bin/sh  "\$basedir/$2" "\$@"
+  exec /bin/sh  "$basedir/@T@" "$@"
 fi
 SH
+cat > "$FX/shim.1021" <<'SH'
+#!/bin/sh
+basedir=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
+
+case `uname` in
+    *CYGWIN*) basedir=`cygpath -w "$basedir"`;;
+esac
+
+if [ -z "$NODE_PATH" ]; then
+  export NODE_PATH="@NP@"
+else
+  export NODE_PATH="@NP@:$NODE_PATH"
+fi
+if [ -x "$basedir//bin/sh" ]; then
+  exec "$basedir//bin/sh"  "$basedir/@T@" "$@"
+else
+  exec /bin/sh  "$basedir/@T@" "$@"
+fi
+SH
+grep -q 'sed -e .s,\\\\,/,g.' "$FX/shim.1018" || fail "the shim template lost its sed backslashes"
+shim() { # shim-path target [template] [NODE_PATH]
+  python3 -c 'import sys; t, d, tg, np = sys.argv[1:5]; open(d, "w").write(open(t).read().replace("@T@", tg).replace("@NP@", np))' \
+    "${3:-$FX/shim.1018}" "$1" "$2" "${4:-/nonexistent/.pnpm/node_modules}"
   chmod 755 "$1"
 }
 G=$FX/gate
@@ -129,6 +162,42 @@ pn "$G/pnnone"; printf '#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$@"\n' > 
 gate "a shim that names no launcher" refuse "$G/pnnone" "$INSTS" "$G/pnnone/pnpm/sheepdog"
 pn "$G/pnsh"; mkdir -p "$G/pnsh/pnpm/bin" && printf '#!/bin/sh\n' > "$G/pnsh/pnpm/bin/sh" && chmod 755 "$G/pnsh/pnpm/bin/sh"
 gate "a shim whose \$basedir//bin/sh exists" refuse "$G/pnsh" "$INSTS" "$G/pnsh/pnpm/sheepdog"
+# shims that are not what pnpm 10.18.2 writes; each still names the good launcher in its exec lines
+# (a gate that reads only those lines passes them), and each would run the unjudged outside file
+PL=global/5/.pnpm/@lukaso+sheepdog@0.1.0/node_modules/@lukaso/sheepdog/bin/sheepdog
+EV='"$basedir/../../../outside/pd/Sheepdog.app/Contents/MacOS/sheepdog"'
+bsn=0
+badshim() { # what old new: the good shim with old replaced by new (once)
+  bsn=$((bsn + 1)); h=$G/bs$bsn; pn "$h"
+  python3 -c 'import sys; p, a, b = sys.argv[1:4]; s = open(p).read(); assert s.count(a) >= 1, a; open(p, "w").write(s.replace(a, b, 1))' "$h/pnpm/sheepdog" "$2" "$3" \
+    || { fail "$1: the fixture edit did not apply"; return; }
+  gate "$1" refuse "$h" "$INSTS" "$h/pnpm/sheepdog"
+}
+badshim "a shim with a line before its exec block that runs another file" 'if [ -x "$basedir//bin/sh" ]' "$EV \"\$@\"
+if [ -x \"\$basedir//bin/sh\" ]"
+badshim "a shim with an exec that passes no arguments" '
+case' "
+exec $EV
+case"
+badshim "a shim whose exec runs another file with the launcher as its argument" 'exec /bin/sh  "$basedir/' "exec /bin/sh  $EV \"\$basedir/"
+badshim "a shim with an exec line that ends in a comment" '
+case' "
+exec $EV \"\$@\" # x
+case"
+bsn=$((bsn + 1)); h=$G/bs$bsn; pn "$h"; shim "$h/pnpm/sheepdog" "$PL" "" '$(/usr/bin/true)'
+grep -q 'NODE_PATH="\$(/usr/bin/true)"' "$h/pnpm/sheepdog" || fail "the NODE_PATH fixture did not apply"
+gate "a shim whose NODE_PATH runs a command" refuse "$h" "$INSTS" "$h/pnpm/sheepdog"
+bsn=$((bsn + 1)); h=$G/bs$bsn; pn "$h"; shim "$h/pnpm/sheepdog" "$PL" "$FX/shim.1021"
+gate "pnpm 10.2.1's shim (another version's text)" refuse "$h" "$INSTS" "$h/pnpm/sheepdog"
+# a target with a $ in it: read literally it reaches a good launcher (a directory named $Q), but sh
+# expands $Q to nothing and runs the outside launcher
+bsn=$((bsn + 1)); h=$G/bs$bsn; pn "$h"; mkdir -p "$h/pnpm/\$Q"
+pkgdir "$G/outl/@lukaso/sheepdog"; exe_at "$G/outl/@lukaso/sheepdog-darwin-universal"
+shim "$h/pnpm/sheepdog" '$Q/../../../outl/@lukaso/sheepdog/bin/sheepdog'
+cmp -s "$h/pnpm/\$Q/../../../outl/@lukaso/sheepdog/bin/sheepdog" "$L" && [ -f "$h/pnpm/../../../outl/@lukaso/sheepdog/bin/sheepdog" ] \
+  || fail "the \$ fixture does not reach a good launcher literally and the outside one expanded (the row would prove nothing)"
+gate "a shim whose target has a \$ in it" refuse "$h" "$INSTS
+$(real "$G/outl/@lukaso/sheepdog-darwin-universal/$X")" "$h/pnpm/sheepdog"
 # a launcher copy that is not the package's
 npm_home "$G/diff"; printf '# changed\n' >> "$G/diff/prefix/lib/node_modules/@lukaso/sheepdog/bin/sheepdog"
 gate "a launcher that differs from the package's" refuse "$G/diff" "$INSTS" "$G/diff/prefix/bin/sheepdog"
@@ -152,7 +221,7 @@ pcomm() { c=$(ps -o comm= -p "$1" 2>/dev/null); [ -n "$c" ] && real "$c" 2>/dev/
 "$J" 5 & p=$!; PIDS="$PIDS $p"; cw $p '[ "$(pcomm $p)" = "$J" ]'
 runs_one_of $p "$J" && pass "control: the judged file itself passes the process check" || fail "control: the judged file itself fails the process check"
 printf '#!/bin/sh\n"%s" "$@"\nexit $?\n' "$J" > "$FX/wrap"; chmod 755 "$FX/wrap"
-"$FX/wrap" 5 & w=$!; PIDS="$PIDS $w"; cw $w '[ -n "$(pgrep -P $w)" ]'; k=$(pgrep -P $w | head -1)
+"$FX/wrap" 30 & w=$!; PIDS="$PIDS $w"; cw $w '[ -n "$(pgrep -P $w)" ]'; k=$(pgrep -P $w | head -1); PIDS="$PIDS $k"
 if kill -0 $w 2>/dev/null && [ -n "$k" ] && runs_one_of "$k" "$J"; then
   runs_one_of $w "$J" && fail "control: a spawning wrapper passed the process check" || pass "control: a spawning wrapper (alive, its child passing) fails the process check"
 else fail "control: the wrapper is not alive with a child that runs the judged file (the row would prove nothing)"; fi
@@ -163,4 +232,9 @@ perl -e 'exec {"/bin/sleep"} $ARGV[0], "5" or die' "$J" & q=$!; PIDS="$PIDS $q";
 if [ "$(pcomm $q)" = "$J" ]; then
   runs_one_of $q "$J" && fail "control: a process with the judged file's argv[0] that runs /bin/sleep passed" || pass "control: argv[0] that names the judged file, running /bin/sleep, fails the process check (ps shows the lie)"
 else fail "control: ps does not show the argv[0] lie ('$(pcomm $q)'): the row would prove nothing"; fi
+# nothing the cell started outlives it (the wrapper's child too)
+for p in $PIDS; do { kill $p; wait $p; } 2>/dev/null; done
+i=0; while [ -n "$(pgrep -f "$FX/")" ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+left=$(pgrep -fl "$FX/")
+[ -z "$left" ] && pass "no fixture process is left" || { fail "fixture processes left: $left"; for x in $(pgrep -f "$FX/"); do kill "$x"; done; }
 finish

@@ -38,23 +38,62 @@ npm_target() {
   return 1
 }
 
+# npm_pnpm_shim TARGET NODE_PATH: the global shim pnpm 10.18.2 writes for a #!/bin/sh bin at
+# "$basedir/TARGET" (measured 2026-10-02 with the pinned pnpm; t_npm_gates.sh's fixture is that
+# measured text, and cell 18 puts the real one through npm_gate)
+npm_pnpm_shim() {
+  cat <<EOF
+#!/bin/sh
+basedir=\$(dirname "\$(echo "\$0" | sed -e 's,\\\\,/,g')")
+
+case \`uname\` in
+    *CYGWIN*|*MINGW*|*MSYS*)
+        if command -v cygpath > /dev/null 2>&1; then
+            basedir=\`cygpath -w "\$basedir"\`
+        fi
+    ;;
+esac
+
+if [ -z "\$NODE_PATH" ]; then
+  export NODE_PATH="$2"
+else
+  export NODE_PATH="$2:\$NODE_PATH"
+fi
+if [ -x "\$basedir//bin/sh" ]; then
+  exec "\$basedir//bin/sh"  "\$basedir/$1" "\$@"
+else
+  exec /bin/sh  "\$basedir/$1" "\$@"
+fi
+EOF
+}
+
 # npm_gate HOME INSTS ENTRY LAUNCHER: one line per refusal on stdout; rc 0 only when there is none.
 #   - ENTRY, the PATH entry, reaches the launcher as a link (the launcher walks $0) or as a pnpm
-#     shim (it runs `/bin/sh "$basedir/<launcher>"`; its `$basedir//bin/sh`, which it would run
-#     instead, must not exist); each launcher it reaches is byte-equal LAUNCHER and resolves to one
-#     of INSTS (real paths, one per line);
-#   - every copy of the launcher under HOME is byte-equal LAUNCHER, and a copy that resolves to an
-#     executable resolves to one of INSTS (one that resolves to nothing runs nothing).
+#     shim, which must be exactly the text npm_pnpm_shim gives for the target and NODE_PATH it
+#     names (neither may hold a quote, $, backquote or backslash), and whose `$basedir//bin/sh`,
+#     which it would run instead, must not exist; each launcher it reaches is byte-equal LAUNCHER
+#     and resolves to one of INSTS (real paths, one per line);
+#   - every copy of the launcher at a package path under HOME (*/@lukaso/sheepdog/bin/sheepdog;
+#     bun's cache and pnpm's store keep theirs under other names, and only ENTRY is ever run) is
+#     byte-equal LAUNCHER, and a copy that resolves to an executable resolves to one of INSTS (one
+#     that resolves to nothing runs nothing).
 # Any refusal stands, whatever order the copies are found in.
 npm_gate() {
   ng_bad=0 ng_nl='
 '
   if [ -L "$3" ]; then ng_a0=$3
   elif [ -f "$3" ] && grep -q '^basedir=' "$3"; then
-    ng_a0=$(sed -n 's/^ *exec .*"\$basedir\/\([^"]*\)" "\$@"$/\1/p' "$3" | sort -u | while IFS= read -r ng_p; do printf '%s/%s\n' "$(dirname "$3")" "$ng_p"; done)
+    ng_a0=""
+    ng_t=$(sed -n 's/^  exec \/bin\/sh  "\$basedir\/\(.*\)" "\$@"$/\1/p' "$3")
+    ng_np=$(sed -n 's/^  export NODE_PATH="\(.*\)"$/\1/p' "$3" | head -1)
+    case $ng_t$ng_np in
+      *[\"\$\`\\]*|'') echo "the pnpm shim $3 names a target or NODE_PATH with a quote, \$, backquote or backslash, or none" ;;
+      *) if [ "$(printf '%s\n' "$ng_t" | wc -l | tr -d ' ')" = 1 ] && npm_pnpm_shim "$ng_t" "$ng_np" | cmp -s - "$3"; then ng_a0=$(dirname "$3")/$ng_t
+         else echo "the pnpm shim $3 is not the text pnpm 10.18.2 writes"; fi ;;
+    esac
+    [ -n "$ng_a0" ] || ng_bad=1
     if [ -e "$(dirname "$3")//bin/sh" ] || [ -L "$(dirname "$3")//bin/sh" ]; then echo "the pnpm shim $3 would run $(dirname "$3")/bin/sh"; ng_bad=1; fi
-  else ng_a0=""; fi
-  [ -n "$ng_a0" ] || { echo "the PATH entry $3 is neither a link nor a pnpm shim that names a launcher"; ng_bad=1; }
+  else ng_a0=""; echo "the PATH entry $3 is neither a link nor a pnpm shim"; ng_bad=1; fi
   ng_cp=$(find "$1" -path '*/@lukaso/sheepdog/bin/sheepdog' -type f)
   ng_ifs=$IFS; IFS=$ng_nl; set -f
   for ng_w in $(printf '%s\n' "$ng_a0" | sed 's/^/entry /'; printf '%s\n' "$ng_cp" | sed 's/^/copy /'); do
