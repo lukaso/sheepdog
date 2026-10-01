@@ -11,9 +11,10 @@
 #     reaches an unjudged launcher (a link or a pnpm shim), a shim that names no launcher, a shim
 #     whose `$basedir//bin/sh` exists, a shim that is not pnpm 10.18.2's text though its exec lines
 #     name the good launcher (a line before them, an exec with no arguments, a trailing comment,
-#     pnpm 10.2.1's shim), pnpm 10.18.2's text whose target or NODE_PATH holds a forbidden character
-#     (a command in NODE_PATH, a $ in the target, the launcher as another file's argument: its
-#     quotes), a launcher copy that differs from the package's, an entry that is neither a link nor
+#     pnpm 10.2.1's shim; and one exec that runs another file with the launcher as its argument,
+#     whose captured target holds a quote and $, so the character check refuses it first), pnpm
+#     10.18.2's text whose target or NODE_PATH holds a forbidden character (a command in NODE_PATH,
+#     a $ in the target), a launcher copy that differs from the package's, an entry that is neither a link nor
 #     a shim, and a layout that resolves to nothing; a copy that resolves to nothing beside a good
 #     one passes (it runs nothing);
 #   - runs_one_of: the judged file itself passes; a wrapper that spawns it (alive, its child
