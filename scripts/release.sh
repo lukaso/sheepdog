@@ -362,6 +362,7 @@ npm_check() { # dir
   npy packages "$d" "$nv" "$nt/ref" || die "an npm package is refused (above)"
   tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"
   b=$nt/p/package/Sheepdog.app
+  /usr/bin/plutil -extract SheepdogControlBuild raw -o - "$b/Contents/Info.plist" >/dev/null 2>&1 && die "the darwin package holds a control build (SheepdogControlBuild in its Info.plist)"
   rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"
   rt_staple_ok "$b" || die "stapler: the darwin package's bundle has no valid staple ticket"
   rt_spctl_ok "$b" || die "spctl: Gatekeeper rejects the darwin package's bundle"
@@ -384,6 +385,8 @@ verify() { # dir -> exit 1 naming the tool that refused
   trap 'rm -rf "$vt"' EXIT; trap 'rm -rf "$vt"; exit 1' HUP INT TERM
   mkdir -m 700 "$vt" && tar -xzf "$arc" -C "$vt" || die "cannot unpack $arc"
   a=$vt/Sheepdog.app
+  # a control build's bundle carries the control marker (bundle.sh --control): never a release
+  /usr/bin/plutil -extract SheepdogControlBuild raw -o - "$a/Contents/Info.plist" >/dev/null 2>&1 && die "the archive holds a control build (SheepdogControlBuild in its Info.plist)"
   rt_meets "$a" && rt_meets "$a/Contents/MacOS/sheepdog" || die "codesign: the bundle does not meet the release requirement"
   rt_staple_ok "$a" || die "stapler: no valid staple ticket"
   rt_spctl_ok "$a" || die "spctl: Gatekeeper rejects the bundle"

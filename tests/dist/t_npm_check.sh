@@ -79,6 +79,10 @@ for v in "DT|add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outsid
   nc; r=$?
   [ $r = 1 ] && grep -q "$why" "$FX/o" && ! grep -q codesign "$FX/o" && pass "$t with $op $nm: refused ($why), before any real-tool check" || fail "$t $op $nm: rc=$r $(tail -1 "$FX/o")"
 done
+# a control build's bundle (the control marker) in the darwin package: refused before any real tool
+app_plain=$app; mkdir -p "$FX/mk" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -insert SheepdogControlBuild -bool true "$FX/mk/Sheepdog.app/Contents/Info.plist" || exit 3
+app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain; nc; r=$?
+[ $r = 1 ] && grep -q 'a control build' "$FX/o" && ! grep -q codesign "$FX/o" && pass "a control build's bundle in the darwin package: refused before any real-tool check" || fail "marked: rc=$r $(tail -1 "$FX/o")"
 mk signed false; nc; r=$?
 [ $r = 1 ] && grep -q 'codesign' "$FX/o" && pass "an unsigned bundle in the darwin package: refused, by codesign" || fail "unsigned bundle: rc=$r $(tail -1 "$FX/o")"
 finish

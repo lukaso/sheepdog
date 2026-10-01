@@ -30,10 +30,11 @@ case $(lipo -archs "$A/Contents/MacOS/sheepdog" 2>/dev/null) in *x86_64*arm64*|*
 "$B" "$FX/bin" "$FX/ctl" 0.1.0 7 --release-id --control >/dev/null 2>&1 || fail "bundle.sh --release-id --control failed"
 [ "$(key "$FX/ctl/Sheepdog.app" SheepdogControlBuild)" = true ] && pass "the control marker with --control" || fail "no control marker with --control: '$(key "$FX/ctl/Sheepdog.app" SheepdogControlBuild)'"
 # the mechanism: the same binary, ad-hoc signed (no identity, nothing run), gets another CDHash
-cdh() { for a in arm64 x86_64; do /usr/bin/codesign -d -vvv --arch $a "$1" 2>&1 | sed -n 's/^CDHash=//p'; done | tr '\n' ' '; }
+cdh() { /usr/bin/codesign -d -vvv --arch "$2" "$1" 2>&1 | sed -n 's/^CDHash=//p'; }
 codesign -s - -f "$FX/rel/Sheepdog.app" 2>/dev/null && codesign -s - -f "$FX/ctl/Sheepdog.app" 2>/dev/null || fail "ad-hoc signing"
-c1=$(cdh "$FX/rel/Sheepdog.app") c2=$(cdh "$FX/ctl/Sheepdog.app")
-[ "$(echo $c1 | wc -w | tr -d ' ')" = 2 ] && [ "$c1" != "$c2" ] && pass "the control marker changes the CDHash of both slices" || fail "CDHashes: '$c1' / '$c2'"
+d=0; for a in arm64 x86_64; do x=$(cdh "$FX/rel/Sheepdog.app" $a) y=$(cdh "$FX/ctl/Sheepdog.app" $a)
+  [ -n "$x" ] && [ -n "$y" ] && [ "$x" != "$y" ] && d=$((d + 1)); done
+[ $d = 2 ] && pass "the control marker changes the CDHash of both slices" || fail "the CDHash differs on $d of 2 slices"
 "$B" "$FX/bin" "$FX/ctl2" 0.1.0 7 --control >/dev/null 2>&1 && fail "--control without --release-id accepted" || pass "--control without --release-id refused"
 [ ! -e "$FX/ctl2/Sheepdog.app" ] || fail "--control without --release-id made a bundle"
 

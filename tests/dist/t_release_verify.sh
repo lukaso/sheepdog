@@ -24,4 +24,11 @@ v env PATH="$FX/liar:$PATH"; rc=$?
 [ $rc = 1 ] && grep -q 'codesign' "$FX/o" && pass "with lying codesign, xcrun and spctl on PATH: still refused, by codesign" || fail "liars: rc=$rc $(tail -1 "$FX/o")"
 v env DEVELOPER_DIR="$FX/liar-dev"; rc=$?
 [ $rc = 1 ] && pass "with a DEVELOPER_DIR set: still refused" || fail "DEVELOPER_DIR: rc=$rc"
+# a control build's bundle (the control marker) is never a release: refused before any real tool
+mkdir -p "$FX/mk" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -insert SheepdogControlBuild -bool true "$FX/mk/Sheepdog.app/Contents/Info.plist" || exit 3
+"$SD_ROOT/scripts/lib/archive.sh" make "$FX/mk/Sheepdog.app" "$D/sheepdog-macos-universal.tar.gz.m" || exit 3
+mv "$D/sheepdog-macos-universal.tar.gz" "$D/u.tgz" && mv "$D/sheepdog-macos-universal.tar.gz.m" "$D/sheepdog-macos-universal.tar.gz"
+v env; rc=$?
+[ $rc = 1 ] && grep -q 'a control build' "$FX/o" && ! grep -q codesign "$FX/o" && pass "a control build's archive (the marker): refused before any real-tool check" || fail "marked: rc=$rc $(tail -1 "$FX/o")"
+mv "$D/u.tgz" "$D/sheepdog-macos-universal.tar.gz"
 finish

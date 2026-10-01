@@ -5,10 +5,12 @@
 #     and Gatekeeper (spctl) rejects the control's bundle too; a copy of the rc without its staple
 #     ticket refused by stapler even with a DEVELOPER_DIR whose xcrun says yes to everything;
 #   - npm-check: the rc accepted; a copy whose release archive does not match the manifest
-#     refused by its hash; a tampered archive (the manifest updated) refused by codesign; the
-#     control's archive (Developer ID signed, the manifest updated) refused as not byte-identical
-#     to the npm package's bundle; the control refused by its mode; a copy of the control with
-#     the mode and control flag cleared refused by stapler;
+#     refused by its hash; a tampered archive (the manifest updated) refused by the comparison;
+#     the control's archive in the release's place refused by the archive check (no staple
+#     ticket); the control refused by its mode; a copy of the control with the mode and control
+#     flag cleared refused by stapler;
+#   - the control is not the release: it carries the control marker, and its CDHash differs on
+#     both slices (rc.1's control does neither: it was built from a tag before the marker);
 #   - the planner accepts the rc's manifest (with this checkout's tag as the remote tag) and its
 #     plan passes --validate;
 #   - the door: the rc's executable allowed; a copy with a changed Info.plist byte, and a copy
@@ -49,9 +51,10 @@ mkdir -p "$FX/cb" && tar -xzf "$CT/sheepdog-macos-universal.tar.gz" -C "$FX/cb" 
 mkdir -p "$FX/rb" && tar -xzf "$RC/sheepdog-macos-universal.tar.gz" -C "$FX/rb" || fail "cannot unpack the rc"
 [ "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$FX/cb/Sheepdog.app/Contents/Info.plist" 2>/dev/null)" = true ] \
   && pass "the control carries the control marker" || fail "the control has no control marker (built from a tag before the marker: rc.1's is; use the next rc's control)"
-cdh() { for a in arm64 x86_64; do /usr/bin/codesign -d -vvv --arch $a "$1" 2>&1 | sed -n 's/^CDHash=//p'; done | tr '\n' ' '; }
-c1=$(cdh "$FX/rb/Sheepdog.app") c2=$(cdh "$FX/cb/Sheepdog.app")
-[ -n "$c1" ] && [ "$c1" != "$c2" ] && pass "the control's CDHashes differ from the rc's" || fail "the control shares the rc's CDHashes ($c1/ $c2)"
+cdh() { /usr/bin/codesign -d -vvv --arch "$2" "$1" 2>&1 | sed -n 's/^CDHash=//p'; }
+d=0; for a in arm64 x86_64; do x=$(cdh "$FX/rb/Sheepdog.app" $a) y=$(cdh "$FX/cb/Sheepdog.app" $a)
+  [ -n "$x" ] && [ -n "$y" ] && [ "$x" != "$y" ] && d=$((d + 1)); done
+[ $d = 2 ] && pass "the control's CDHash differs from the rc's on both slices" || fail "the control's CDHash differs from the rc's on $d of 2 slices (both must be read and differ)"
 # the spctl row counts only for a bundle that is there and meets the requirement (a missing one
 # is rejected too)
 if [ -d "$FX/cb/Sheepdog.app" ] && rt_meets "$FX/cb/Sheepdog.app"; then
@@ -85,7 +88,8 @@ rel npm-check --out "$FX/xa" "$tag" > "$FX/o" 2>&1; r=$?
 #     not the npm package's bundle, byte for byte
 cpy "$RC" xc; cp "$CT/sheepdog-macos-universal.tar.gz" "$FX/xc/$tag/sheepdog-macos-universal.tar.gz" && setsum xc sheepdog-macos-universal.tar.gz || fail "the control's archive could not be put in the copy"
 rel npm-check --out "$FX/xc" "$tag" > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q "the release archive fails its check" "$FX/o" && pass "npm-check: the control's archive in the release's place refused (no staple ticket: the archive check)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q "the files are not exactly the bundle's" "$FX/o" && ! grep "the files are not exactly" "$FX/o" | grep -q 'Sheepdog.app/Contents/CodeResources' \
+  && pass "npm-check: the control's archive in the release's place refused (no staple ticket: the archive check)" || fail "npm-check control archive: $r $(tail -1 "$FX/o")"
 # (d) the release archive holds only a symlink to a bundle elsewhere (manifest updated)
 cpy "$RC" xs && python3 "$SD_ROOT/tests/lib/tgz-edit.py" "$RC/sheepdog-macos-universal.tar.gz" "$FX/xs/$tag/sheepdog-macos-universal.tar.gz" only-symlink Sheepdog.app ../p/package/Sheepdog.app \
   && setsum xs sheepdog-macos-universal.tar.gz || fail "the symlink archive could not be made"
