@@ -243,11 +243,19 @@ fn s2_mode_none_kills_a_member_seen_while_running() {
     assert!(alive.is_empty(), "a member seen while running survived: {alive:?}");
 }
 
-/// The scan while running costs under 1 % CPU: a 3 s job costs at most 30 ms more CPU than
-/// an instant job (the difference is the scan; start-up is in both). Minimum of 3 samples each,
-/// so contention from other tests cannot inflate the result.
+/// The scan's cost while a job runs: a 3 s job costs at most this much more CPU than an instant
+/// job (the difference is the scan; start-up is in both), with the budget 1 % of one core or 3 %
+/// per 1000 of this user's processes, whichever is larger (the scan reads every one of them on
+/// each tick, so its cost grows with their number; PHASE3.md, the scan-cost decision). Minimum of
+/// 3 samples each, so contention from other tests cannot inflate the result.
 #[test]
-fn s2_the_scan_costs_under_one_percent_cpu() {
+fn s2_the_scan_cost_stays_in_its_per_process_budget() {
+    // this user's processes, as `ps` lists them
+    let uid = unsafe { libc::getuid() }.to_string();
+    let out = Command::new("ps").args(["-A", "-o", "uid="]).output().expect("ps");
+    let own = String::from_utf8_lossy(&out.stdout).split_whitespace().filter(|u| *u == uid).count() as u64;
+    assert!(own > 0, "ps listed none of this user's processes");
+    let budget = Duration::from_millis(std::cmp::max(30, 90 * own / 1000));
     fn cpu(args: &[&str]) -> Duration {
         let child = Command::new(sheepdog()).arg("run").arg("--").args(args).spawn().unwrap();
         let pid = child.id() as i32;
@@ -263,7 +271,7 @@ fn s2_the_scan_costs_under_one_percent_cpu() {
     let base = (0..3).map(|_| cpu(&["true"])).min().unwrap();
     let job = (0..3).map(|_| cpu(&["/bin/sleep", "3"])).min().unwrap();
     let scan = job.saturating_sub(base);
-    assert!(scan < Duration::from_millis(30), "the scan used {scan:?} of CPU in a 3 s run (> 1 %; start-up {base:?})");
+    assert!(scan < budget, "the scan used {scan:?} of CPU in a 3 s run, over its budget of {budget:?} ({own} processes of this user; start-up {base:?})");
 }
 
 /// Full cell 24 (macOS, PLAN.md §3.2): a member (C) re-disclaims after it was observed and
