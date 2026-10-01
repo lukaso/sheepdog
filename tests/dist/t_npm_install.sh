@@ -6,12 +6,18 @@
 # temp prefix with a temp HOME, from a static registry on 127.0.0.1 (no `npm publish`, no
 # registry software). For each manager:
 #   - the installed executable is the local tarball's (byte for byte), and the door allows it;
-#   - the process started through the PATH entry is the bundle's executable (same pid: the sh
-#     launcher execs), and TERM to that pid ends the job's whole tree, a setsid escapee included;
+#   - before anything runs, every installed copy of the executable is the tarball's and has the
+#     exec door's yes, and the launcher's own target is one of them, or nothing of that manager
+#     runs; with SD_NPM_RC_DIR every installed bundle is the release archive's, file by file, and
+#     its staple validates;
+#   - the process started through the PATH entry runs one of those judged files (lsof's txt entry;
+#     same pid: the sh launcher execs), and TERM to that pid ends the job's whole tree, a setsid
+#     escapee included;
 #   - the job's signal dispositions, mask and environment equal a direct run of the bundle (pnpm:
 #     but NODE_PATH, a stated limit), for three callers;
 #   - no installed file is group- or world-writable (npm, pnpm; bun's modes are recorded: a limit).
-# Controls: a wrapper that spawns instead of exec'ing fails the process check; a registry without
+# Controls: the executable itself passes the process check, a wrapper that spawns it and a decoy
+# named like it fail; a registry without
 # the platform package installs no bundle, and the launcher names the missing package.
 set -u
 . "$(dirname "$0")/lib.sh"
@@ -124,6 +130,14 @@ callers() { # entry -> the probe's output for three callers, into $FX/c.<caller>
 callers "$EXE"; for c in default ignore block; do cp "$FX/c.$c" "$FX/d.$c"; done
 [ -s "$FX/d.default" ] && ! cmp -s "$FX/d.default" "$FX/d.ignore" && pass "control: the callers differ in a direct run" || fail "control: the callers do not differ"
 
+# runs_one_of PID LIST: the file PID is running (its txt entry in lsof, not its argv[0]), by real
+# path, is one of LIST (one real path per line)
+runs_one_of() {
+  f=$(/usr/sbin/lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+  [ -n "$f" ] || return 1
+  f=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")
+  printf '%s\n' "$2" | grep -qxF "$f"
+}
 for m in npm pnpm bun; do
   if ! install $m; then fail "$m: install failed: $(tail -3 "$FX/inst.$m" | tr '\n' ' ')"; continue; fi
   e=$BIN/sheepdog
@@ -140,6 +154,20 @@ for m in npm pnpm bun; do
   done
   [ $ok = yes ] || continue
   pass "$m: every installed copy of the executable ($(printf '%s\n' "$insts" | grep -c .)) is the local tarball's, and the door allows it"
+  # the launcher's own target (npm/sheepdog/bin/sheepdog's resolution, for every installed copy of
+  # the launcher) must be one of the judged files before anything runs
+  tg=no
+  for lf in $(find "$FX/home-$m" -path '*/@lukaso/sheepdog/bin/sheepdog' -type f); do
+    pkg=$(cd -P "$(dirname "$lf")/.." 2>/dev/null && pwd -P) || continue
+    for dir in "$pkg/node_modules/@lukaso/sheepdog-darwin-universal" "$pkg/../sheepdog-darwin-universal"; do
+      if [ -x "$dir/Sheepdog.app/Contents/MacOS/sheepdog" ]; then
+        t=$(cd -P "$dir/Sheepdog.app/Contents/MacOS" && pwd -P)/sheepdog
+        if printf '%s\n' "$insts" | grep -qxF "$t"; then tg=yes; else tg=bad; fail "$m: the launcher $lf would run $t, which the door did not judge"; fi
+        break
+      fi
+    done
+  done
+  [ $tg = yes ] || { [ $tg = bad ] || fail "$m: no installed launcher resolves to a judged executable"; continue; }
   if [ -n "${SD_NPM_RC_DIR:-}" ]; then
     for inst in $insts; do
     # the whole installed bundle is the release archive's (paths, types, modes, content), stapled
@@ -171,9 +199,9 @@ PY2
   # is not the launched process's)
   env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
   i=0; while [ ! -s "$FX/esc" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-  comm=$(ps -o comm= -p $jp 2>/dev/null)
-  creal=$(cd -P "$(dirname "$comm")" 2>/dev/null && pwd -P)/$(basename "$comm")
-  printf '%s\n' "$insts" | grep -qxF "$creal" && pass "$m: the PATH entry's process is one of the bundle executables the door judged (pid $jp)" || fail "$m: pid $jp is '$comm', not one the door judged"
+  if runs_one_of $jp "$insts"; then pass "$m: the PATH entry's process runs one of the bundle executables the door judged (pid $jp)"
+  else fail "$m: pid $jp runs '$(/usr/sbin/lsof -a -p $jp -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)', not one the door judged"
+    kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null; continue; fi
   ep=$(cut -d' ' -f1 "$FX/esc" 2>/dev/null); es=$(cut -d' ' -f2- "$FX/esc" 2>/dev/null)
   [ -n "$ep" ] && [ "$(LC_ALL=C ps -o lstart= -p "$ep" 2>/dev/null)" = "$es" ] && pass "$m: the escapee is alive before the TERM" || fail "$m: the escapee did not start (record '$(cat "$FX/esc" 2>/dev/null)', ps '$(ps -o lstart= -p "$ep" 2>/dev/null)')"
   kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null; sleep 0.5
@@ -193,10 +221,23 @@ PY2
   else [ -z "$ww" ] && pass "$m: no installed file is group- or world-writable" || fail "$m: writable: $ww"; fi
 done
 
-# control: a wrapper that spawns the executable (no exec) is caught by the process check
+# controls of the process check (runs_one_of, the rows' own function), against the bundle's
+# executable: the executable itself passes; a wrapper that spawns it (no exec) fails; and a decoy, a
+# program that only sleeps, at .../Sheepdog.app/Contents/MacOS/sheepdog (a name-only check passes it),
+# fails
+ER=$(cd -P "$(dirname "$EXE")" && pwd -P)/sheepdog
+env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$EXE" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
+runs_one_of $wp "$ER" && pass "control: the executable itself passes the process check" || fail "control: the executable itself fails the process check"
+wait $wp 2>/dev/null
 printf '#!/bin/sh\n"%s" "$@"\n' "$EXE" > "$FX/wrap"; chmod 755 "$FX/wrap"
 env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$FX/wrap" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
-case $(ps -o comm= -p $wp 2>/dev/null) in *Sheepdog.app/Contents/MacOS/sheepdog) fail "control: the spawning wrapper passed the process check" ;; *) pass "control: a spawning wrapper fails the process check" ;; esac
+runs_one_of $wp "$ER" && fail "control: the spawning wrapper passed the process check" || pass "control: a spawning wrapper fails the process check"
+wait $wp 2>/dev/null
+mkdir -p "$FX/decoy/Sheepdog.app/Contents/MacOS" && printf '#include <unistd.h>\nint main(void){sleep(2);return 0;}\n' > "$FX/decoy.c" \
+  && cc -o "$FX/decoy/Sheepdog.app/Contents/MacOS/sheepdog" "$FX/decoy.c" || exit 3
+"$FX/decoy/Sheepdog.app/Contents/MacOS/sheepdog" 2 & wp=$!; sleep 0.3
+case $(ps -o comm= -p $wp 2>/dev/null) in *Sheepdog.app/Contents/MacOS/sheepdog) ;; *) fail "control: the decoy is not running under the bundle's name (the row would prove nothing)" ;; esac
+runs_one_of $wp "$ER" && fail "control: a decoy named like the bundle passed the process check" || pass "control: a decoy named like the bundle fails the process check"
 wait $wp 2>/dev/null
 # control: no platform package in the registry
 kill $rp 2>/dev/null; wait $rp 2>/dev/null

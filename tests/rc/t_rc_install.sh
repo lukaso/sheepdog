@@ -17,7 +17,7 @@ set -u
 . "$(dirname "$0")/../dist/lib.sh"
 [ "$(uname -s)" = Darwin ] || { echo "FAIL: the rc leg needs macOS"; exit 1; }
 fx_dir
-RC=$SD_RC_DIR CT=$SD_RC_CONTROL_DIR
+RC=${SD_RC_DIR%/} CT=${SD_RC_CONTROL_DIR%/}
 ARC=sheepdog-macos-universal.tar.gz
 three() { mkdir -p "$2" && cp "$1/install.sh" "$1/SHA256SUMS" "$1/$ARC" "$2/"; }
 three "$RC" "$FX/srv" && three "$CT" "$FX/srvc" && three "$RC" "$FX/srvt" || { fail "cannot copy the rc's files"; finish; }
@@ -36,12 +36,14 @@ serve() { # dir: its port into dir.port
 }
 serve "$FX/srv"; serve "$FX/srvc"; serve "$FX/srvt"
 n=0
-inst() { # served-dir HOME [extra PATH] -> rc; output in $FX/o; install.sh's TMPDIR in $TD (fresh)
-  n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"
+inst() { # served-dir HOME [extra PATH] -> rc; output in $FX/o; install.sh's TMPDIR in $TD (fresh;
+  # its mtime before the install in $TDM)
+  n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"; TDM=$(stat -f %Fm "$TD"); sleep 0.01
   env -i PATH="${3:+$3:}/usr/bin:/bin:/usr/sbin" HOME="$2" TMPDIR="$TD" SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
 }
-clean() { # what -> TMPDIR empty
-  [ -z "$(ls -A "$TD")" ] && pass "$1: nothing left in TMPDIR" || fail "$1: left in TMPDIR: $(ls -A "$TD" | tr '\n' ' ')"
+clean() { # what -> install.sh used TMPDIR (its mtime moved) and left nothing in it
+  [ "$(stat -f %Fm "$TD")" != "$TDM" ] && [ -z "$(ls -A "$TD")" ] && pass "$1: install.sh used TMPDIR and left nothing in it" \
+    || fail "$1: TMPDIR mtime $TDM -> $(stat -f %Fm "$TD"), left: $(ls -A "$TD" | tr '\n' ' ')"
 }
 xyz=${RC##*/}; xyz=${xyz#v}; xyz=${xyz%%-*}
 c12=$(sed -n 's/^ *"commit": *"\([0-9a-f]\{12\}\).*/\1/p' "$RC/MANIFEST.json")
@@ -54,7 +56,7 @@ inst "$FX/srv" "$H"; r=$?
 grep -q "$H/.local/bin is not on your PATH" "$FX/o" && pass "the PATH hint names ~/.local/bin" || fail "no PATH hint naming $H/.local/bin"
 clean "the first install"
 mkdir -p "$FX/x" && tar -xzf "$RC/$ARC" -C "$FX/x" || fail "cannot unpack the rc"
-if [ -d "$A" ] && [ ! -L "$A" ] && diff -r -q "$A" "$FX/x/Sheepdog.app" > "$FX/d" 2>&1; then pass "the installed app is a directory, file for file the release archive's bundle"
+if [ -d "$A" ] && [ ! -L "$A" ] && python3 "$SD_ROOT/tests/lib/tree-same.py" "$A" "$FX/x/Sheepdog.app" > "$FX/d" 2>&1; then pass "the installed app is a directory, the release archive's bundle (paths, types, modes, content)"
 else fail "the installed app: $(ls -ld "$A" 2>&1) $(head -3 "$FX/d" 2>/dev/null | tr '\n' ' ')"; fi
 [ -L "$L" ] && [ "$(readlink "$L")" = "$A/Contents/MacOS/sheepdog" ] && pass "~/.local/bin/sheepdog links to the app's executable" || fail "the link: $(ls -l "$L" 2>&1)"
 G="$SD_ROOT/scripts/lib/exec-guard.sh"
@@ -64,10 +66,13 @@ job() { env -i PATH=/usr/bin:/bin HOME="$J" XDG_STATE_HOME="$J/x" SHEEPDOG_STATE
 # the job's process: env in the background directly, so $! is the pid the door execs into (the
 # door judges first, with several codesign calls: poll until it has)
 env -i PATH=/usr/bin:/bin HOME="$J" XDG_STATE_HOME="$J/x" SHEEPDOG_STATE="$J/s" TMPDIR="$J" sh "$G" exec "$L" run -- /bin/sleep 5 >/dev/null 2>&1 & jp=$!
-i=0; comm=$(ps -o comm= -p $jp 2>/dev/null)
-while case $comm in sh|*/sh) true ;; *) false ;; esac && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); comm=$(ps -o comm= -p $jp 2>/dev/null); done
-[ "$comm" = "$A/Contents/MacOS/sheepdog" ] || [ "$comm" = "$L" ] && [ "$(cd "$(dirname "$(readlink "$L")")" && pwd -P)" = "$(cd "$A/Contents/MacOS" && pwd -P)" ] \
-  && pass "the job's process is the installed app's executable (pid $jp: $comm)" || fail "pid $jp is '$comm'"
+# the running file (lsof's txt entry, not argv[0]); wait while it is still env or the door's
+# shell (/bin/sh runs bash here)
+runs() { /usr/sbin/lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; }
+i=0; f=$(runs $jp)
+while case $f in */sh|*/bash|*/dash|*/env|'') true ;; *) false ;; esac && kill -0 $jp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); f=$(runs $jp); done
+fr=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/$(basename "$f")
+[ "$fr" = "$(cd -P "$A/Contents/MacOS" && pwd -P)/sheepdog" ] && pass "the job's process runs the installed app's executable (pid $jp)" || fail "pid $jp runs '$f'"
 kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null
 job sh "$G" exec "$L" run -- sh -c 'exit 7' >/dev/null 2>&1; r=$?
 [ $r = 7 ] && pass "the installed sheepdog runs a job (exit 7 passed through)" || fail "the job's exit code: $r"
@@ -85,9 +90,10 @@ clean "the second install"
 H3=$FX/home3; mkdir -p "$H3"
 inst "$FX/srv" "$H3" "$H3/.local/bin"; r=$?
 [ $r = 0 ] && ! grep -q 'is not on your PATH' "$FX/o" && pass "control: no PATH hint when ~/.local/bin is on PATH" || fail "PATH-hint control: rc=$r $(tail -1 "$FX/o")"
+clean "the PATH-hint control install"
 # refused: nothing installed, nothing left
 refused() { # home what reason
-  [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \
+  [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ ! -L "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \
     && pass "$2: refused ($3), nothing installed or left in Applications" || fail "$2: rc=$r $(tail -1 "$FX/o"); Applications: $(ls -A "$1/Applications" 2>/dev/null | tr '\n' ' ')"
   clean "$2"
 }
