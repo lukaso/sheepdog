@@ -1,5 +1,6 @@
 #!/bin/sh
-# PHASE3.md S5, cell 18 and D9, with a .dev bundle (the staple is covered in the rc leg): the four
+# PHASE3.md S5, cell 18 and D9, with a .dev bundle (with SD_NPM_RC_DIR: the rc's own packages and
+# its stapled bundle, run by tests/rc/t_rc_npm.sh; nothing is built then): the four
 # npm tarballs, packed as release.sh packs them around a release build of sheepdog, installed
 # globally with npm, pnpm (pinned: a copy of the corepack cache, no network) and bun, each into a
 # temp prefix with a temp HOME, from a static registry on 127.0.0.1 (no `npm publish`, no
@@ -16,18 +17,31 @@ set -u
 . "$(dirname "$0")/lib.sh"
 [ "$(uname -s)" = Darwin ] || { echo "SKIP (macOS only)"; exit 0; }
 fx_dir
-V=0.1.0-rc.1
-(cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
-app=$("$SD_ROOT/scripts/bundle.sh" "$FX/target/release/sheepdog" "$FX/bundle" 0.1.0 1) || { fail "bundle"; finish; }
-EXE=$app/Contents/MacOS/sheepdog
-"$SD_ROOT/scripts/lib/exec-guard.sh" check "$EXE" || { fail "the door refuses the .dev bundle"; finish; }
-
-# the packages, packed by scripts/lib/npm-pack.sh (what release.sh build runs)
 mkdir -p "$FX/tgz" "$FX/lin"
-"$SD_ROOT/scripts/lib/archive.sh" make "$app" "$FX/lin/sheepdog-macos-universal.tar.gz" || { fail "archive"; finish; }
-printf '#!/bin/sh\n' > "$FX/lin/a"; printf '#!/bin/sh\n' > "$FX/lin/x"
-sh "$SD_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepdog-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" >/dev/null \
-  || { fail "npm-pack.sh"; finish; }
+if [ -n "${SD_NPM_RC_DIR:-}" ]; then
+  # the rc leg: the release's own four packages (read only: copied), its darwin bundle the one to
+  # compare with; nothing is built
+  V=$(basename "$SD_NPM_RC_DIR"); V=${V#v}
+  for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
+    cp "$SD_NPM_RC_DIR/lukaso-$p-$V.tgz" "$FX/tgz/" || { fail "no lukaso-$p-$V.tgz in $SD_NPM_RC_DIR"; finish; }
+  done
+  mkdir -p "$FX/rcb" && tar -xzf "$FX/tgz/lukaso-sheepdog-darwin-universal-$V.tgz" -C "$FX/rcb" || { fail "cannot unpack the darwin package"; finish; }
+  app=$FX/rcb/package/Sheepdog.app
+else
+  V=0.1.0-rc.1
+  (cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
+  app=$("$SD_ROOT/scripts/bundle.sh" "$FX/target/release/sheepdog" "$FX/bundle" 0.1.0 1) || { fail "bundle"; finish; }
+fi
+EXE=$app/Contents/MacOS/sheepdog
+"$SD_ROOT/scripts/lib/exec-guard.sh" check "$EXE" || { fail "the door refuses the bundle"; finish; }
+
+if [ -z "${SD_NPM_RC_DIR:-}" ]; then
+  # the packages, packed by scripts/lib/npm-pack.sh (what release.sh build runs)
+  "$SD_ROOT/scripts/lib/archive.sh" make "$app" "$FX/lin/sheepdog-macos-universal.tar.gz" || { fail "archive"; finish; }
+  printf '#!/bin/sh\n' > "$FX/lin/a"; printf '#!/bin/sh\n' > "$FX/lin/x"
+  sh "$SD_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepdog-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" >/dev/null \
+    || { fail "npm-pack.sh"; finish; }
+fi
 # a static registry: a packument per package, the tarballs beside
 reg() { # dir port [skip-platform]
   python3 - "$1" "$2" "${3:-}" "$FX/tgz" <<'PY'

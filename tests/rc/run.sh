@@ -21,6 +21,5 @@ for t in t_*.sh; do
   [ $r = 0 ] || bad="$bad $t"
 done
 [ $n -gt 0 ] || { echo "FAIL: no rc cells ran"; exit 1; }
-# part 1 only: S3's Mac install cells and S5's cell 18 with the stapled bundle are not built yet
-[ -z "$bad" ] && { echo "PASS rc part 1 ($n cells; not built: S3's Mac install, S5's cell 18)"; exit 0; }
+[ -z "$bad" ] && { echo "PASS rc ($n cells)"; exit 0; }
 echo "RED rc:$bad"; exit 1
