@@ -86,8 +86,8 @@ before a reboot (in a container: in the same container). A `run` with `--no-swee
 a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run. Send TERM instead.
 
 On macOS a running job costs some CPU: sheepdog checks your processes four times a second to find
-the ones that escaped. Measured on a busy Mac with about 1000 of your processes: about 1.5% of one
-CPU core per running job. The cost grows with the number of your processes.
+the ones that escaped. Measured on a busy Mac (about 1000 of your processes, load average 16): about 1.5% of one CPU
+core per running job. The cost grows with the number of processes and with the Mac's load.
 
 Where a delegated cgroup v2 is available, a cgroup is stronger: processes cannot leave it. sheepdog
 is the portable floor, and on a Mac the only option.

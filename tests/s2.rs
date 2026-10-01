@@ -243,19 +243,57 @@ fn s2_mode_none_kills_a_member_seen_while_running() {
     assert!(alive.is_empty(), "a member seen while running survived: {alive:?}");
 }
 
+/// One tick's worth of the macOS scan's system calls (src/macos.rs `members`), timed in this
+/// thread's own CPU time, so other tests running in parallel do not count: the process list, the
+/// BSD info of every process, and for each of this user's processes the unique ids and the
+/// responsible process. The same calls on the same processes at the same load: the reference the
+/// scan's cost is measured against.
+#[cfg(target_os = "macos")]
+fn one_tick_of_scan_calls() -> Duration {
+    use std::os::raw::c_void;
+    fn tcpu() -> Duration {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        Duration::new(t.tv_sec as u64, t.tv_nsec as u32)
+    }
+    type RespUniq = unsafe extern "C" fn(libc::pid_t) -> u64;
+    let name = std::ffi::CString::new("responsibility_get_uniqueid_responsible_for_pid").unwrap();
+    let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+    assert!(!p.is_null(), "no responsibility SPI");
+    let resp: RespUniq = unsafe { std::mem::transmute_copy(&p) };
+    let uid = unsafe { libc::getuid() };
+    let t0 = tcpu();
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut pids = vec![0 as libc::pid_t; (n.max(0) as usize) * 2 + 64];
+    let got = unsafe { libc::proc_listallpids(pids.as_mut_ptr() as *mut c_void, (pids.len() * 4) as i32) };
+    pids.truncate(got.max(0) as usize);
+    let mut own = 0u64;
+    for &pid in pids.iter().filter(|&&p| p > 0) {
+        let mut b: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let bn = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let r = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut b as *mut _ as *mut c_void, bn) };
+        if r == bn && b.pbi_uid == uid {
+            own += 1;
+            let mut u = [0u8; 56]; // struct proc_uniqidentifierinfo
+            unsafe { libc::proc_pidinfo(pid, 17, 0, u.as_mut_ptr() as *mut c_void, 56) };
+            unsafe { resp(pid) };
+        }
+    }
+    let d = tcpu() - t0;
+    assert!(own > 0 && pids.len() > 1, "the reference read no processes");
+    d
+}
+
 /// The scan's cost while a job runs: a 3 s job costs at most this much more CPU than an instant
-/// job (the difference is the scan; start-up is in both), with the budget 1 % of one core or 3 %
-/// per 1000 of this user's processes, whichever is larger (the scan reads every one of them on
-/// each tick, so its cost grows with their number; PHASE3.md, the scan-cost decision). Minimum of
-/// 3 samples each, so contention from other tests cannot inflate the result.
+/// job (the difference is the scan; start-up is in both). Its cost is system calls per process
+/// per tick, which grows with the number of processes and with the machine's load, so on macOS it
+/// is measured against one tick's worth of the same calls made by this test at the same time
+/// (the minimum of several, taken between the samples): the 3 s job has 12 ticks, and the scan may
+/// cost at most SCAN_K times the reference for each. On Linux (the containers hold tens of
+/// processes) the budget is 1 % of one core or 3 % per 1000 of this user's processes, whichever is
+/// larger. Minimum of 3 samples each, so contention from other tests cannot inflate the result.
 #[test]
-fn s2_the_scan_cost_stays_in_its_per_process_budget() {
-    // this user's processes, as `ps` lists them
-    let uid = unsafe { libc::getuid() }.to_string();
-    let out = Command::new("ps").args(["-A", "-o", "uid="]).output().expect("ps");
-    let own = String::from_utf8_lossy(&out.stdout).split_whitespace().filter(|u| *u == uid).count() as u64;
-    assert!(own > 0, "ps listed none of this user's processes");
-    let budget = Duration::from_millis(std::cmp::max(30, 90 * own / 1000));
+fn s2_the_scan_cost_stays_in_its_budget() {
     fn cpu(args: &[&str]) -> Duration {
         let child = Command::new(sheepdog()).arg("run").arg("--").args(args).spawn().unwrap();
         let pid = child.id() as i32;
@@ -268,10 +306,37 @@ fn s2_the_scan_cost_stays_in_its_per_process_budget() {
         Duration::from_micros(us(ru.ru_utime) + us(ru.ru_stime))
     }
     let _ = cpu(&["true"]); // warm-up (the first launch is scanned by the OS)
-    let base = (0..3).map(|_| cpu(&["true"])).min().unwrap();
-    let job = (0..3).map(|_| cpu(&["/bin/sleep", "3"])).min().unwrap();
+    #[cfg(target_os = "macos")]
+    let mut refs = vec![one_tick_of_scan_calls()];
+    let mut base = Vec::new();
+    let mut job = Vec::new();
+    for _ in 0..3 {
+        base.push(cpu(&["true"]));
+        job.push(cpu(&["/bin/sleep", "3"]));
+        #[cfg(target_os = "macos")]
+        refs.push(one_tick_of_scan_calls());
+    }
+    let (base, job) = (*base.iter().min().unwrap(), *job.iter().min().unwrap());
     let scan = job.saturating_sub(base);
-    assert!(scan < budget, "the scan used {scan:?} of CPU in a 3 s run, over its budget of {budget:?} ({own} processes of this user; start-up {base:?})");
+    #[cfg(target_os = "macos")]
+    {
+        // measured with about 960 of the user's processes (2026-10-01): 1.14-1.61 at a load
+        // average of 22, 1.27-1.40 at 55-64; a scan doing each tick's work twice measured
+        // 2.17-2.63, and a 125 ms tick 3.30: both over
+        const SCAN_K: f64 = 2.0;
+        let r = *refs.iter().min().unwrap();
+        let ratio = scan.as_secs_f64() / 12.0 / r.as_secs_f64();
+        assert!(ratio < SCAN_K, "the scan used {scan:?} of CPU in a 3 s run: {ratio:.2} times one tick's worth of its calls ({r:?}) per tick, over {SCAN_K} (start-up {base:?})");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let uid = unsafe { libc::getuid() }.to_string();
+        let out = Command::new("ps").args(["-A", "-o", "uid="]).output().expect("ps");
+        let own = String::from_utf8_lossy(&out.stdout).split_whitespace().filter(|u| *u == uid).count() as u64;
+        assert!(own > 0, "ps listed none of this user's processes");
+        let budget = Duration::from_millis(std::cmp::max(30, 90 * own / 1000));
+        assert!(scan < budget, "the scan used {scan:?} of CPU in a 3 s run, over its budget of {budget:?} ({own} processes of this user; start-up {base:?})");
+    }
 }
 
 /// Full cell 24 (macOS, PLAN.md §3.2): a member (C) re-disclaims after it was observed and

@@ -22,9 +22,9 @@ These become GitHub issues when the repo is first pushed (operator, 2026-09-25).
 
 ## The macOS scan's cost on a machine with many processes (the first item after v0.1.0)
 
-- **What:** the macOS scan reads every same-uid process on each 250 ms tick: `proc_pidinfo` twice and the responsibility SPI once. Measured 2026-09-25 on a Mac with 800 processes: about 15 ms of CPU per 3 s (0.5 %) in the debug build. The cost grows with the process count, so it may pass 1 % at about 1600 processes.
+- **What:** on each 250 ms tick the macOS scan lists every process and reads `proc_pidinfo` (BSD info) for each, of every user, to find its uid; for each same-uid process it then reads `proc_pidinfo` again (the unique ids) and the responsibility SPI. Measured 2026-09-25 on a Mac with 800 processes: about 15 ms of CPU per 3 s (0.5 %) in the debug build. The cost grows with the process count, so it may pass 1 % at about 1600 processes.
 - **Why not now:** a per-identity cache cut it to about 0.25 %, but it depends on facts not changing for a process. Responsibility changes to self on an exec with disclaim (cell 24 went red when members were cached), and whether a cached non-member's facts can change in a way that makes it a member is not tested. It was removed.
-- **Measured on a busy machine (2026-10-01):** about 960 of the operator's processes, load average 16: 1.34 % of one core in the release build, 1.86 % in the debug build. v0.1.0 ships with the cost stated in the README and a per-process budget in the scan cell (1 % or 3 % per 1000 processes, whichever is larger); see PHASE3.md, the scan-cost decision.
+- **Measured on a busy machine (2026-10-01):** about 960 of the operator's processes, load average 16: 1.34 % of one core in the release build, 1.86 % in the debug build. v0.1.0 ships with the cost stated in the README; the scan cell measures the cost against one tick's worth of the same system calls made by the test at the same time (macOS), so load and process count cancel out; see PHASE3.md, the scan-cost decision.
 - **Options:** Then: a longer tick when nothing new appears; a cache of non-members only, with a cell that proves a cached non-member cannot become a member; or a kqueue NOTE_FORK watch on the members.
 
 ## Dead zombie check in the root-disclaim control mode
