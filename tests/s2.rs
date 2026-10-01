@@ -288,7 +288,7 @@ fn one_tick_of_scan_calls() -> Duration {
 /// job (the difference is the scan; start-up is in both). Its cost is system calls per process
 /// per tick, which grows with the number of processes and with the machine's load, so on macOS it
 /// is measured against one tick's worth of the same calls made by this test at the same time
-/// (the minimum of several, each SCANS ticks' worth summed, taken between the samples): the 3 s
+/// (the median of 7, each SCANS ticks' worth summed, taken between the samples): the 3 s
 /// job scans SCANS more times than the instant one, and may cost at most SCAN_K times the
 /// reference. On Linux (the containers hold tens of
 /// processes) the budget is 1 % of one core or 3 % per 1000 of this user's processes, whichever is
@@ -328,9 +328,11 @@ fn s2_the_scan_cost_stays_in_its_budget() {
     {
         // the 3 s job scans SCANS more times than the instant one (15 against 4, counted
         // 2026-10-01: each wait restarts after its scan, so 12 timer ticks take a little over 3 s).
-        // Measured with about 900 of the user's processes at load averages of 67-98 (the
-        // reference the median of 7): 1.31-1.47; a scan doing each tick's work twice 1.90-2.50,
-        // a 125 ms tick 2.42-2.63: both over SCAN_K
+        // Measured 2026-10-01, about 850-950 of the user's processes, load averages 64-121:
+        // unmutated 1.19-1.47 (n=14); the info collection in `members` done twice per tick
+        // 1.89-2.54 (n=7), `members()` called twice per tick 2.78-2.87 (n=3), a 125 ms tick
+        // 2.42-3.08 (n=3): each red. So the cell catches a scan that grows by more than about
+        // 1.25 times (1.8 / 1.47); partial growth can stay under the bar.
         const SCAN_K: f64 = 1.8;
         // the median of 7: one fast sample (less contention for a moment) must not set the bar
         refs.sort();
