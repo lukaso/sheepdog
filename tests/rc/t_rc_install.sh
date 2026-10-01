@@ -1,44 +1,74 @@
 #!/bin/sh
-# PHASE3.md S3, the Mac happy path, against the operator's rc output (SD_RC_DIR; read only: a copy
-# is served on 127.0.0.1): the release's own install.sh (rendered by the build) with a temp HOME.
-#   - the install: Sheepdog.app in ~/Applications, byte for byte the release archive's bundle;
-#     ~/.local/bin/sheepdog links to its executable; the PATH hint when ~/.local/bin is not on PATH;
-#   - the installed sheepdog runs a job (its exit code passes through) and passes scripts/smoke.sh
-#     (cell 1, cell 3 and its control), all of its state under the temp HOME;
-#   - a second install over the first replaces the app (a file planted in the old one is gone),
-#     the link still resolves, and no staging directory or old app is left;
-#   - the control (SD_RC_CONTROL_DIR) is refused by Gatekeeper and nothing is installed (only a
-#     control that carries the control marker can show this: rc.1's shares rc.1's notarized CDHash).
-# The executable runs only after the door allows it (it is Developer ID signed).
+# PHASE3.md S3, the Mac happy path, against the operator's rc output (SD_RC_DIR; read only: the
+# three files install.sh fetches are copied and served on 127.0.0.1): the release's own install.sh
+# (rendered by the build) with a temp HOME and a temp TMPDIR.
+#   - the install: install.sh names the version, commit and an active responsibility API; the
+#     app in ~/Applications is a directory (not a link), file for file the release archive's
+#     bundle; ~/.local/bin/sheepdog links to its executable; the PATH hint names ~/.local/bin
+#     (control: no hint when it is on PATH);
+#   - the installed sheepdog, after the door: a job's process is the app's executable, its exit
+#     code passes through, and scripts/smoke.sh passes, all of its state under a temp HOME;
+#   - a second install over the first replaces the app (a planted file is gone), the link still
+#     resolves, and nothing is left in Applications or TMPDIR;
+#   - refused, with nothing installed and nothing left in Applications or TMPDIR: a copy of the rc
+#     whose archive holds a tampered bundle (codesign), and the control (Gatekeeper: only a control
+#     that carries the control marker can show this; rc.1's shares rc.1's notarized CDHash).
 set -u
 . "$(dirname "$0")/../dist/lib.sh"
 [ "$(uname -s)" = Darwin ] || { echo "FAIL: the rc leg needs macOS"; exit 1; }
 fx_dir
 RC=$SD_RC_DIR CT=$SD_RC_CONTROL_DIR
-mkdir -p "$FX/srv" "$FX/srvc" && cp -R "$RC/." "$FX/srv/" && cp -R "$CT/." "$FX/srvc/" || { fail "cannot copy the rc"; finish; }
-serve() { # dir -> port; the server's pid in $SPS
+ARC=sheepdog-macos-universal.tar.gz
+three() { mkdir -p "$2" && cp "$1/install.sh" "$1/SHA256SUMS" "$1/$ARC" "$2/"; }
+three "$RC" "$FX/srv" && three "$CT" "$FX/srvc" && three "$RC" "$FX/srvt" || { fail "cannot copy the rc's files"; finish; }
+# the tampered copy: the rc bundle with one Info.plist byte changed, SHA256SUMS updated
+mkdir -p "$FX/tb" && tar -xzf "$RC/$ARC" -C "$FX/tb" && perl -pi -e 's/<string>APPL<\/string>/<string>APPl<\/string>/' "$FX/tb/Sheepdog.app/Contents/Info.plist" \
+  && grep -q APPl "$FX/tb/Sheepdog.app/Contents/Info.plist" && "$SD_ROOT/scripts/lib/archive.sh" make "$FX/tb/Sheepdog.app" "$FX/srvt/$ARC.new" \
+  && mv "$FX/srvt/$ARC.new" "$FX/srvt/$ARC" && h=$(shasum -a 256 "$FX/srvt/$ARC" | cut -d' ' -f1) \
+  && sed "s/^[0-9a-f]\{64\}  $ARC\$/$h  $ARC/" "$FX/srvt/SHA256SUMS" > "$FX/srvt/S" && mv "$FX/srvt/S" "$FX/srvt/SHA256SUMS" \
+  && grep -q "^$h  $ARC\$" "$FX/srvt/SHA256SUMS" || fail "the tampered copy could not be made"
+SPS=""; trap 'for s in $SPS; do kill $s 2>/dev/null; done; rm -rf "$FX"' EXIT
+serve() { # dir: its port into dir.port
   p=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
   (cd "$1" && exec python3 -m http.server "$p" --bind 127.0.0.1) > "$1.log" 2>&1 & SPS="$SPS $!"
   i=0; until curl -fs "http://127.0.0.1:$p/" >/dev/null 2>&1 || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
   echo "$p" > "$1.port"
 }
-SPS=""; trap 'for s in $SPS; do kill $s 2>/dev/null; done; rm -rf "$FX"' EXIT
-serve "$FX/srv"; serve "$FX/srvc"
-H=$FX/home; mkdir -p "$H"
-inst() { # dir-served HOME -> rc; output in $FX/o
-  env -i PATH=/usr/bin:/bin:/usr/sbin HOME="$2" SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
+serve "$FX/srv"; serve "$FX/srvc"; serve "$FX/srvt"
+n=0
+inst() { # served-dir HOME [extra PATH] -> rc; output in $FX/o; install.sh's TMPDIR in $TD (fresh)
+  n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"
+  env -i PATH="${3:+$3:}/usr/bin:/bin:/usr/sbin" HOME="$2" TMPDIR="$TD" SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
 }
+clean() { # what -> TMPDIR empty
+  [ -z "$(ls -A "$TD")" ] && pass "$1: nothing left in TMPDIR" || fail "$1: left in TMPDIR: $(ls -A "$TD" | tr '\n' ' ')"
+}
+xyz=${RC##*/}; xyz=${xyz#v}; xyz=${xyz%%-*}
+c12=$(sed -n 's/^ *"commit": *"\([0-9a-f]\{12\}\).*/\1/p' "$RC/MANIFEST.json")
+[ -n "$c12" ] || fail "no commit in the rc's manifest"
+H=$FX/home; mkdir -p "$H"
 A=$H/Applications/Sheepdog.app L=$H/.local/bin/sheepdog
 inst "$FX/srv" "$H"; r=$?
-[ $r = 0 ] && grep -q 'installed: sheepdog' "$FX/o" && pass "install.sh installs the rc" || fail "install: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
-grep -q 'is not on your PATH' "$FX/o" && pass "the PATH hint" || fail "no PATH hint"
-mkdir -p "$FX/x" && tar -xzf "$RC/sheepdog-macos-universal.tar.gz" -C "$FX/x" || fail "cannot unpack the rc"
-diff -r -q "$A" "$FX/x/Sheepdog.app" > "$FX/d" 2>&1 && pass "the installed app is the release archive's bundle" || fail "the installed app differs: $(head -3 "$FX/d" | tr '\n' ' ')"
+[ $r = 0 ] && grep -q "installed: sheepdog $xyz ($c12, macos, responsibility API: active)" "$FX/o" \
+  && pass "install.sh installs the rc: sheepdog $xyz ($c12), the responsibility API active" || fail "install: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
+grep -q "$H/.local/bin is not on your PATH" "$FX/o" && pass "the PATH hint names ~/.local/bin" || fail "no PATH hint naming $H/.local/bin"
+clean "the first install"
+mkdir -p "$FX/x" && tar -xzf "$RC/$ARC" -C "$FX/x" || fail "cannot unpack the rc"
+if [ -d "$A" ] && [ ! -L "$A" ] && diff -r -q "$A" "$FX/x/Sheepdog.app" > "$FX/d" 2>&1; then pass "the installed app is a directory, file for file the release archive's bundle"
+else fail "the installed app: $(ls -ld "$A" 2>&1) $(head -3 "$FX/d" 2>/dev/null | tr '\n' ' ')"; fi
 [ -L "$L" ] && [ "$(readlink "$L")" = "$A/Contents/MacOS/sheepdog" ] && pass "~/.local/bin/sheepdog links to the app's executable" || fail "the link: $(ls -l "$L" 2>&1)"
 G="$SD_ROOT/scripts/lib/exec-guard.sh"
 sh "$G" check "$L" 2> "$FX/o" && pass "the door allows the installed sheepdog" || { fail "the door refuses the installed sheepdog: $(cat "$FX/o")"; finish; }
 J=$FX/jobhome; mkdir -p "$J"
 job() { env -i PATH=/usr/bin:/bin HOME="$J" XDG_STATE_HOME="$J/x" SHEEPDOG_STATE="$J/s" TMPDIR="$J" "$@"; }
+# the job's process: env in the background directly, so $! is the pid the door execs into (the
+# door judges first, with several codesign calls: poll until it has)
+env -i PATH=/usr/bin:/bin HOME="$J" XDG_STATE_HOME="$J/x" SHEEPDOG_STATE="$J/s" TMPDIR="$J" sh "$G" exec "$L" run -- /bin/sleep 5 >/dev/null 2>&1 & jp=$!
+i=0; comm=$(ps -o comm= -p $jp 2>/dev/null)
+while case $comm in sh|*/sh) true ;; *) false ;; esac && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); comm=$(ps -o comm= -p $jp 2>/dev/null); done
+[ "$comm" = "$A/Contents/MacOS/sheepdog" ] || [ "$comm" = "$L" ] && [ "$(cd "$(dirname "$(readlink "$L")")" && pwd -P)" = "$(cd "$A/Contents/MacOS" && pwd -P)" ] \
+  && pass "the job's process is the installed app's executable (pid $jp: $comm)" || fail "pid $jp is '$comm'"
+kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null
 job sh "$G" exec "$L" run -- sh -c 'exit 7' >/dev/null 2>&1; r=$?
 [ $r = 7 ] && pass "the installed sheepdog runs a job (exit 7 passed through)" || fail "the job's exit code: $r"
 job sh "$SD_ROOT/scripts/smoke.sh" "$L" < /dev/null > "$FX/sm" 2>&1; r=$?
@@ -46,13 +76,25 @@ job sh "$SD_ROOT/scripts/smoke.sh" "$L" < /dev/null > "$FX/sm" 2>&1; r=$?
 # the upgrade: install again over the first
 : > "$A/Contents/planted"
 inst "$FX/srv" "$H"; r=$?
-[ $r = 0 ] && [ ! -e "$A/Contents/planted" ] && pass "a second install replaces the app" || fail "second install: rc=$r planted=$(ls "$A/Contents/planted" 2>&1)"
+[ $r = 0 ] && [ ! -e "$A/Contents/planted" ] && [ -d "$A" ] && [ ! -L "$A" ] && pass "a second install replaces the app" || fail "second install: rc=$r planted=$(ls "$A/Contents/planted" 2>&1)"
 [ "$(readlink "$L")" = "$A/Contents/MacOS/sheepdog" ] && [ -x "$L" ] && pass "the link still resolves" || fail "the link after the second install: $(ls -l "$L" 2>&1)"
 left=$(ls -A "$H/Applications" | grep -v '^Sheepdog.app$')
-[ -z "$left" ] && pass "no staging directory or old app left" || fail "left in Applications: $left"
-# the control: refused by Gatekeeper, nothing installed
+[ -z "$left" ] && pass "no staging directory or old app left in Applications" || fail "left in Applications: $left"
+clean "the second install"
+# control of the PATH hint: ~/.local/bin on PATH, no hint
+H3=$FX/home3; mkdir -p "$H3"
+inst "$FX/srv" "$H3" "$H3/.local/bin"; r=$?
+[ $r = 0 ] && ! grep -q 'is not on your PATH' "$FX/o" && pass "control: no PATH hint when ~/.local/bin is on PATH" || fail "PATH-hint control: rc=$r $(tail -1 "$FX/o")"
+# refused: nothing installed, nothing left
+refused() { # home what reason
+  [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \
+    && pass "$2: refused ($3), nothing installed or left in Applications" || fail "$2: rc=$r $(tail -1 "$FX/o"); Applications: $(ls -A "$1/Applications" 2>/dev/null | tr '\n' ' ')"
+  clean "$2"
+}
+H4=$FX/home4; mkdir -p "$H4"
+inst "$FX/srvt" "$H4"; r=$?
+refused "$H4" "a tampered rc copy" "Developer ID signature"
 H2=$FX/home2; mkdir -p "$H2"
 inst "$FX/srvc" "$H2"; r=$?
-if [ $r = 1 ] && grep -q 'Gatekeeper rejects' "$FX/o" && [ ! -e "$H2/Applications/Sheepdog.app" ] && [ ! -e "$H2/.local/bin/sheepdog" ]; then pass "install.sh refuses the control (Gatekeeper), nothing installed"
-else fail "install.sh and the control: rc=$r $(tail -1 "$FX/o") (rc.1's control shares rc.1's notarized CDHash: only a marked control can show this)"; fi
+refused "$H2" "the control (only a marked control can show this; rc.1's shares rc.1's notarized CDHash)" "Gatekeeper rejects"
 finish

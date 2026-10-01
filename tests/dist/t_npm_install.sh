@@ -27,6 +27,7 @@ if [ -n "${SD_NPM_RC_DIR:-}" ]; then
   done
   mkdir -p "$FX/rcb" && tar -xzf "$FX/tgz/lukaso-sheepdog-darwin-universal-$V.tgz" -C "$FX/rcb" || { fail "cannot unpack the darwin package"; finish; }
   app=$FX/rcb/package/Sheepdog.app
+  mkdir -p "$FX/rca" && tar -xzf "$SD_NPM_RC_DIR/sheepdog-macos-universal.tar.gz" -C "$FX/rca" || { fail "cannot unpack the release archive"; finish; }
 else
   V=0.1.0-rc.1
   (cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
@@ -127,16 +128,52 @@ for m in npm pnpm bun; do
   if ! install $m; then fail "$m: install failed: $(tail -3 "$FX/inst.$m" | tr '\n' ' ')"; continue; fi
   e=$BIN/sheepdog
   [ -e "$e" ] || { fail "$m: no PATH entry at $e"; continue; }
-  inst=$(find "$FX/home-$m" -path '*Sheepdog.app/Contents/MacOS/sheepdog' -type f | head -1)
-  [ -n "$inst" ] && cmp -s "$inst" "$EXE" && pass "$m: the installed executable is the local tarball's" || fail "$m: installed executable differs or missing ($inst)"
-  "$SD_ROOT/scripts/lib/exec-guard.sh" check "$inst" && pass "$m: the door allows the installed bundle" || fail "$m: the door refuses the installed bundle"
+  # every installed copy of the bundle (bun keeps one in its cache too) is the tarball's and has
+  # the door's yes, or nothing of this manager's install is run; the process row below then
+  # checks the launcher ran one of these very files
+  insts=$(find "$FX/home-$m" -path '*Sheepdog.app/Contents/MacOS/sheepdog' -type f | while IFS= read -r f; do printf '%s/%s\n' "$(cd -P "$(dirname "$f")" && pwd -P)" "$(basename "$f")"; done | sort -u)
+  [ -n "$insts" ] || { fail "$m: no installed bundle"; continue; }
+  ok=yes
+  for inst in $insts; do
+    cmp -s "$inst" "$EXE" || { fail "$m: an installed executable differs ($inst)"; ok=no; }
+    "$SD_ROOT/scripts/lib/exec-guard.sh" check "$inst" || { fail "$m: the door refuses $inst"; ok=no; }
+  done
+  [ $ok = yes ] || continue
+  pass "$m: every installed copy of the executable ($(printf '%s\n' "$insts" | grep -c .)) is the local tarball's, and the door allows it"
+  if [ -n "${SD_NPM_RC_DIR:-}" ]; then
+    for inst in $insts; do
+    # the whole installed bundle is the release archive's (paths, types, modes, content), stapled
+    ia=${inst%/Contents/MacOS/sheepdog}
+    if python3 - "$ia" "$FX/rca/Sheepdog.app" <<'PY2'
+import os, sys, stat, hashlib
+def tree(r):
+    out = {}
+    for d, ds, fs in os.walk(r):
+        for n in ds + fs:
+            p = os.path.join(d, n); st = os.lstat(p); k = os.path.relpath(p, r)
+            v = (stat.S_IFMT(st.st_mode), st.st_mode & 0o7777)
+            if stat.S_ISREG(st.st_mode): v += (hashlib.sha256(open(p, "rb").read()).hexdigest(),)
+            elif stat.S_ISLNK(st.st_mode): v += (os.readlink(p),)
+            out[k] = v
+    return out
+a, b = tree(sys.argv[1]), tree(sys.argv[2])
+bad = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+if bad: print("  differs:", bad[:5]); sys.exit(1)
+PY2
+    then :; else fail "$m: an installed bundle differs from the release archive's ($ia)"; ok=no; fi
+    env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/xcrun stapler validate "$ia" >/dev/null 2>&1 || { fail "$m: no valid staple ticket on $ia"; ok=no; }
+    done
+    [ $ok = yes ] || continue
+    pass "$m: every installed bundle is the release archive's, file by file, and its staple ticket validates"
+  fi
   rm -f "$FX/esc"
   # env in the background directly (a function in the background is a forked subshell, whose pid
   # is not the launched process's)
   env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
   i=0; while [ ! -s "$FX/esc" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   comm=$(ps -o comm= -p $jp 2>/dev/null)
-  case $comm in *Sheepdog.app/Contents/MacOS/sheepdog) pass "$m: the PATH entry's process is the bundle's executable (pid $jp)" ;; *) fail "$m: pid $jp is '$comm'" ;; esac
+  creal=$(cd -P "$(dirname "$comm")" 2>/dev/null && pwd -P)/$(basename "$comm")
+  printf '%s\n' "$insts" | grep -qxF "$creal" && pass "$m: the PATH entry's process is one of the bundle executables the door judged (pid $jp)" || fail "$m: pid $jp is '$comm', not one the door judged"
   ep=$(cut -d' ' -f1 "$FX/esc" 2>/dev/null); es=$(cut -d' ' -f2- "$FX/esc" 2>/dev/null)
   [ -n "$ep" ] && [ "$(LC_ALL=C ps -o lstart= -p "$ep" 2>/dev/null)" = "$es" ] && pass "$m: the escapee is alive before the TERM" || fail "$m: the escapee did not start (record '$(cat "$FX/esc" 2>/dev/null)', ps '$(ps -o lstart= -p "$ep" 2>/dev/null)')"
   kill -TERM $jp 2>/dev/null; wait $jp 2>/dev/null; sleep 0.5
