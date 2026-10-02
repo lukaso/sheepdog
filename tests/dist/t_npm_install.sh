@@ -51,23 +51,9 @@ if [ -z "${SD_NPM_RC_DIR:-}" ]; then
   sh "$SD_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepdog-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" >/dev/null \
     || { fail "npm-pack.sh"; finish; }
 fi
-# a static registry: a packument per package, the tarballs beside
-reg() { # dir port [skip-platform]
-  python3 - "$1" "$2" "${3:-}" "$FX/tgz" <<'PY'
-import sys, os, json, hashlib, base64, tarfile, shutil
-d, port, skip, tg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-os.makedirs(os.path.join(d, "@lukaso"), exist_ok=True); os.makedirs(os.path.join(d, "t"), exist_ok=True)
-for f in sorted(os.listdir(tg)):
-    if skip and "darwin" in f: continue
-    b = open(os.path.join(tg, f), "rb").read()
-    pj = json.load(tarfile.open(os.path.join(tg, f)).extractfile("package/package.json"))
-    shutil.copy(os.path.join(tg, f), os.path.join(d, "t", f))
-    v = dict(pj); v["dist"] = {"tarball": "http://127.0.0.1:%s/t/%s" % (port, f),
-        "shasum": hashlib.sha1(b).hexdigest(), "integrity": "sha512-" + base64.b64encode(hashlib.sha512(b).digest()).decode()}
-    doc = {"name": pj["name"], "dist-tags": {"latest": pj["version"]}, "versions": {pj["version"]: v}}
-    json.dump(doc, open(os.path.join(d, pj["name"]), "w"))
-PY
-}
+# a static registry: a packument per package, the tarballs beside (scripts/lib/static-registry.py,
+# shared with the S7 clean-user leg)
+reg() { python3 "$SD_ROOT/scripts/lib/static-registry.py" "$1" "$2" "${3:-}" "$FX/tgz"; } # dir port [skip-platform]
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 reg "$FX/reg" "$port"
 (cd "$FX/reg" && exec python3 -m http.server "$port" --bind 127.0.0.1) > "$FX/reg.log" 2>&1 & rp=$!
