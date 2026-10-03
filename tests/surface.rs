@@ -494,9 +494,21 @@ fn every_suggested_line_runs_the_typed_command() {
         let st = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap();
         assert_eq!(st.code(), Some(code), "{args:?}: the suggested line {line} exits {:?}", st.code());
     }
-    // an empty word before `--` is never offered as the command
-    let e = sd(&["run", "", "--", "/usr/bin/true"]);
-    assert!(!e.err.contains("sheepdog run -- ''"), "{}", e.err);
+    // an empty word is never offered as the command, wherever it stands
+    for args in [&["run", "", "--", "/usr/bin/true"][..], &["run", "\u{2014}", ""], &["run", "--quiet", "\u{2014}", "", "x"], &["\u{2014}", ""], &["", "x"]] {
+        let e = sd(args);
+        assert!(matches!(e.code, Some(125) | Some(2)) && !e.err.contains("-- ''"), "{args:?}: {:?} {}", e.code, e.err);
+    }
+    // a subcommand word counts only where run's command would start, never as an option's value
+    // or the command's own argument
+    let o = sd(&["--owner", "sweep", "--", "echo", "hi"]);
+    assert!(o.err.lines().next().unwrap_or("").ends_with("sheepdog run --owner sweep -- echo hi"), "{}", o.err);
+    let q = sd(&["--quiet", "echo", "run"]);
+    let first = q.err.lines().next().unwrap_or("").to_string();
+    let at = first.find("sheepdog run ").unwrap_or_else(|| panic!("no line: {first}"));
+    let line = first[at..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let out = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).output().unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).trim().to_string()), (Some(0), "run".to_string()), "{line}");
 }
 
 /// The command's own `--status-fd` (after the first word that is not an option) is never
@@ -506,7 +518,18 @@ fn status_fd_after_the_command_is_the_commands() {
     use std::os::unix::process::CommandExt;
     let d = std::env::temp_dir().join(format!("sd-sfd-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
-    for (args, want_line) in [(&["run", "mytool", "--status-fd", "3", "--", "x"][..], false), (&["run", "--status-fd", "3", "mytool"], true)] {
+    // an unusable --status-fd anywhere among the options (no value, a bad one) is a usage error in
+    // --status-fd itself: nothing is written (PHASE2.md decision 8)
+    for (args, want_line) in [
+        (&["run", "mytool", "--status-fd", "3", "--", "x"][..], false),
+        (&["run", "--status-fd", "3", "mytool"], true),
+        (&["run", "--status-fd", "3", "--status-fd"], false),
+        (&["run", "--status-fd", "3", "--status-fd", "--", "/usr/bin/true"], false),
+        (&["run", "--status-fd", "3", "--quiet", "--status-fd"], false),
+        (&["run", "--status-fd", "bad", "--status-fd", "3", "--", "/usr/bin/true"], false),
+        (&["run", "--status-fd", "2", "--status-fd", "3", "--", "/usr/bin/true"], false),
+        (&["run", "--status-fd", "3", "--timeout", "--", "/usr/bin/true"], true),
+    ] {
         let f = d.join("fd3");
         let file = std::fs::File::create(&f).unwrap();
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
