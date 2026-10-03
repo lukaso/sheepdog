@@ -7,7 +7,7 @@
 #   - with no curl and no wget: refused, both named, nothing installed;
 #   - wget (if present), then curl (added with the image's package manager): installed, as root
 #     into /usr/local/bin and as a plain user into ~/.local/bin; the installed binary runs a job and
-#     passes its exit code through; the PATH hint when ~/.local/bin is not on PATH;
+#     passes its exit code through; the PATH hint when ~/.local/bin is not on PATH (SHELL unset, as in a bare container, under install.sh's set -u);
 #   - scripts/smoke.sh passes on the installed binary (with this image's ps);
 #   - a checksum mismatch: refused, nothing installed.
 set -u
@@ -28,7 +28,7 @@ cmp -s /srv/SHA256SUMS /tmp/badsum/SHA256SUMS && bad "the corrupted sum did not 
 serve /tmp/badsum; BP=$PORT; BS=$SP
 inst() { # user base -> rc; output in /tmp/o
   if [ "$1" = root ]; then env SHEEPDOG_INSTALL_BASE="$2" sh /tmp/good/install.sh > /tmp/o 2>&1
-  else su -s /bin/sh "$1" -c "env PATH=/usr/bin:/bin SHEEPDOG_INSTALL_BASE='$2' sh /tmp/good/install.sh" > /tmp/o 2>&1; fi
+  else su -s /bin/sh "$1" -c "env -u SHELL PATH=/usr/bin:/bin SHEEPDOG_INSTALL_BASE='$2' sh /tmp/good/install.sh" > /tmp/o 2>&1; fi   # SHELL unset, as in a bare container
 }
 (adduser -D sduser 2>/dev/null || useradd -m sduser) >/dev/null 2>&1
 UH=$(eval echo ~sduser)

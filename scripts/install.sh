@@ -122,8 +122,27 @@ else
   v=$("$bin/sheepdog" --version) || die "the installed sheepdog does not run"
 fi
 say "installed: $v"
+# the line that puts BIN on PATH in the startup file the user's login shell ($SHELL) reads: a login
+# zsh (macOS's default) reads ~/.zprofile and never ~/.profile; bash on macOS (Terminal opens login
+# shells) the first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists, and on Linux
+# ~/.bashrc; fish has its own command
+sd_path_hint() { # bin
+  sh_=${SHELL:-}   # unset in some containers, and install.sh runs with set -u
+  case ${sh_##*/} in
+    zsh) echo "  echo 'export PATH=\"$1:\$PATH\"' >> ~/.zprofile" ;;
+    bash) # a login bash (macOS's Terminal) reads only the first of these that exists
+          f='~/.bashrc'
+          if [ "$(uname -s)" = Darwin ]; then
+            f='~/.bash_profile'
+            for g in .bash_profile .bash_login .profile; do [ -e "$HOME/$g" ] && { f="~/$g"; break; }; done
+          fi
+          echo "  echo 'export PATH=\"$1:\$PATH\"' >> $f" ;;
+    fish) echo "  fish_add_path $1" ;;
+    *) echo "  echo 'export PATH=\"$1:\$PATH\"' >> ~/.profile" ;;
+  esac
+}
 case :${PATH:-}: in
   *:"$bin":*) ;;
-  *) say "$bin is not on your PATH; add it, for example:"
-     echo "  echo 'export PATH=\"$bin:\$PATH\"' >> ~/.profile" ;;
+  *) say "$bin is not on your PATH; add it (then open a new terminal), for example:"
+     sd_path_hint "$bin" ;;
 esac
