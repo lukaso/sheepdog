@@ -83,8 +83,11 @@ checks() {
   [ "$lv" = "$xyz" ] || die "Cargo.lock records sheepdog $lv, not $xyz (run cargo build to update it, and commit it)"
   # a final release's CHANGELOG entry carries its date (an rc's may still say "not yet released")
   case $tag in *-rc.*) ;; *)
-    n=$(git -C "$root" show "$tag:CHANGELOG.md" 2>/dev/null | grep -Ec "^## $(printf %s "$xyz" | sed 's/\./\\./g') \([0-9]{4}-[0-9]{2}-[0-9]{2}\)\$")
-    [ "$n" = 1 ] || die "CHANGELOG.md has no '## $xyz (YYYY-MM-DD)' entry: date the $xyz entry, commit, and tag again" ;;
+    xre=$(printf %s "$xyz" | sed 's/\./\\./g')
+    cl=$(git -C "$root" show "$tag:CHANGELOG.md" 2>/dev/null)
+    n=$(printf '%s\n' "$cl" | grep -Ec "^## $xre( |\$)")
+    d=$(printf '%s\n' "$cl" | grep -Ec "^## $xre \(20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\)\$")
+    [ "$n" = 1 ] && [ "$d" = 1 ] || die "CHANGELOG.md needs exactly one '## $xyz (YYYY-MM-DD)' entry, dated (found $n heading(s) for $xyz): date it, commit, and tag again" ;;
   esac
   c=$(counter_at "$tag"); [ -n "$c" ] && [ "$c" -ge 1 ] || die "the tag has no SD_BUILD_COUNTER >= 1 in scripts/release.conf"
   prev=""
@@ -117,6 +120,13 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
             ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
             ${ALL_PROXY:+ALL_PROXY="$ALL_PROXY"} ${all_proxy:+all_proxy="$all_proxy"} \
             ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} "$@" ;;
+    # npm: base and the proxies (and a CA npm may need), never the git/gh transport; its login is the
+    # operator's own ~/.npmrc, never a token from the environment
+    npm) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+            ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
+            ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
+            ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} \
+            ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} "$@" ;;
     # the dry publish: a fresh temp HOME and nothing else of the caller's, so even a real gh reached
     # through a stand-in would have no login
     dry) env -i HOME="$DRYHOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" "$@" ;;
@@ -287,11 +297,22 @@ stamp_line() { printf '%s %s' "$tag" "$(shasum -a 256 "$1/MANIFEST.json" | cut -
 stamp_ok() { # dir -> 0 if npm-check passed on this tag and this manifest
   [ -f "$1/NPM-CHECKED" ] && [ -f "$1/MANIFEST.json" ] && [ "$(cat "$1/NPM-CHECKED")" = "$(stamp_line "$1")" ]
 }
+man_hash() { # dir file -> the file's sha256 in MANIFEST.json (empty if it is not listed)
+  sed -n "s/.*\"name\": \"$2\", \"sha256\": \"\([0-9a-f]\{64\}\)\".*/\1/p" "$1/MANIFEST.json" | head -1
+}
+files_ok() { # dir -> 0 if every file MANIFEST.json lists is there and is its hash (npm-check's files)
+  fs=$(sed -n 's/.*"name": "\([^"]*\)", "sha256": "[0-9a-f]\{64\}".*/\1/p' "$1/MANIFEST.json")
+  [ -n "$fs" ] || return 1
+  for f in $fs; do
+    [ -f "$1/$f" ] && [ "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)" = "$(man_hash "$1" "$f")" ] || { echo "release: $f is missing or not its manifest hash" >&2; return 1; }
+  done
+}
 publish_exec() { # dir
   d=$1
   pt=$(mktemp -d /private/tmp/sd-publish.XXXXXX) || die "no temp dir"
   trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
+  files_ok "$d" || die "a file npm-check checked has changed since (above); run release.sh npm-check $tag again"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
@@ -311,7 +332,9 @@ publish_exec() { # dir
     || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
   while read -r aid name; do
     tool "$NETC" "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
-    [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$(shasum -a 256 "$d/$name" | cut -d' ' -f1)" ] || die "the uploaded $name differs from the local one; the draft $id stays a draft"
+    # the build's bytes: the manifest's hash (SHA256SUMS, not in the manifest, against the local file the planner checked)
+    want=$(man_hash "$d" "$name"); [ -n "$want" ] || want=$(shasum -a 256 "$d/$name" | cut -d' ' -f1)
+    [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$want" ] || die "the uploaded $name is not the build's (its manifest hash); the draft $id stays a draft"
   done < "$pt/assets"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
   cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload; the draft $id stays a draft"
@@ -321,7 +344,7 @@ publish_exec() { # dir
     st=$(tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases/$id" --jq .draft) || st=""
     case $st in
       false) echo "release: the publish request failed, but $tag is public (the release reads draft: false)"; return 0 ;;
-      true) die "gh: cannot publish the draft $id; it is still a draft" ;;
+      true) die "gh: cannot publish the draft $id; it is still a draft. Publish it on GitHub (Releases, the draft $tag, Publish release), or delete the draft and run publish again" ;;
       *) die "gh: cannot publish the draft $id, and cannot read whether it is public: check it on GitHub" ;;
     esac
   fi
@@ -360,33 +383,45 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # npm is skipped when its integrity is this file's (a resumed run) and refused otherwise. An rc goes
 # under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
 # login (`npm login`), never a token from the environment.
+NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's registry or scope registry never applies
 publish_npm_exec() { # dir
   d=$1 m=$1/MANIFEST.json nv=${tag#v}
-  trap 'rm -rf ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  pc=$(mktemp -d /private/tmp/sd-npmpub.XXXXXX) || die "no temp dir"   # the private copies npm gets
+  trap 'rm -rf "$pc" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pc" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  chmod 700 "$pc" || die "cannot make $pc private"
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   mf() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -1; }
   [ "$(mf tag)" = "$tag" ] && [ "$(mf mode)" = signed ] && [ "$(mf control)" = false ] \
     || die "the manifest is not $tag's signed build, or it is a control build"
+  lc=$(git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}") || die "no local tag $tag"
+  [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
   case $tag in *-rc.*) set -- --tag next ;; *) set -- ;; esac
   for p in sheepdog-linux-arm64 sheepdog-linux-x64 sheepdog-darwin-universal sheepdog; do
     f=lukaso-$p-$nv.tgz
-    h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
-    [ "$(grep -c "\"name\": \"$f\", \"sha256\": \"$h\"" "$m")" = 1 ] \
+    # npm gets a private copy, hashed against the manifest: the bytes checked are the bytes sent
+    cp "$d/$f" "$pc/$f" 2>/dev/null || die "no $f in $d; nothing after it is published"
+    h=$(shasum -a 256 "$pc/$f" | cut -d' ' -f1)
+    [ -n "$h" ] && [ "$h" = "$(man_hash "$d" "$f")" ] \
       || die "$f does not match its manifest hash (changed after npm-check?); nothing after it is published"
-    want=$(npy integrity "$d/$f") || die "cannot hash $f"
-    got=$(tool "$NETC" "$NPM" view "@lukaso/$p@$nv" dist.integrity 2>/dev/null) || got=""
-    if [ -n "$got" ]; then
+    want=$(npy integrity "$pc/$f") || die "cannot hash $f"
+    # on npm already? measured (npm 11.6.0): a version there is exit 0 and its integrity (quoted
+    # under --json); one that is not, exit 1 with E404; anything else cannot say
+    out=$(tool "$NETC" "$NPM" view --json --prefer-online --registry="$NPMREG" --@lukaso:registry="$NPMREG" "@lukaso/$p@$nv" dist.integrity 2> "$pc/err"); r=$?
+    got=$(printf '%s' "$out" | tr -d ' "\n\r')
+    if [ $r = 0 ] && [ -n "$got" ]; then
       [ "$got" = "$want" ] || die "@lukaso/$p@$nv is already on npm with another file ($got); nothing after it is published"
       echo "release: @lukaso/$p@$nv is already on npm (the same file): skipped"
       continue
+    elif ! { [ $r != 0 ] && printf '%s\n' "$out" | cat - "$pc/err" | grep -q 'E404'; }; then
+      die "cannot tell whether @lukaso/$p@$nv is on npm (npm view: exit $r, $(head -c 300 "$pc/err" | tr '\n' ' ')); nothing after it is published"
     fi
-    tool "$NETC" "$NPM" publish --access public "$@" "$d/$f" \
+    tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" --@lukaso:registry="$NPMREG" "$@" "$pc/$f" \
       || die "npm publish of $f failed; run publish-npm again to go on (a package already on npm is skipped)"
     echo "release: @lukaso/$p@$nv published"
   done
   echo "release: the four npm packages of $tag are on npm. Next: npm logout, and the token check (PHASE3.md §5)"
 }
-publish_npm() { NPM=npm NETC=net publish_npm_exec "$out/$tag"; }
+publish_npm() { NPM=npm NETC=npm publish_npm_exec "$out/$tag"; }
 publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the real one
   standins SD_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sd-dryhome.XXXXXX) || die "no temp HOME"

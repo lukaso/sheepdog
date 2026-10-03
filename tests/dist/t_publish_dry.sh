@@ -8,7 +8,9 @@
 #     read again, the second confirmation, then the PATCH;
 #   - gh and git get only the named environment: no decoy token reaches them;
 #   - no PATCH when a download differs, when the tag moved, or when the second answer is wrong;
-#   - nothing at all without npm-check's stamp for this tag and this manifest;
+#   - nothing at all without npm-check's stamp for this tag and this manifest, or when a file it
+#     checked (an npm package included) is changed or gone; a file changed during its own upload
+#     is refused by the manifest's hash;
 #   - a PATCH that fails: the release read again, and its real state said (public: 0; a draft or
 #     unreadable: 1);
 #   - an rc tag's draft is a prerelease;
@@ -21,11 +23,13 @@ C=$(g rev-parse "v0.1.0^{commit}"); T=$(g rev-parse v0.1.0)
 DECOY=decoy-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 mkout() { # dir tag commit: the five files, the manifest naming each one's hash, and npm-check's
            # stamp for that manifest (as a passed npm-check leaves it)
-  rm -rf "$1"; mkdir -p "$1"
-  for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do echo "$f $1" > "$1/$f"; done
+  rm -rf "$1"; mkdir -p "$1"; v=${2#v}
+  for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh \
+           lukaso-sheepdog-$v.tgz lukaso-sheepdog-darwin-universal-$v.tgz lukaso-sheepdog-linux-arm64-$v.tgz lukaso-sheepdog-linux-x64-$v.tgz; do echo "$f $1" > "$1/$f"; done
   (cd "$1" && shasum -a 256 sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
   { printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "signed",\n  "control": false,\n  "files": [\n' "$2" "$3"
-    sep=""; for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do
+    sep=""; for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh \
+                     lukaso-sheepdog-$v.tgz lukaso-sheepdog-darwin-universal-$v.tgz lukaso-sheepdog-linux-arm64-$v.tgz lukaso-sheepdog-linux-x64-$v.tgz; do
       printf '%s    {"name": "%s", "sha256": "%s"}' "$sep" "$f" "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)"; sep=",
 "; done; printf '\n  ]\n}\n'; } > "$1/MANIFEST.json"
   printf '%s %s\n' "$2" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)" > "$1/NPM-CHECKED"
@@ -39,6 +43,7 @@ case "\$*" in
   *"releases --paginate"*) cat "$FX/existing" 2>/dev/null ;;
   "api -X POST repos/lukaso/sheepdog/releases "*) echo 4242 ;;
   *"uploads.github.com"*) prev=""; for a; do case \$a in *assets\\?name=*) nm=\${a##*name=} ;; esac; [ "\$prev" = --input ] && in=\$a; prev=\$a; done
+    [ -e "$FX/mutate" ] && [ "\$nm" = "\$(cat "$FX/mutate")" ] && echo changed >> "\$in"
     mkdir -p "$FX/up"; cp "\$in" "$FX/up/\$nm"; echo 1 ;;
   "api repos/lukaso/sheepdog/releases/4242 --jq .assets"*) i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); echo "\$i \$f"; done ;;
   *"releases/assets/"*) for a; do last=\$a; done; id=\${last##*/}; f=\$(ls "$FX/up" | sed -n "\${id}p"); cat "$FX/up/\$f"; [ -e "$FX/corrupt" ] && [ "\$f" = "\$(cat "$FX/corrupt")" ] && echo x ;;
@@ -87,6 +92,21 @@ pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/moved"
 pub v0.1.0 no; r=$?
 [ $r = 1 ] && ! grep -q PATCH "$FX/calls" && pass "a wrong second answer: no PATCH (1)" || fail "wrong answer: rc=$r"
 
+# a file changed during its own upload (the upload and the local file agree, the manifest does
+# not): the downloads are compared with the manifest, so no PATCH
+echo sheepdog-linux-aarch64 > "$FX/mutate"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/mutate"
+[ $r = 1 ] && ! grep -q PATCH "$FX/calls" && grep -q 'manifest' "$FX/o" && pass "a file changed during its upload: no PATCH, the manifest named (1)" || fail "changed during upload: rc=$r $(tail -1 "$FX/o")"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# every file npm-check checked is still the manifest's: an npm package changed or gone after it
+# is refused before any call
+for x in change rm; do
+  mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+  if [ $x = change ]; then echo x >> "$FX/out/v0.1.0/lukaso-sheepdog-darwin-universal-0.1.0.tgz"; else rm "$FX/out/v0.1.0/lukaso-sheepdog-0.1.0.tgz"; fi
+  pub v0.1.0 v0.1.0; r=$?
+  [ $r = 1 ] && [ ! -s "$FX/calls" ] && pass "an npm package $( [ $x = change ] && echo changed || echo removed) after npm-check: refused before any call" || fail "npm package $x: rc=$r calls=$(seq)"
+done
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+
 # npm-check comes first: without its stamp for this manifest, nothing reaches GitHub
 rm "$FX/out/v0.1.0/NPM-CHECKED"; pub v0.1.0 v0.1.0; r=$?
 [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'npm-check' "$FX/o" && pass "no npm-check stamp: refused before any call, npm-check named" || fail "no stamp: rc=$r calls=$(seq)"
@@ -100,7 +120,7 @@ touch "$FX/patchfail"
 echo false > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
 [ $r = 0 ] && grep -q 'v0.1.0 is public' "$FX/o" && pass "the PATCH failed but the release is public: said so (0)" || fail "patch failed, public: rc=$r $(tail -1 "$FX/o")"
 echo true > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
-[ $r = 1 ] && grep -q 'still a draft' "$FX/o" && pass "the PATCH failed and the release is still a draft: said so (1)" || fail "patch failed, draft: rc=$r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q 'still a draft' "$FX/o" && grep -q 'draft 4242' "$FX/o" && grep -q 'delete' "$FX/o" && pass "the PATCH failed and the release is still a draft: said so, with the draft and the way on (1)" || fail "patch failed, draft: rc=$r $(tail -1 "$FX/o")"
 echo fail > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
 [ $r = 1 ] && grep -q 'check it on GitHub' "$FX/o" && pass "the PATCH failed and the state cannot be read: said so (1)" || fail "patch failed, unreadable: rc=$r $(tail -1 "$FX/o")"
 rm -f "$FX/patchfail" "$FX/draftstate"
