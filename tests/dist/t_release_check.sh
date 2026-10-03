@@ -48,7 +48,8 @@ for bad in "## 0.1.0 (9999-99-99)" "## 0.1.0 (2026-13-01)" "## 0.1.0 (2026-01-32
 ## 0.1.0 (not yet released)"; do
   sed -i.bak '/^## 0\.1\.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak" && printf '\n%s\n' "$bad" >> "$REPO/CHANGELOG.md"
   (FX_UNDATED=1; fx_release 0.1.0 3 v0.1.0); chk no "a final whose CHANGELOG has '$(printf '%s' "$bad" | head -1)'$( [ "$(printf '%s\n' "$bad" | wc -l | tr -d ' ')" = 2 ] && echo ' and an undated one')" v0.1.0
-  grep -q 'CHANGELOG' "$FX/o" && grep -q 'dated' "$FX/o" && pass "  that refusal names the CHANGELOG and what is dated" || fail "  the refusal: $(tail -1 "$FX/o")"
+  want="found 1 heading(s) for 0.1.0, 0 of them dated"; [ "$(printf '%s\n' "$bad" | wc -l | tr -d ' ')" = 2 ] && want="found 2 heading(s) for 0.1.0, 1 of them dated"
+  grep -q 'CHANGELOG' "$FX/o" && grep -qF "$want" "$FX/o" && pass "  that refusal names the CHANGELOG and says: $want" || fail "  the refusal: $(tail -1 "$FX/o")"
   g tag -d v0.1.0 >/dev/null
 done
 sed -i.bak '/^## 0\.1\.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak" && printf '\n## 0.1.0 (not yet released)\n' >> "$REPO/CHANGELOG.md"

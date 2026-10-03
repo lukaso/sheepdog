@@ -99,7 +99,12 @@ echo sheepdog-linux-aarch64 > "$FX/mutate"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 # SHA256SUMS (not in the manifest): its hash is the one the planner checked, before any upload
 echo SHA256SUMS > "$FX/mutate"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/mutate"
-[ $r = 1 ] && ! grep -q PATCH "$FX/calls" && pass "SHA256SUMS changed during its upload: no PATCH (1)" || fail "SHA256SUMS changed during upload: rc=$r $(tail -1 "$FX/o")"
+[ $r = 1 ] && ! grep -q PATCH "$FX/calls" && grep -q 'SHA256SUMS is not the one the build wrote' "$FX/o" && pass "SHA256SUMS changed during its upload: no PATCH, said so (1)" || fail "SHA256SUMS changed during upload: rc=$r $(tail -1 "$FX/o")"
+# SHA256SUMS must be the build's bytes (from the manifest's four hashes, in build order): one that
+# still checks out but is not (its lines reordered) is refused before any call
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; (cd "$FX/out/v0.1.0" && sort -r -k2 SHA256SUMS > S && mv S SHA256SUMS && shasum -a 256 -c --strict SHA256SUMS >/dev/null) || fail "could not reorder SHA256SUMS"
+pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'SHA256SUMS is not the one the build wrote' "$FX/o" && pass "a SHA256SUMS that is not the build's (reordered): refused before any call" || fail "reordered SHA256SUMS: rc=$r calls=$(seq)"
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 # every file npm-check checked is still the manifest's: an npm package changed or gone after it
 # is refused before any call

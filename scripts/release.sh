@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tag" ] || usage
 case $sub in
-  check|build|publish|publish-npm|npm-check|verify|__publish-dry|__publish-npm-dry) ;;
+  check|build|publish|publish-npm|npm-check|verify|__publish-dry|__publish-npm-dry|__npm-env) ;;
   *) usage ;;
 esac
 [ $sign = no ] || [ "$sub" = build ] || usage
@@ -87,7 +87,7 @@ checks() {
     cl=$(git -C "$root" show "$tag:CHANGELOG.md" 2>/dev/null)
     n=$(printf '%s\n' "$cl" | grep -Ec "^## $xre( |\$)")
     d=$(printf '%s\n' "$cl" | grep -Ec "^## $xre \(20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\)\$")
-    [ "$n" = 1 ] && [ "$d" = 1 ] || die "CHANGELOG.md needs exactly one '## $xyz (YYYY-MM-DD)' heading for $xyz, with a real date (found $n heading(s) for $xyz, $d of them dated so; a trailing space or CR leaves one undated): fix it, commit, and tag again" ;;
+    [ "$n" = 1 ] && [ "$d" = 1 ] || die "CHANGELOG.md needs exactly one '## $xyz (YYYY-MM-DD)' heading for $xyz, with a YYYY-MM-DD date (found $n heading(s) for $xyz, $d of them dated so; a trailing space or CR leaves one undated): fix it, commit, and tag again" ;;
   esac
   c=$(counter_at "$tag"); [ -n "$c" ] && [ "$c" -ge 1 ] || die "the tag has no SD_BUILD_COUNTER >= 1 in scripts/release.conf"
   prev=""
@@ -319,12 +319,17 @@ publish_exec() { # dir
   trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   files_ok "$d" || die "a file npm-check checked has changed since (above); run release.sh npm-check $tag again"
+  # SHA256SUMS is not in the manifest: the build wrote it from those four files, in this order, so
+  # its bytes follow from the manifest's hashes; nothing else is published, at any time
+  for x in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do
+    printf '%s  %s\n' "$(man_hash "$d" "$x")" "$x"
+  done > "$pt/sums"
+  cmp -s "$pt/sums" "$d/SHA256SUMS" || die "SHA256SUMS is not the one the build wrote (from MANIFEST.json's hashes)"
+  sums_h=$(shasum -a 256 "$pt/sums" | cut -d' ' -f1)
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
   sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
-  # SHA256SUMS is not in the manifest: the bytes the planner checked are the ones that must arrive
-  sums_h=$(shasum -a 256 "$d/SHA256SUMS" | cut -d' ' -f1)
   echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
   set -- $(sed -n 's/^POST [^ ]* //p' "$pt/plan")
   id=$(tool "$NETC" "$GH" api -X POST repos/lukaso/sheepdog/releases "$@" --jq .id) || die "gh: cannot make the draft"
@@ -340,8 +345,12 @@ publish_exec() { # dir
     || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
   while read -r aid name; do
     tool "$NETC" "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
-    # the build's bytes: the manifest's hash (SHA256SUMS: the hash of the file the planner checked)
-    if [ "$name" = SHA256SUMS ]; then want=$sums_h; else want=$(man_hash "$d" "$name"); fi
+    # the build's bytes: the manifest's hash (SHA256SUMS: the bytes the build wrote, from it)
+    if [ "$name" = SHA256SUMS ]; then
+      [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$sums_h" ] || die "the uploaded SHA256SUMS is not the one the build wrote; the draft $id stays a draft"
+      continue
+    fi
+    want=$(man_hash "$d" "$name")
     [ -n "$want" ] || die "$name has no manifest hash; the draft $id stays a draft"
     [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$want" ] || die "the uploaded $name is not the build's (its manifest hash); the draft $id stays a draft"
   done < "$pt/assets"
@@ -518,5 +527,7 @@ case $sub in
   __publish-dry) publish_dry ;;
   publish-npm) publish_npm ;;
   __publish-npm-dry) publish_npm_dry ;;
+  # the cells' view of the npm class: the environment the real run's npm gets (it runs only env)
+  __npm-env) tool npm env ;;
   npm-check) npm_check "$out/$tag" ;;
 esac
