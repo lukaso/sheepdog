@@ -6,11 +6,15 @@ Linux, and in a default Docker container, with no root, no cgroups and no system
 
 ## Install
 
-**macOS** (installs `Sheepdog.app`, signed and notarized, and a `sheepdog` command that runs it):
+**macOS** 12 or newer (installs `Sheepdog.app`, signed and notarized, and a `sheepdog` command
+that runs it):
 
 ```sh
 brew install --cask lukaso/tap/sheepdog
 ```
+
+The cask needs Homebrew 5.1.11 or newer (from May 2026; `brew --version` shows yours). If yours is
+older, run `brew update` first.
 
 or, without Homebrew (into `~/Applications`, with the command in `~/.local/bin`; it tells you if
 that is not on your PATH):
@@ -25,8 +29,7 @@ or with npm or pnpm (a global install; see [npm](#npm) below):
 npm i -g @lukaso/sheepdog
 ```
 
-The Homebrew cask needs Homebrew 5.1.11 or newer (from May 2026; `brew --version` shows yours). If
-yours is older, run `brew update` first.
+Tested on macOS 27 on Apple silicon. Intel Macs and macOS 12 to 26 are supported but not tested yet.
 
 **Linux**, a static binary (`x86_64` and `aarch64`):
 
@@ -38,11 +41,15 @@ curl -fsSL https://github.com/lukaso/sheepdog/releases/latest/download/install.s
 
 ```dockerfile
 ARG SHEEPDOG_VERSION=0.1.0
-RUN curl -fsSL -o /usr/local/bin/sheepdog \
-      "https://github.com/lukaso/sheepdog/releases/download/v${SHEEPDOG_VERSION}/sheepdog-linux-$(uname -m)" \
- && echo "<sha256 from the release's SHA256SUMS>  /usr/local/bin/sheepdog" | sha256sum -c - \
+RUN a=$(uname -m) \
+ && case $a in x86_64) sum='<sha256 of sheepdog-linux-x86_64>' ;; aarch64) sum='<sha256 of sheepdog-linux-aarch64>' ;; *) exit 1 ;; esac \
+ && curl -fsSL -o /usr/local/bin/sheepdog "https://github.com/lukaso/sheepdog/releases/download/v${SHEEPDOG_VERSION}/sheepdog-linux-$a" \
+ && echo "$sum  /usr/local/bin/sheepdog" | sha256sum -c - \
  && chmod +x /usr/local/bin/sheepdog
 ```
+
+Put the two hashes from the release's `SHA256SUMS` in place of the placeholders. The image needs
+`curl` (on Debian: `apt-get install -y curl ca-certificates`; on Alpine: `apk add curl`).
 
 On Linux the checksum proves the download is intact, not where it came from: `SHA256SUMS` comes
 from the same release. On macOS, install.sh checks the Developer ID signature before it installs,
@@ -52,13 +59,17 @@ macOS then checks the signature and notarization when you first run it.
 ## Use
 
 - `sheepdog run --timeout 5m -- npm test` stops the whole tree after 5 minutes.
-- `sheepdog run --max-mem 2G -- python3 job.py` stops it if the tree uses more than 2 GB.
+- `sheepdog run --max-mem 2G -- python3 job.py` stops it if the tree uses more than 2 GiB.
 - `sheepdog strays` lists leaked processes of yours, biggest first.
 - `sheepdog kill 4242` kills 4242 and the processes it provably started (see them first with
   `sheepdog ps 4242`).
 
+The command goes after `--`. Put a pipeline, `&&`, `cd` or `VAR=value` inside `sh -c`, for example
+`sheepdog run --timeout 5m -- sh -c 'cd app && npm test'`. Without it, your shell runs the part
+after `&&` outside sheepdog.
+
 To stop a running job, send TERM to sheepdog. Exit 124 means a limit fired. `sheepdog help
-<command>` shows each command's options.
+<command>` shows a command's usage line.
 
 ## For coding agents
 
@@ -66,7 +77,7 @@ Put this in your `CLAUDE.md` or `AGENTS.md`:
 
 ```markdown
 ## Commands that may hang or leak processes
-Wrap them: `sheepdog run --timeout 5m -- <command>`. It kills the whole process tree when the command ends or a limit fires, including processes that escaped. Exit 124 means a limit fired; read the `sheepdog:` lines on stderr. To stop a job, send TERM to sheepdog (SIGINT to its pid does not reach the command). Leaked processes from earlier runs: `sheepdog strays`.
+Wrap them: `sheepdog run --timeout 5m -- <command>`. Put a pipeline, `&&`, `cd` or `VAR=value` inside `sh -c`, for example `sheepdog run --timeout 5m -- sh -c 'cd app && npm test'`; otherwise part of it runs outside sheepdog. It kills the whole process tree when the command ends or a limit fires, including processes that escaped. Exit 124 means a limit fired; read the `sheepdog:` lines on stderr. To stop a job, send TERM to sheepdog (SIGINT to its pid does not reach the command). Leaked processes from earlier runs: `sheepdog strays`. On macOS, if the project is in Documents, Desktop, Downloads or iCloud Drive, add `--inherit-terminal-permissions` unless Sheepdog has Full Disk Access.
 ```
 
 ## Limits
@@ -80,11 +91,12 @@ sheepdog is not a sandbox. It does not reach:
 - containers the job starts: they belong to `dockerd`;
 - a process that leaves on purpose: `sudo`, another user, ptrace.
 
-A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (Node's `child.kill`,
-`docker stop` with `STOPSIGNAL SIGINT`) kills only sheepdog; the rest of the tree is then ended by
+A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (`docker stop` with
+`STOPSIGNAL SIGINT`) kills only sheepdog; the rest of the tree is then ended by
 your next `sheepdog run` or `sheepdog sweep` with the same `--owner` and the same state directory,
 before a reboot (in a container: in the same container). A `run` with `--no-sweep` skips that, and
-a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run. Send TERM instead.
+a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run. Send TERM instead,
+or, when the caller can only send INT, run with `--forward-int-to-root`.
 
 On macOS a running job costs some CPU: sheepdog checks your processes four times a second to find
 the ones that escaped. Measured on a busy Mac (about 1000 of your processes, load average 16): about 1.5% of one CPU
@@ -97,7 +109,9 @@ is the portable floor, and on a Mac the only option.
 
 A job under sheepdog does not inherit your terminal's privacy permissions (Full Disk Access,
 Documents, Desktop and so on): sheepdog makes itself the job's responsible app, which is what lets
-it track the whole tree. If a job needs a protected folder, give Sheepdog Full Disk Access once:
+it track the whole tree. Protected folders include Documents, Desktop, Downloads and iCloud Drive, so
+a project kept in one of them is protected too. If a job reads a protected folder, give Sheepdog Full
+Disk Access once:
 System Settings > Privacy & Security > Full Disk Access, click +, press Cmd-Shift-G, paste the path
 of `Sheepdog.app` and press Return. It is in `~/Applications` for install.sh and for Homebrew with
 `--appdir=~/Applications`, in `/Applications` for Homebrew otherwise, and inside the package for npm
@@ -107,7 +121,8 @@ and pnpm, where these commands print it:
 - pnpm: `find "$(pnpm root -g)/../.pnpm" -name Sheepdog.app -prune`
 
 In a standard (not admin) account the row may not appear in the list after you add it; the grant
-still works. The grant survives upgrades.
+still works. An upgrade with install.sh keeps the grant. After another kind of upgrade, check with
+`sheepdog doctor --grants`, and add Sheepdog again if needed.
 `sheepdog doctor --grants` checks whether Sheepdog can read `~/Documents` (this can show a macOS
 privacy prompt).
 
@@ -168,8 +183,8 @@ that is an absolute path, else in `~/.local/state/sheepdog`; delete that directo
   the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
   `--status-fd` says which, as one JSON line.
 - Stable interfaces: the subcommands and flags, the exit codes, the `--status-fd` and `--json`
-  schemas (`"v": 1`), and the `sheepdog:` prefix on its stderr messages (a usage error starts
-  with `usage:` instead). Every release has a
+  schemas (`"v": 1`), and the `sheepdog:` prefix on its stderr messages (a usage error says what
+  was wrong on that line, then shows a `usage:` line). Every release has a
   [CHANGELOG](CHANGELOG.md) entry.
 
 ## License

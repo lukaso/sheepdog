@@ -6,7 +6,7 @@
 
 ```sh
 # With a supervisor (the guarantee):
-sheepdog run --timeout 30s --max-mem 2G -- python3 -m unittest …   # the whole tree dies at 30 s or 2 GB
+sheepdog run --timeout 30s --max-mem 2G -- python3 -m unittest …   # the whole tree dies at 30 s or 2 GiB
 sheepdog run -- pnpm exec vitest run                                # strays are reaped even on a clean exit
 
 # With no setup (best effort, labelled evidence):
@@ -526,7 +526,7 @@ sheepdog: run a command and make sure every process it starts is gone at the end
 including processes that escaped with setsid, double-forks or reparenting.
 
   sheepdog run --timeout 5m -- npm test        stop the whole tree after 5 minutes
-  sheepdog run --max-mem 2G -- python3 job.py  stop it if the tree uses more than 2 GB
+  sheepdog run --max-mem 2G -- python3 job.py  stop it if the tree uses more than 2 GiB
   sheepdog strays                              list leaked processes of yours, biggest first
   sheepdog kill 4242                           kill 4242 and the processes it provably started
                                                (see first: sheepdog ps 4242)

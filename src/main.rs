@@ -93,7 +93,7 @@ const HELP: &str = "sheepdog: run a command and make sure every process it start
 including processes that escaped with setsid, double-forks or reparenting.
 
   sheepdog run --timeout 5m -- npm test        stop the whole tree after 5 minutes
-  sheepdog run --max-mem 2G -- python3 job.py  stop it if the tree uses more than 2 GB
+  sheepdog run --max-mem 2G -- python3 job.py  stop it if the tree uses more than 2 GiB
   sheepdog strays                              list leaked processes of yours, biggest first
   sheepdog kill 4242                           kill 4242 and the processes it provably started
                                                (see first: sheepdog ps 4242)
