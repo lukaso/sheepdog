@@ -2,7 +2,8 @@
 # PHASE3.md S2 (and §1.2): scripts/release.sh's checks before any build. `release.sh check vTAG`
 # runs only the checks. Refused: a dirty tree, an untracked file, HEAD not on the tag, a missing
 # or malformed tag, a tag whose X.Y.Z is not Cargo.toml's version, a build counter not above the
-# previous tag's (previous = highest tag below, with -rc sorting before the final): exit 1.
+# previous tag's (previous = highest tag below, with -rc sorting before the final), a final tag
+# whose CHANGELOG has no `## X.Y.Z (YYYY-MM-DD)` entry (still "not yet released", or none): exit 1.
 # `build --sign` and `publish` refuse under the test environment (exit 3) and without a terminal
 # (exit 4), before anything runs; a usage error is exit 2. The codes tell the reasons apart, so a
 # script that refused everything would not pass.
@@ -31,8 +32,18 @@ g tag -d v0.3.0-rc.1 >/dev/null; fx_release 0.1.0 5 v0.1.0-x; g tag -d v0.1.0-x 
 fx_release 0.1.0 1 v0.1.0-rc.2; chk no "a counter not above the previous tag's" v0.1.0-rc.2
 fx_release 0.1.0 2 v0.1.0-rc.3; chk ok "a counter above the previous tag's" v0.1.0-rc.3
 fx_release 0.1.0 2 v0.1.0; chk no "the final after an rc with the same counter" v0.1.0
-g tag -d v0.1.0 >/dev/null; fx_release 0.1.0 3 v0.1.0
-chk ok "the final above the last rc's counter" v0.1.0
+g tag -d v0.1.0 >/dev/null
+# a final tag needs its CHANGELOG entry dated (an rc does not: rc.1-rc.3 above passed undated); the
+# final above dated it, so undate it again first
+sed -i.bak 's/^## 0\.1\.0 (.*)$/## 0.1.0 (not yet released)/' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak"
+[ "$(grep -c '^## 0.1.0 (not yet released)$' "$REPO/CHANGELOG.md")" = 1 ] || fail "could not undate the fixture's CHANGELOG"
+(FX_UNDATED=1; fx_release 0.1.0 3 v0.1.0); chk no "a final whose CHANGELOG entry says not yet released" v0.1.0
+grep -q "CHANGELOG" "$FX/o" && pass "the refusal names the CHANGELOG" || fail "the refusal: $(tail -1 "$FX/o")"
+g tag -d v0.1.0 >/dev/null; sed -i.bak '/^## 0.1.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak"
+(FX_UNDATED=1; fx_release 0.1.0 3 v0.1.0); chk no "a final with no CHANGELOG entry" v0.1.0
+g tag -d v0.1.0 >/dev/null; g checkout -q HEAD~1 -- CHANGELOG.md
+fx_release 0.1.0 3 v0.1.0
+chk ok "the final above the last rc's counter, its CHANGELOG entry dated" v0.1.0
 
 # the signing and publishing entries refuse before anything runs
 fx_shims "$FX/sh" codesign xcrun security gh docker cargo npm ditto lipo spctl

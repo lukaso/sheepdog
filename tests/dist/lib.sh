@@ -152,6 +152,11 @@ fx_release() {
   if grep -q '^SD_BUILD_COUNTER=' "$REPO/scripts/release.conf"; then
     sed -i.bak "s/^SD_BUILD_COUNTER=.*/SD_BUILD_COUNTER=$2/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
   else printf '\nSD_BUILD_COUNTER=%s\n' "$2" >> "$REPO/scripts/release.conf"; fi
+  # a final tag's CHANGELOG entry carries its date, as the operator writes it before tagging
+  # (FX_UNDATED=1 leaves it as it is)
+  case $3 in *-rc.*) ;; *) if [ "${FX_UNDATED:-}" != 1 ] && [ -f "$REPO/CHANGELOG.md" ]; then
+    sed -i.bak "s/^## $1 (not yet released)\$/## $1 (2026-10-04)/" "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak"
+  fi ;; esac
   g commit -q --allow-empty -am "release $3" && g tag -a "$3" -m "$3" || { echo "fx_release: could not make $3" >&2; exit 3; }
 }
 # shims that record their argv, for tools a refusal must never reach

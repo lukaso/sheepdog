@@ -80,6 +80,11 @@ checks() {
   [ "$v" = "$xyz" ] || die "Cargo.toml says $v, the tag $xyz"
   lv=$(git -C "$root" show "$tag:Cargo.lock" | awk 'p && /^version = /{gsub(/"/,"",$3); print $3; exit} /^name = "sheepdog"$/{p=1}')
   [ "$lv" = "$xyz" ] || die "Cargo.lock records sheepdog $lv, not $xyz (run cargo build to update it, and commit it)"
+  # a final release's CHANGELOG entry carries its date (an rc's may still say "not yet released")
+  case $tag in *-rc.*) ;; *)
+    n=$(git -C "$root" show "$tag:CHANGELOG.md" 2>/dev/null | grep -Ec "^## $(printf %s "$xyz" | sed 's/\./\\./g') \([0-9]{4}-[0-9]{2}-[0-9]{2}\)\$")
+    [ "$n" = 1 ] || die "CHANGELOG.md has no '## $xyz (YYYY-MM-DD)' entry: date the $xyz entry, commit, and tag again" ;;
+  esac
   c=$(counter_at "$tag"); [ -n "$c" ] && [ "$c" -ge 1 ] || die "the tag has no SD_BUILD_COUNTER >= 1 in scripts/release.conf"
   prev=""
   for t in $(git -C "$root" -c versionsort.suffix=-rc tag -l 'v*' --sort=v:refname); do
