@@ -64,10 +64,10 @@ pub(crate) const USAGE_PS: &str = "sheepdog ps [--json] PID | PID:ID | j-JOBID";
 /// A usage error of `kill` (or `ps`): the command typed and what was wrong, then its usage.
 fn usage_because(ps: bool, why: String) -> i32 {
     if ps {
-        crate::fail!("sheepdog ps: {why}");
+        crate::fail!("sheepdog: ps: {why}");
         say!("usage: {USAGE_PS}");
     } else {
-        crate::fail!("sheepdog kill: {why}");
+        crate::fail!("sheepdog: kill: {why}");
         say!("usage: {USAGE_KILL}");
         say!("       {USAGE_PS}");
     }

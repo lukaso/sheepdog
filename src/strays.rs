@@ -83,7 +83,7 @@ pub(crate) const USAGE: &str = "sheepdog strays [--min-mem SIZE] [--older-than D
 
 /// A usage error: what was wrong, then the usage.
 fn usage_because(why: String) -> i32 {
-    crate::fail!("sheepdog strays: {why}");
+    crate::fail!("sheepdog: strays: {why}");
     say!("usage: {USAGE}");
     2
 }

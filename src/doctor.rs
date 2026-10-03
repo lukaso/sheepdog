@@ -29,7 +29,7 @@ pub fn main(args: &[OsString]) -> i32 {
             b"--json" => json = true,
             b"--grants" => grants = true,
             _ => {
-                fail!("sheepdog doctor: unknown option {}.", crate::shown(a));
+                fail!("sheepdog: doctor: unknown option {}.", crate::shown(a));
                 crate::say!("usage: {USAGE}");
                 return 2;
             }

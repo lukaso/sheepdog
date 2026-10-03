@@ -146,7 +146,7 @@ fn the_json_error_message_is_the_error_line() {
     assert_eq!(o.code, Some(2));
     let j = json::parse(o.out.lines().last().unwrap_or("")).unwrap_or_else(|e| panic!("not JSON ({e:?}): {}", o.out));
     let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
-    assert!(m.starts_with("sheepdog kill: no target"), "message: {m:?}");
+    assert!(m.starts_with("sheepdog: kill: no target"), "message: {m:?}");
 }
 
 /// A call that starts with `--` or an option is a usage error whose fix puts `run` in front
@@ -200,7 +200,7 @@ fn json_mode_does_not_depend_on_argument_order() {
 #[test]
 fn a_ps_usage_error_names_ps() {
     // ps refuses kill's own options itself, before its parse
-    for (args, want) in [(&["ps", "--json"][..], "sheepdog ps: "), (&["ps", "--json", "--grace", "1", "5"][..], "sheepdog ps: "), (&["kill", "--json"][..], "sheepdog kill: ")] {
+    for (args, want) in [(&["ps", "--json"][..], "sheepdog: ps: "), (&["ps", "--json", "--grace", "1", "5"][..], "sheepdog: ps: "), (&["kill", "--json"][..], "sheepdog: kill: ")] {
         let sub = args[0];
         let o = sd(args);
         let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{sub}: ({e:?}) {:?}", o.out));
@@ -311,6 +311,7 @@ fn run_usage_errors_name_the_word_and_its_rule() {
         let o = sd(args);
         assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
         let first = o.err.lines().next().unwrap_or("");
+        assert!(first.starts_with("sheepdog: "), "{args:?}: the first line has no sheepdog: prefix:\n{}", o.err);
         for w in want {
             assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
         }
@@ -346,7 +347,8 @@ fn run_without_the_separator_prints_the_corrected_command() {
 }
 
 /// Every other subcommand's usage error (exit 2) names the command typed and what it rejected,
-/// with the rule it broke, on its first line, then its usage line.
+/// with the rule it broke, on its first line, then its usage line. The first line keeps the
+/// `sheepdog:` prefix every stderr message has (a stable interface): `sheepdog: kill: ...`.
 #[test]
 fn subcommand_usage_errors_name_the_word_and_its_rule() {
     for (args, want) in [
@@ -371,7 +373,7 @@ fn subcommand_usage_errors_name_the_word_and_its_rule() {
         let o = sd(args);
         assert_eq!(o.code, Some(2), "{args:?}: {}", o.err);
         let first = o.err.lines().next().unwrap_or("");
-        assert!(first.starts_with(&format!("sheepdog {sub}: ")), "{args:?}: the first line does not name {sub}:\n{}", o.err);
+        assert!(first.starts_with(&format!("sheepdog: {sub}: ")), "{args:?}: the first line does not start with sheepdog: {sub}:\n{}", o.err);
         for w in want {
             assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
         }
