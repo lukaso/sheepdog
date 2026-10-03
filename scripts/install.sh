@@ -15,8 +15,8 @@
 # SHEEPDOG_INSTALL_BASE overrides where the files come from: https, or http on 127.0.0.1, ::1 or
 # localhost only.
 #
-# Exit: 0 installed; 1 a check or a step failed (nothing installed); 2 usage; 3 a refused
-# SHEEPDOG_INSTALL_BASE.
+# Exit: 0 installed; 1 a check or a step failed (nothing installed, except when the new sheepdog is
+# in place and then does not run: the message says so); 2 usage; 3 a refused SHEEPDOG_INSTALL_BASE.
 set -u
 SHEEPDOG_VERSION=
 REPO=lukaso/sheepdog
@@ -98,7 +98,7 @@ if [ "$(uname -s)" = Darwin ]; then
   /usr/bin/codesign -v -R="$SD_RELEASE_REQUIREMENT" "$new" >/dev/null 2>&1 \
     || die "Sheepdog.app does not carry the project's Developer ID signature; nothing installed"
   /usr/sbin/spctl -a -t exec "$new" >/dev/null 2>&1 || die "Gatekeeper rejects Sheepdog.app; nothing installed"
-  /bin/sh -p "$tmp/door/lib/exec-guard.sh" check "$new/Contents/MacOS/sheepdog" || die "the exec door refuses Sheepdog.app; nothing installed"
+  /bin/sh -p "$tmp/door/lib/exec-guard.sh" check "$new/Contents/MacOS/sheepdog" || die "Sheepdog.app fails the last signature check; nothing installed"
   # two moves, not one atomic swap: between them there is no app, and a sheepdog starting then
   # falls back as PLAN.md §4.4 says
   # old is set before the move: a signal during it finds cleanup knowing where the old app went
@@ -113,13 +113,13 @@ if [ "$(uname -s)" = Darwin ]; then
   rm -rf "$stage"; stage=""
   bin=$HOME/.local/bin
   mkdir -p "$bin" && ln -sf "$app/Contents/MacOS/sheepdog" "$bin/sheepdog" || die "cannot link $bin/sheepdog"
-  v=$(/bin/sh -p "$tmp/door/lib/exec-guard.sh" exec "$bin/sheepdog" --version) || die "the installed sheepdog does not run"
+  v=$(/bin/sh -p "$tmp/door/lib/exec-guard.sh" exec "$bin/sheepdog" --version) || die "Sheepdog.app is installed in $apps, but sheepdog does not run (the lines above say why)"
 else
   if [ "$(id -u)" = 0 ]; then bin=/usr/local/bin; else bin=$HOME/.local/bin; fi
   mkdir -p "$bin" || die "cannot make $bin"
   cp "$tmp/$art" "$bin/.sheepdog.new.$$" && chmod 755 "$bin/.sheepdog.new.$$" && mv "$bin/.sheepdog.new.$$" "$bin/sheepdog" \
     || { rm -f "$bin/.sheepdog.new.$$"; die "cannot install into $bin"; }
-  v=$("$bin/sheepdog" --version) || die "the installed sheepdog does not run"
+  v=$("$bin/sheepdog" --version) || die "sheepdog is installed in $bin, but does not run (the lines above say why)"
 fi
 say "installed: $v"
 # the line that puts BIN on PATH in the startup file the user's shell ($SHELL) reads. macOS's
