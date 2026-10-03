@@ -9,7 +9,10 @@
 #     into /usr/local/bin and as a plain user into ~/.local/bin; the installed binary runs a job and
 #     passes its exit code through; the PATH hint when ~/.local/bin is not on PATH (SHELL unset, as in a bare container, under install.sh's set -u);
 #   - scripts/smoke.sh passes on the installed binary (with this image's ps);
-#   - a checksum mismatch: refused, nothing installed.
+#   - a checksum mismatch: refused, nothing installed;
+#   - the README's Docker snippet (its RUN line, run by this /bin/sh with stand-ins for curl and
+#     uname): on aarch64 and x86_64 the right file, its hash checked, executable; a wrong hash and an
+#     arch with no build fail.
 set -u
 fails=0
 ok() { echo "ok: $*"; }
@@ -61,5 +64,39 @@ rm -f /usr/local/bin/sheepdog
 env SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$BP" sh /tmp/good/install.sh > /tmp/o 2>&1; r=$?
 [ $r = 1 ] && grep -qi checksum /tmp/o && [ ! -e /usr/local/bin/sheepdog ] && ok "a checksum mismatch: refused, nothing installed" || bad "bad sum: rc=$r $(tail -1 /tmp/o)"
 kill "$GS" "$BS" 2>/dev/null
+
+# the README's Docker snippet: its RUN line as Docker joins it (/srv/readme-run.sh, made by the
+# leg from README.md), run by this image's /bin/sh as Docker would; curl is a stand-in that takes
+# only the release's URL, uname a stand-in that names the arch, the hashes the files' own
+if [ -s /srv/readme-run.sh ] && [ -s /srv/readme-version ]; then
+  v=$(cat /srv/readme-version); mkdir -p /tmp/rel /tmp/rs/bin
+  printf 'aarch64 build\n' > /tmp/rel/sheepdog-linux-aarch64; printf 'x86_64 build\n' > /tmp/rel/sheepdog-linux-x86_64
+  ha=$(sha256sum /tmp/rel/sheepdog-linux-aarch64 | cut -d' ' -f1) hx=$(sha256sum /tmp/rel/sheepdog-linux-x86_64 | cut -d' ' -f1)
+  cat > /tmp/rs/bin/curl <<EOF
+#!/bin/sh
+out="" url=""
+while [ \$# -gt 0 ]; do case \$1 in -o) out=\$2; shift ;; -*) ;; *) url=\$1 ;; esac; shift; done
+case \$url in https://github.com/lukaso/sheepdog/releases/download/v$v/sheepdog-linux-*) cp "/tmp/rel/\${url##*/}" "\$out" ;;
+  *) echo "curl: not the release's url: \$url" >&2; exit 22 ;; esac
+EOF
+  printf '#!/bin/sh\necho "$SD_UNAME_M"\n' > /tmp/rs/bin/uname; chmod 755 /tmp/rs/bin/curl /tmp/rs/bin/uname
+  snip() { # arch hash-for-aarch64 hash-for-x86_64 -> rc
+    rm -f /usr/local/bin/sheepdog
+    sed -e "s/<sha256 of sheepdog-linux-aarch64>/$2/" -e "s/<sha256 of sheepdog-linux-x86_64>/$3/" /srv/readme-run.sh > /tmp/rs/run.sh
+    grep -q '<sha256' /tmp/rs/run.sh && { echo "a placeholder is left" > /tmp/rs/o; return 99; }
+    env PATH="/tmp/rs/bin:$PATH" SD_UNAME_M="$1" SHEEPDOG_VERSION="$v" /bin/sh /tmp/rs/run.sh > /tmp/rs/o 2>&1
+  }
+  for a in aarch64 x86_64; do
+    snip $a "$ha" "$hx"; r=$?
+    [ $r = 0 ] && [ -x /usr/local/bin/sheepdog ] && cmp -s /usr/local/bin/sheepdog /tmp/rel/sheepdog-linux-$a \
+      && ok "the README's Docker snippet on $a: the $a file, its hash checked, executable" || bad "the README's snippet on $a: rc=$r $(tr '\n' ' ' < /tmp/rs/o)"
+  done
+  snip aarch64 "$hx" "$ha"; r=$?
+  [ $r != 0 ] && [ $r != 99 ] && [ ! -x /usr/local/bin/sheepdog ] && ok "the README's Docker snippet: a wrong hash fails the step, nothing executable" || bad "the snippet, a wrong hash: rc=$r"
+  snip riscv64 "$ha" "$hx"; r=$?
+  [ $r != 0 ] && [ $r != 99 ] && [ ! -e /usr/local/bin/sheepdog ] && ok "the README's Docker snippet: an arch with no build fails before any download" || bad "the snippet, riscv64: rc=$r"
+  rm -f /usr/local/bin/sheepdog
+else bad "no README Docker snippet in /srv"
+fi
 [ $fails = 0 ] && { echo "PASS dist-linux"; exit 0; }
 echo "RED dist-linux: $fails"; exit 1

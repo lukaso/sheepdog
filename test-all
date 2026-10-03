@@ -294,12 +294,45 @@ leg_dist_linux() {
   art=sheepdog-linux-$NATIVE
   rm -rf "$srv" && mkdir -p "$srv"
   sh scripts/lib/render-install.sh scripts/install.sh 0.0.0 "$srv/install.sh" || { record dist-linux "FAIL (render)"; return; }
+  # the README's Docker snippet: its RUN line joined as Docker joins it, and its ARG's version
+  awk '/^```dockerfile$/{f=1; next} /^```$/{f=0} f && /^RUN /{r=1} f && r {l=$0; if (sub(/\\$/, "", l)) printf "%s", l; else {print l; r=0}}' README.md \
+    | sed 's/^RUN //' > "$srv/readme-run.sh" && sed -n 's/^ARG SHEEPDOG_VERSION=//p' README.md > "$srv/readme-version" \
+    && [ -s "$srv/readme-run.sh" ] && [ -s "$srv/readme-version" ] || { record dist-linux "FAIL (no Docker snippet in README.md)"; return; }
   cp "$ROOT/target-linux/debug/sheepdog" "$srv/$art" && (cd "$srv" && shasum -a 256 "$art" > SHA256SUMS) || { record dist-linux "FAIL (serve dir)"; return; }
   for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
     echo "== dist-linux in $i" >> "$LOGDIR/dist-linux.log"
     bg_wait timeout -k 30 900 docker run --rm --pull=never -v "$srv":/srv:ro -v "$ROOT/target-linux":/tgt:ro -v "$ROOT/scripts":/scripts:ro \
       "$i" sh /scripts/dist-linux.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
   done
+  # the npm packages on Linux (scripts/dist-linux-npm.sh): packed by npm-pack.sh around these
+  # builds, served from static registries; the x64 package runs in the amd64 image, on the amd64
+  # leg's build (an x86_64 host has no arm64 build: its arm64 package holds a stand-in, not run)
+  local pk="$LOGDIR/dist-npm" other
+  case $NATIVE in aarch64) other=linux-x64 ;; *) other=linux-arm64 ;; esac
+  rm -rf "$pk" && mkdir -p "$pk/tgz" "$pk/tgz-noplat" "$pk/app/Sheepdog.app/Contents/MacOS" \
+    && printf '<plist/>\n' > "$pk/app/Sheepdog.app/Contents/Info.plist" && printf '#!/bin/sh\n' > "$pk/app/Sheepdog.app/Contents/MacOS/sheepdog" \
+    && chmod 755 "$pk/app/Sheepdog.app/Contents/MacOS/sheepdog" && sh scripts/lib/archive.sh make "$pk/app/Sheepdog.app" "$pk/mac.tar.gz" \
+    && cp "$ROOT/target-linux/debug/sheepdog" "$pk/bin-$( [ $NATIVE = aarch64 ] && echo linux-arm64 || echo linux-x64)" \
+    || { record dist-linux "FAIL (npm fixture)"; return; }
+  if [ $NATIVE = aarch64 ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ]; then cp "$ROOT/target-linux-amd64/debug/sheepdog" "$pk/bin-$other"
+  else printf '#!/bin/sh\necho stand-in\n' > "$pk/bin-$other"; fi
+  sh scripts/lib/npm-pack.sh 0.0.0 "$pk/mac.tar.gz" "$pk/bin-linux-arm64" "$pk/bin-linux-x64" npm/sheepdog/bin/sheepdog "$pk/tgz" > /dev/null \
+    && cp npm/sheepdog/bin/sheepdog "$pk/launcher" && python3 scripts/lib/static-registry.py "$pk/reg" 4873 "" "$pk/tgz" \
+    && cp "$pk/tgz/lukaso-sheepdog-0.0.0.tgz" "$pk/tgz/lukaso-sheepdog-darwin-universal-0.0.0.tgz" "$pk/tgz-noplat/" \
+    && python3 scripts/lib/static-registry.py "$pk/reg-noplat" 4874 "" "$pk/tgz-noplat" \
+    || { record dist-linux "FAIL (npm packages; $LOGDIR/dist-linux.log)"; return; }
+  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+    echo "== dist-linux npm in $i" >> "$LOGDIR/dist-linux.log"
+    bg_wait timeout -k 30 1200 docker run --rm --pull=never -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
+      "$i" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
+  done
+  if [ $NATIVE = aarch64 ]; then
+    echo "== dist-linux npm in $AMD64_IMG (linux/amd64)" >> "$LOGDIR/dist-linux.log"
+    if [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && timeout 60 docker image inspect "$AMD64_IMG" >/dev/null 2>&1; then
+      bg_wait timeout -k 30 2400 docker run --rm --pull=never --platform linux/amd64 -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
+        "$AMD64_IMG" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
+    else echo "FAIL: the x64 package needs the amd64 leg's build and image (./test-all amd64 dist-linux)" >> "$LOGDIR/dist-linux.log"; ok=0; fi
+  fi
   [ $ok = 1 ] && record dist-linux PASS || record dist-linux "FAIL ($LOGDIR/dist-linux.log)"
 }
 
