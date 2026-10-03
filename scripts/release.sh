@@ -350,8 +350,8 @@ npm_check() { # dir
   trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
   mkdir -m 700 "$nt" "$nt/p" "$nt/ref" || die "no temp dir"
   # the four packages, read raw, before anything unpacks them (npm-same.py says why), against the
-  # tag's license texts and launcher
-  for x in LICENSE-MIT LICENSE-APACHE npm/sheepdog/bin/sheepdog; do
+  # tag's license texts, README and launcher
+  for x in LICENSE-MIT LICENSE-APACHE README.md npm/sheepdog/bin/sheepdog; do
     git -C "$root" show "$tag:$x" > "$nt/ref/$(basename "$x")" 2>/dev/null || die "cannot read $x at $tag"
   done
   mv "$nt/ref/sheepdog" "$nt/ref/launcher"

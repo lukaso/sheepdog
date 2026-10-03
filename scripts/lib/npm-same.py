@@ -99,20 +99,25 @@ def plain(path, what, allow_dirs, canonical=False):
 def ref(p): return open(p, "rb").read()
 
 LIC = ["LICENSE-MIT", "LICENSE-APACHE"]
+# every package links the repository and its home page (the npm page shows both)
+LINKS = {"repository": {"type": "git", "url": "git+https://github.com/lukaso/sheepdog.git"},
+         "homepage": "https://github.com/lukaso/sheepdog#readme"}
 def pkgjson(kind, nv):
     """The package.json npm-pack.sh writes for KIND, as a dict (key order is the file's order)."""
     lic = "MIT OR Apache-2.0"
     if kind == "main":
         return {"name": "@lukaso/sheepdog", "version": nv,
                 "description": "Run a command and kill every process it started, escapees included",
-                "license": lic, "bin": {"sheepdog": "bin/sheepdog"}, "files": ["bin"] + LIC,
+                "license": lic, **LINKS, "bin": {"sheepdog": "bin/sheepdog"}, "files": ["bin"] + LIC,
                 "optionalDependencies": {"@lukaso/sheepdog-" + k: nv for k in ("darwin-universal", "linux-arm64", "linux-x64")}}
     if kind == "darwin":
-        return {"name": "@lukaso/sheepdog-darwin-universal", "version": nv, "license": lic,
-                "os": ["darwin"], "cpu": ["arm64", "x64"], "files": ["Sheepdog.app"] + LIC}
+        return {"name": "@lukaso/sheepdog-darwin-universal", "version": nv,
+                "description": "The macOS build of @lukaso/sheepdog; install that package, not this one",
+                "license": lic, **LINKS, "os": ["darwin"], "cpu": ["arm64", "x64"], "files": ["Sheepdog.app"] + LIC}
     if kind in ("linux-arm64", "linux-x64"):
-        return {"name": "@lukaso/sheepdog-" + kind, "version": nv, "license": lic,
-                "os": ["linux"], "cpu": [kind[len("linux-"):]], "files": ["bin"] + LIC}
+        return {"name": "@lukaso/sheepdog-" + kind, "version": nv,
+                "description": "The Linux %s build of @lukaso/sheepdog; install that package, not this one" % kind[len("linux-"):],
+                "license": lic, **LINKS, "os": ["linux"], "cpu": [kind[len("linux-"):]], "files": ["bin"] + LIC}
     die("no package kind %s" % kind)
 
 def packages(d, nv, r):
@@ -123,11 +128,13 @@ def packages(d, nv, r):
         f = plain(os.path.join(d, fn), fn, False, canonical=True)
         for n in f:
             if not n.startswith("package/"): die("%s: an entry outside package/: %s" % (fn, n))
-        want = {"package/package.json"} | {"package/" + n for n in LIC}
+        want = {"package/package.json"} | {"package/" + n for n in LIC} | ({"package/README.md"} if kind == "main" else set())
         want |= {n for n in f if n.startswith("package/Sheepdog.app/")} if kind == "darwin" else {"package/bin/sheepdog"}
         if set(f) != want: die("%s: the files are %s, not %s" % (fn, sorted(f), sorted(want)))
         for n, b in lic.items():
             if f["package/" + n][2] != b: die("%s: %s differs from the repo's (at the tag)" % (fn, n))
+        if kind == "main" and f["package/README.md"][2] != ref(os.path.join(r, "README.md")):
+            die("%s: README.md differs from the repo's (at the tag)" % fn)
         try: pj = json.loads(f["package/package.json"][2])
         except ValueError: die("%s: package.json is not JSON" % fn)
         if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))

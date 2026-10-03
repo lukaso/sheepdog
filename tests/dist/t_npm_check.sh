@@ -2,7 +2,8 @@
 # PHASE3.md §5 step 5: `release.sh npm-check vTAG` before any `npm publish`: the manifest is this
 # tag's signed, non-control build; the release archive and the four .tgz files are there and each
 # matches its manifest hash; the darwin package's bundle passes the real-tool checks, and the
-# release archive's bundle meets the requirement and is byte-identical to it. Refused (exit 1)
+# release archive's bundle meets the requirement and is byte-identical to it; the main package
+# carries the tag's README, and every package links the repository. Refused (exit 1)
 # here: an unsigned build, a control build, a tarball or a release archive whose hash is not the
 # manifest's, a missing tarball, and an unsigned bundle in the darwin package (by codesign).
 # (The rc leg adds, on real builds: rc.1 accepted; a tampered or another Developer ID archive
@@ -58,6 +59,8 @@ for v in "DT|add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outsid
          "DT|replace|package/LICENSE-MIT|not the license|LICENSE-MIT differs from the repo" \
          "DT|json-set|package/package.json|scripts={\"postinstall\": \"echo hi\"}|package.json is not the one npm-pack.sh writes: .*\"scripts\"" \
          "MT|replace|package/bin/sheepdog|#!/bin/sh|bin/sheepdog differs from the repo's launcher" \
+         "MT|replace|package/README.md|not the readme|README.md differs from the repo's" \
+         "MT|remove|package/README.md|-|the files are" \
          "MT|json-set|package/package.json|optionalDependencies={\"@lukaso/sheepdog-darwin-universal\": \"*\"}|optionalDependencies" \
          "XT|replace|package/bin/sheepdog|#!/bin/sh|bin/sheepdog differs from sheepdog-linux-x86_64" \
          "MT|add|package/binding.gyp|{}|the files are" \
@@ -85,4 +88,11 @@ app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain; nc; r=$?
 [ $r = 1 ] && grep -q 'a control build' "$FX/o" && ! grep -q codesign "$FX/o" && pass "a control build's bundle in the darwin package: refused before any real-tool check" || fail "marked: rc=$r $(tail -1 "$FX/o")"
 mk signed false; nc; r=$?
 [ $r = 1 ] && grep -q 'codesign' "$FX/o" && pass "an unsigned bundle in the darwin package: refused, by codesign" || fail "unsigned bundle: rc=$r $(tail -1 "$FX/o")"
+# the npm page: the main package carries the README (npm shows it), and every package links the
+# repository and its home page
+tar -xzOf "$D/$MT" package/README.md 2>/dev/null | cmp -s - "$SD_ROOT/README.md" && pass "the main package carries the repo's README" || fail "the main package's README is missing or not the repo's"
+for t in "$MT" "$DT" lukaso-sheepdog-linux-arm64-$nv.tgz "$XT"; do
+  j=$(tar -xzOf "$D/$t" package/package.json 2>/dev/null)
+  case $j in *'"url": "git+https://github.com/lukaso/sheepdog.git"'*'"homepage": "https://github.com/lukaso/sheepdog#readme"'*) pass "$t links the repository and its home page" ;; *) fail "$t: no repository or homepage in package.json" ;; esac
+done
 finish

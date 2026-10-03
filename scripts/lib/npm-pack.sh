@@ -4,7 +4,7 @@
 #   npm-pack.sh VERSION ARCHIVE LINUX-AARCH64 LINUX-X86_64 LAUNCHER DEST
 # ARCHIVE is the macOS release archive (its Sheepdog.app goes into the darwin package); LAUNCHER the
 # sh launcher (npm/sheepdog/bin/sheepdog). The main package's optional dependencies are pinned to
-# exactly VERSION. Each package carries the license (MIT OR Apache-2.0): the expression in
+# exactly VERSION; it carries the README. Each package carries the license (MIT OR Apache-2.0): the expression in
 # package.json and both texts from the root of the tree this script is in. npm runs with a temp HOME, cache and userconfig (never the user's ~/.npmrc).
 # Prints the four file names.
 set -u
@@ -16,6 +16,8 @@ trap 'rm -rf "$pk"' EXIT
 mkdir -p "$pk/main/bin" "$pk/darwin" "$pk/linux-arm64/bin" "$pk/linux-x64/bin" "$pk/home" || exit 1
 : > "$pk/npmrc"
 cp "$launcher" "$pk/main/bin/sheepdog" && chmod 755 "$pk/main/bin/sheepdog" || exit 1
+# the README, for the npm page (npm packs a README whatever "files" says)
+cp "$root/README.md" "$pk/main/README.md" || { echo "npm-pack: no README.md in $root" >&2; exit 1; }
 # each package.json from npm-same.py, which npm-check compares against (one source for both)
 pj() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" pkgjson "$@"; }
 pj main "$nv" > "$pk/main/package.json" || { echo "npm-pack: package.json (main)" >&2; exit 1; }
