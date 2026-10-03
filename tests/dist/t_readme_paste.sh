@@ -51,8 +51,25 @@ print("\n".join(bad)); sys.exit(1 if bad else 0)
 PY
 }
 if command -v zsh > /dev/null 2>&1; then
-  out=$(printf 'echo a # b\nexit\n' | env -i PATH=/usr/bin:/bin HOME="$FX" zsh -f -i 2>/dev/null | grep -x 'a # b')
+  # an interactive zsh, detached from any terminal (its own session, no job control, no line
+  # editor), so it reads the pipe and never takes over the terminal the cell runs in
+  cat > "$FX/premise.sh" <<'SH'
+printf 'echo a # b\nexit\n' | env -i PATH=/usr/bin:/bin HOME="$1" perl -MPOSIX -e 'POSIX::setsid() != -1 or die "setsid\n"; exec @ARGV' zsh -f -i +m +Z ${2:+"$2"} 2>/dev/null | tr -d '\r'
+SH
+  out=$(sh "$FX/premise.sh" "$FX" | grep -x 'a # b')
   [ "$out" = "a # b" ] && pass "premise: an interactive zsh passes '#' on as an argument" || fail "premise: an interactive zsh read '#' as a comment ('$out')"
+  out=$(sh "$FX/premise.sh" "$FX" -o\ interactivecomments | grep -cx 'a # b')
+  [ "$out" = 0 ] && pass "control: with interactivecomments on, the same zsh reads '#' as a comment" || fail "control: interactivecomments made no difference ($out)"
+  # the premise run under a pseudo-terminal whose input stays open ends at once (it used to take the
+  # terminal over and wait for typing)
+  if command -v script > /dev/null 2>&1; then
+    # input that stays open: a pipe from a sleep (script refuses a FIFO), stopped by its pid once
+    # script ends, so the pipeline does not wait for it
+    s0=$(date +%s)
+    (sleep 20 & echo $! > "$FX/sp"; wait) | { timeout -k 2 10 script -q /dev/null sh "$FX/premise.sh" "$FX" > "$FX/pty.out" 2>&1; echo $? > "$FX/pty.rc"; kill "$(cat "$FX/sp")" 2>/dev/null; }
+    r=$(cat "$FX/pty.rc"); dt=$(( $(date +%s) - s0 ))
+    [ $r = 0 ] && [ $dt -lt 8 ] && tr -d '\r' < "$FX/pty.out" | grep -qx 'a # b' && pass "the premise under a pty with open input ends in ${dt}s" || fail "the premise under a pty: rc=$r after ${dt}s"
+  fi
 fi
 printf '```sh\nrm -rf x  # a note\n```\n' > "$FX/t1.md"; chk "$FX/t1.md" > /dev/null && fail "control: a trailing comment passed" || pass "control: a trailing comment is refused"
 printf '```sh\n# a note\nls\n```\n' > "$FX/t2.md"; chk "$FX/t2.md" > /dev/null && fail "control: a comment line passed" || pass "control: a comment line is refused"
