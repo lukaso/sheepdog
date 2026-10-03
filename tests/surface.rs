@@ -511,6 +511,17 @@ fn every_suggested_line_runs_the_typed_command() {
         assert_eq!(e.code, Some(2), "{args:?}: {}", e.err);
         assert!(!e.err.contains("-- ''") && !e.err.contains("-- --"), "{args:?}: {}", e.err);
     }
+    // a value run would refuse is named, as run names it, and no line is offered (pasted, it would
+    // fail again); control: --quiet before run still gets a line that runs
+    for args in [&["--timeout", "bad", "x"][..], &["--timeout", "bad", "run", "/usr/bin/true"], &["--status-fd", "2", "x"]] {
+        let e = sd(args);
+        let first = e.err.lines().next().unwrap_or("").to_string();
+        assert!(e.code == Some(2) && !first.contains("sheepdog run ") && first.contains(&format!("{} {}", args[0], args[1])) && first.contains("is not valid"), "{args:?}: {first}");
+    }
+    let ok = sd(&["--quiet", "run", "/usr/bin/true"]);
+    let line = ok.err.lines().next().unwrap_or("").to_string();
+    let line = line[line.find("sheepdog run ").unwrap_or_else(|| panic!("no line: {line}"))..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    assert_eq!(Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap().code(), Some(0), "{line}");
     // run named after its options: the line puts -- before the command, and runs it
     let r = sd(&["--quiet", "run", "echo", "hi"]);
     let first = r.err.lines().next().unwrap_or("").to_string();

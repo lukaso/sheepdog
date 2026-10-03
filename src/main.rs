@@ -279,7 +279,8 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
     while i < e.opts() {
         if value_rule(w[i].as_bytes()).is_some() {
             if w[i].as_bytes() == b"--status-fd" {
-                fd = Some(w[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n: &i32| n >= 3)?);
+                let Some(OptVal::StatusFd(n)) = opt_value(w[i].as_bytes(), &w[i + 1]) else { return None };
+                fd = Some(n);
             }
             i += 2;
         } else {
@@ -424,11 +425,61 @@ fn run_line(w: &[OsString], o: usize, c: usize) -> Option<String> {
     Some(parts.join(" "))
 }
 
+/// One option's value as run takes it: the one home for run's parser, its status-fd prescan and
+/// its suggestions (None: run refuses it).
+enum OptVal {
+    Mode(String),
+    Timeout(Duration),
+    KillDeadline(Duration),
+    MaxMem(u64),
+    MaxProcs(usize),
+    Owner(String),
+    StatusFd(i32),
+    Grace(Duration),
+}
+
+fn opt_value(flag: &[u8], raw: &OsString) -> Option<OptVal> {
+    let v = raw.to_string_lossy();
+    Some(match flag {
+        b"--mode" => OptVal::Mode(v.into_owned()),
+        b"--timeout" => OptVal::Timeout(parse_long_duration(&v).filter(|d| !d.is_zero())?),
+        b"--kill-deadline" => OptVal::KillDeadline(parse_duration(&v).filter(|d| !d.is_zero())?),
+        b"--max-mem" => OptVal::MaxMem(caps::parse_size(&v)?),
+        b"--max-procs" => OptVal::MaxProcs(raw.to_str().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0)?),
+        b"--owner" => OptVal::Owner(v.into_owned()),
+        // 0-2 would be the command's own streams (the status fd is set close-on-exec)
+        b"--status-fd" => OptVal::StatusFd(raw.to_str().and_then(|v| v.parse::<i32>().ok()).filter(|&n| n >= 3)?),
+        b"--grace" => OptVal::Grace(parse_duration(&v)?),
+        _ => return None,
+    })
+}
+
+/// The first value among run's options W[..END] that run refuses, said as run's parser says it.
+fn bad_value(w: &[OsString], end: usize) -> Option<String> {
+    let mut i = 0;
+    while i < end {
+        let Some(rule) = value_rule(w[i].as_bytes()) else {
+            i += 1;
+            continue;
+        };
+        if opt_value(w[i].as_bytes(), &w[i + 1]).is_none() {
+            return Some(format!("{} {} is not valid. It must be {rule}.", shown(&w[i]), shown(&w[i + 1])));
+        }
+        i += 2;
+    }
+    None
+}
+
 /// What sheepdog suggests for WORDS read as run's arguments: the line, or why there is none.
 fn run_suggestion(w: &[OsString]) -> Result<String, String> {
     const CMDS: &str = "Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).";
     let no_line = |c: usize| format!("{} is not a command to run. {CMDS}", shown(&w[c]));
-    match opts_end(w) {
+    let e = opts_end(w);
+    // a value run would refuse: named, as run names it (a line with it would fail again)
+    if let Some(why) = bad_value(w, e.opts()) {
+        return Err(why);
+    }
+    match e {
         OptsEnd::Sep(s) => run_line(w, s, s + 1).ok_or_else(|| no_line(s + 1)),
         OptsEnd::Missing(o, c) => run_line(w, o, c).ok_or_else(|| no_line(c)),
         OptsEnd::NoValue(i) => Err(format!("{} is not a sheepdog command; as an option of run it needs a value. {CMDS}", shown(&w[i]))),
@@ -459,18 +510,16 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
         let flag = w[i].as_bytes();
         if let Some(rule) = value_rule(flag) {
             let (name, raw) = (shown(&w[i]), &w[i + 1]);
-            let v = raw.to_string_lossy();
             let bad = || usage_because(format!("{name} {} is not valid. It must be {rule}.", shown(raw)));
-            match flag {
-                b"--mode" => mode = Some(v.into_owned()),
-                b"--timeout" => timeout = Some(parse_long_duration(&v).filter(|d| !d.is_zero()).ok_or_else(bad)?),
-                b"--kill-deadline" => kill_deadline = Some(parse_duration(&v).filter(|d| !d.is_zero()).ok_or_else(bad)?),
-                b"--max-mem" => max_mem = Some(caps::parse_size(&v).ok_or_else(bad)?),
-                b"--max-procs" => max_procs = Some(raw.to_str().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(bad)?),
-                b"--owner" => owner = v.into_owned(),
-                // 0-2 would be the command's own streams (the status fd is set close-on-exec)
-                b"--status-fd" => status_fd = Some(raw.to_str().and_then(|v| v.parse::<i32>().ok()).filter(|&n| n >= 3).ok_or_else(bad)?),
-                _ => grace = parse_duration(&v).ok_or_else(bad)?,
+            match opt_value(flag, raw).ok_or_else(bad)? {
+                OptVal::Mode(m) => mode = Some(m),
+                OptVal::Timeout(d) => timeout = Some(d),
+                OptVal::KillDeadline(d) => kill_deadline = Some(d),
+                OptVal::MaxMem(n) => max_mem = Some(n),
+                OptVal::MaxProcs(n) => max_procs = Some(n),
+                OptVal::Owner(o) => owner = o,
+                OptVal::StatusFd(fd) => status_fd = Some(fd),
+                OptVal::Grace(d) => grace = d,
             }
             i += 2;
             continue;
