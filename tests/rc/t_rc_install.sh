@@ -138,10 +138,11 @@ done
 # neither move into Applications works (a stand-in mv refuses any move onto the app's path): the
 # old app stays where it was moved aside, and the message says where
 H6=$FX/home6; mkdir -p "$H6" "$FX/mvbin"; inst "$FX/srv" "$H6" >/dev/null 2>&1
+ino=$(stat -f %i "$H6/Applications/Sheepdog.app" 2>/dev/null)   # the old app, by its inode
 printf '#!/bin/sh\nfor a; do last=$a; done\ncase $last in */Applications/Sheepdog.app) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$FX/mvbin/mv"; chmod 755 "$FX/mvbin/mv"
 inst "$FX/srv" "$H6" "$FX/mvbin"; r=$?
 k=$(sed -n 's/.*nor the old one back; the old one is at \(.*\)$/\1/p' "$FX/o")
-[ $r = 1 ] && [ -n "$k" ] && [ -d "$k" ] && [ ! -e "$H6/Applications/Sheepdog.app" ] \
+[ $r = 1 ] && [ -n "$k" ] && [ -n "$ino" ] && [ "$(stat -f %i "$k" 2>/dev/null)" = "$ino" ] && [ ! -e "$H6/Applications/Sheepdog.app" ] \
   && pass "neither move works: exit 1, the old app kept at the path the message names" || fail "both moves fail: rc=$r kept='$k' $(tail -1 "$FX/o")"
 # refused: nothing installed, nothing left
 refused() { # home what reason

@@ -475,22 +475,48 @@ fn strays_kill_skips_a_program_inits_child() {
 }
 
 /// On a terminal, `--kill` without `--yes` asks first, and the question starts with `sheepdog:`
-/// as every message sheepdog writes does; "n" signals nothing. (macOS: `script` gives it the
-/// terminal.)
+/// as every message sheepdog writes does; "n" reaches no kill and says so, "y" reaches the kill
+/// (inert: it logs the signal it would send). (macOS: `script` gives it the terminal.)
 #[cfg(target_os = "macos")]
 #[test]
 fn strays_kill_asks_with_the_sheepdog_prefix() {
-    use std::io::Write;
+    use std::io::{Read, Write};
     let _s = serial();
     let mut a = Cell::new();
     a.make(&["stray", "{}", "s"], &["s"]);
-    let mut c = Command::new("/usr/bin/script");
-    c.args(["-q", "/dev/null", sheepdog(), "strays", "--kill", "--cmd", &a.word]).env("SHEEPDOG_TEST_INERT", "1");
-    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut ch = c.spawn().unwrap();
-    ch.stdin.take().unwrap().write_all(b"n\n").unwrap();
-    let o = ch.wait_with_output().unwrap();
-    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-    assert!(all.contains("sheepdog: kill these 1 process(es)? [y/N]"), "the question: {all:?}");
-    assert!(a.untouched("s"), "a 'no' signalled the stray");
+    let log = a.path("inert.log");
+    // the answer goes in after the question is on the terminal, and the input stays open until the
+    // command has ended (at the end of its input script sends an end-of-file first, measured, and
+    // an empty answer reads as no)
+    let ask = |answer: &[u8]| {
+        let _ = std::fs::remove_file(&log);
+        let mut c = Command::new("/usr/bin/script");
+        c.args(["-q", "/dev/null", sheepdog(), "strays", "--kill", "--cmd", &a.word]).env("SHEEPDOG_TEST_INERT", "1").env("SHEEPDOG_TEST_SIGNAL_LOG", &log);
+        c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut ch = c.spawn().unwrap();
+        let (mut input, mut out) = (ch.stdin.take().unwrap(), ch.stdout.take().unwrap());
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !String::from_utf8_lossy(&seen).contains("[y/N]") {
+            let n = out.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&buf[..n]);
+        }
+        input.write_all(answer).unwrap();
+        input.flush().unwrap();
+        out.read_to_end(&mut seen).unwrap();
+        drop(input);
+        ch.wait().unwrap();
+        let all = String::from_utf8_lossy(&seen).into_owned();
+        let sent = std::fs::read_to_string(&log).unwrap_or_default().lines().filter(|l| l.starts_with("inert ")).count();
+        (all, sent)
+    };
+    let (no, no_sent) = ask(b"n\n");
+    assert!(no.contains("sheepdog: kill these 1 process(es)? [y/N]"), "the question: {no:?}");
+    assert!(no.contains("sheepdog: nothing was signalled.") && no_sent == 0, "a 'no' went on: {no:?} ({no_sent} logged)");
+    let (yes, yes_sent) = ask(b"y\n");
+    assert!(yes_sent > 0 && !yes.contains("nothing was signalled"), "control: a 'yes' did not reach the kill: {yes:?} ({yes_sent} logged)");
+    assert!(a.untouched("s"), "the inert kill signalled the stray");
 }

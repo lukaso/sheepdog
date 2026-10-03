@@ -92,6 +92,10 @@ rm -f /tmp/lp /tmp/esc
 asu "'$E' run -- sh -c 'setsid sleep 300 & echo \$! > /tmp/esc; exec sleep 300' & echo \$! > /tmp/lp; wait" >/dev/null 2>&1 & su=$!
 i=0; while { [ ! -s /tmp/lp ] || [ ! -s /tmp/esc ]; } && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 lp=$(cat /tmp/lp 2>/dev/null) esc=$(cat /tmp/esc 2>/dev/null)
+# the escapee is written down right after its fork: wait until it is sleep, in a session of its own
+sid() { sed -n 's/^[^)]*) [A-Z] [0-9]* [0-9]* \([0-9]*\).*/\1/p' "/proc/$1/stat" 2>/dev/null; }
+a0() { asu "tr '\\000' '\\n' < /proc/$1/cmdline" 2>/dev/null | head -1; }
+i=0; while [ -n "$esc" ] && [ $i -lt 50 ]; do case $(a0 "$esc") in *sleep) [ "$(sid "$esc")" = "$esc" ] && break ;; esac; sleep 0.1; i=$((i + 1)); done
 # what a pid runs: its exe link, read as the process's own user (root in a container has no
 # CAP_SYS_PTRACE for another user's). Under Rosetta (amd64 containers on Apple silicon) the link
 # names the translator and /proc/<pid>/cmdline stays clean (PHASE1.md, measured), so the program is
@@ -107,11 +111,11 @@ runs() { # pid -> path
 want=$(readlink -f "$B"); x=""; i=0
 while [ $i -lt 50 ]; do x=$(runs "$lp"); [ "${x#translated: }" = "$want" ] && break; sleep 0.1; i=$((i + 1)); done
 [ -n "$lp" ] && [ "${x#translated: }" = "$want" ] && ok "the process the PATH entry started is the installed binary, with the launcher's pid (pid $lp: $x)" || bad "pid $lp runs '$x', not $B"
-# control: the same read names the escapee's own program (sleep: busybox's, or coreutils'), once it
-# has become sleep (it is written down right after its fork)
-xe=""; i=0; while [ $i -lt 50 ]; do xe=$(runs "$esc"); case $xe in *busybox|*sleep) break ;; esac; sleep 0.1; i=$((i + 1)); done
+# control: the same read names the escapee's own program (sleep: busybox's, or coreutils'; it is
+# sleep by now, waited for above)
+xe=$(runs "$esc")
 case $xe in *busybox|*sleep) ok "control: the escapee's program reads as $xe, not the binary" ;; *) bad "control: the escapee reads as '$xe' after 5 s" ;; esac
-[ -n "$esc" ] && [ "$(sed -n 's/^[^)]*) [A-Z] [0-9]* [0-9]* \([0-9]*\).*/\1/p' "/proc/$esc/stat" 2>/dev/null)" = "$esc" ] \
+[ -n "$esc" ] && [ "$(sid "$esc")" = "$esc" ] \
   && ok "the escapee is in a session of its own ($esc)" || bad "the escapee $esc did not leave the session"
 [ -n "$lp" ] && kill -TERM "$lp"; wait $su
 i=0; while kill -0 "$esc" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
