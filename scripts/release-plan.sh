@@ -11,6 +11,7 @@
 #   - an upload set that is not exactly the five release files (other files in DIR are allowed
 #     and never uploaded);
 #   - a SHA256SUMS that is not exactly four well-formed lines naming the other four, each matching;
+#   - one of those four whose sha256 is not its MANIFEST.json entry's (the build's);
 #   - a manifest commit that is not the local tag's commit, or not the remote tag's (for an
 #     annotated tag only the peeled `^{}` line counts; no remote tag is refused);
 #   - a release or draft that already uses the tag.
@@ -71,6 +72,12 @@ names=$(sed 's/^[0-9a-f]\{64\}  //' "$out/SHA256SUMS" | sort | tr '\n' ' ')
 [ "$names" = "install.sh sheepdog-linux-aarch64 sheepdog-linux-x86_64 sheepdog-macos-universal.tar.gz " ] \
   || die "SHA256SUMS names $names"
 (cd "$out" && shasum -a 256 -c --strict SHA256SUMS >/dev/null 2>&1) || die "a file does not match SHA256SUMS (or a malformed line)"
+# and each is the file the build made: its MANIFEST.json hash (SHA256SUMS sits in the same
+# directory, so a file changed with SHA256SUMS made again would pass the check above)
+for x in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do
+  h=$(shasum -a 256 "$out/$x" | cut -d' ' -f1)
+  [ "$(grep -c "\"name\": \"$x\", \"sha256\": \"$h\"" "$m")" = 1 ] || die "$x does not match its manifest hash"
+done
 
 # the commit: local and remote
 lc=$(git rev-parse -q --verify "refs/tags/$tag^{commit}") || die "no local tag $tag"

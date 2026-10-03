@@ -5,7 +5,8 @@
 #     marker (rc.1's, which predates the marker: by stapler), and Gatekeeper (spctl) rejects the
 #     control's bundle too; a copy of the rc without its staple ticket refused by stapler even with
 #     a DEVELOPER_DIR whose xcrun says yes to everything;
-#   - npm-check: the rc accepted; a copy whose release archive does not match the manifest
+#   - npm-check (each run on a copy): the rc accepted, and its stamp written (the tag and the
+#     manifest's sha256: publish refuses without it); a copy whose release archive does not match the manifest
 #     refused by its hash; a tampered archive (the manifest updated) refused by the comparison;
 #     the control's archive in the release's place refused by the archive check (no staple
 #     ticket); the control refused by its mode; a copy of the control with the mode and control
@@ -79,9 +80,12 @@ DEVELOPER_DIR="$FX/dev" /usr/bin/xcrun stapler validate "$FX/nsb/Sheepdog.app" >
 (cd "$SD_ROOT" && env HOME="$FX/h" DEVELOPER_DIR="$FX/dev" sh scripts/release.sh verify --out "$FX/ns" "$tag" < /dev/null) > "$FX/o" 2>&1; r=$?
 [ $r = 1 ] && grep -q 'stapler' "$FX/o" && pass "verify: no staple ticket refused by stapler, a lying DEVELOPER_DIR ignored" || fail "verify, lying DEVELOPER_DIR: $r $(tail -1 "$FX/o")"
 
-# npm-check
-rel npm-check --out "$(dirname "$RC")" "$tag" > "$FX/o" 2>&1; r=$?
+# npm-check (on a copy: a pass writes its stamp, and the rc output stays read only)
+cpy "$RC" ok; rm -f "$FX/ok/$tag/NPM-CHECKED"
+rel npm-check --out "$FX/ok" "$tag" > "$FX/o" 2>&1; r=$?
 [ $r = 0 ] && pass "npm-check: the rc accepted" || fail "npm-check rc: $r $(tail -1 "$FX/o")"
+[ "$(cat "$FX/ok/$tag/NPM-CHECKED" 2>/dev/null)" = "$tag $(shasum -a 256 "$FX/ok/$tag/MANIFEST.json" | cut -d' ' -f1)" ] \
+  && pass "npm-check's pass wrote its stamp: the tag and the manifest's sha256" || fail "npm-check's stamp: '$(cat "$FX/ok/$tag/NPM-CHECKED" 2>/dev/null)'"
 # (a) the release archive does not match its manifest entry
 cpy "$RC" xa; mkdir -p "$FX/tb" && tar -xzf "$RC/sheepdog-macos-universal.tar.gz" -C "$FX/tb" || fail "cannot unpack the rc"
 perl -pi -e 's/<string>APPL<\/string>/<string>APPl<\/string>/' "$FX/tb/Sheepdog.app/Contents/Info.plist"

@@ -3,7 +3,8 @@
 # tag's signed, non-control build; the release archive and the four .tgz files are there and each
 # matches its manifest hash; the darwin package's bundle passes the real-tool checks, and the
 # release archive's bundle meets the requirement and is byte-identical to it; the main package
-# carries the tag's README, and every package links the repository. Refused (exit 1)
+# carries the tag's README, and every package links the repository. A refusal removes any earlier
+# stamp (NPM-CHECKED: publish refuses without one; the rc leg checks a pass writes it). Refused (exit 1)
 # here: an unsigned build, a control build, a tarball or a release archive whose hash is not the
 # manifest's, a missing tarball, and an unsigned bundle in the darwin package (by codesign).
 # (The rc leg adds, on real builds: rc.1 accepted; a tampered or another Developer ID archive
@@ -29,7 +30,10 @@ mk() { # mode control
 "; done; printf '\n  ]\n}\n'; } > "$D/MANIFEST.json"
 }
 nc() { (cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 sh scripts/release.sh npm-check --out "$FX/out" v0.1.0) > "$FX/o" 2>&1; }
-mk unsigned false; nc; r=$?; [ $r = 1 ] && grep -q "mode" "$FX/o" && pass "an unsigned build: refused (its mode)" || fail "unsigned: rc=$r $(tail -1 "$FX/o")"
+# a stamp that publish would accept (the tag and this manifest's sha256), as an earlier pass left it
+stamp() { printf 'v0.1.0 %s\n' "$(shasum -a 256 "$D/MANIFEST.json" | cut -d' ' -f1)" > "$D/NPM-CHECKED"; }
+mk unsigned false; stamp; nc; r=$?; [ $r = 1 ] && grep -q "mode" "$FX/o" && pass "an unsigned build: refused (its mode)" || fail "unsigned: rc=$r $(tail -1 "$FX/o")"
+[ ! -e "$D/NPM-CHECKED" ] && pass "a refused npm-check removes an earlier stamp (refused at the first check)" || fail "a refused npm-check left the stamp"
 mk signed true; nc; r=$?; [ $r = 1 ] && grep -q "control" "$FX/o" && pass "a control build: refused (the control flag)" || fail "control: rc=$r $(tail -1 "$FX/o")"
 mk signed false; echo x >> "$D/lukaso-sheepdog-linux-x64-$nv.tgz"; nc; r=$?
 [ $r = 1 ] && grep -q 'hash' "$FX/o" && pass "a tarball not matching its manifest hash: refused" || fail "hash: rc=$r $(tail -1 "$FX/o")"
@@ -86,8 +90,9 @@ done
 app_plain=$app; mkdir -p "$FX/mk" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -insert SheepdogControlBuild -bool true "$FX/mk/Sheepdog.app/Contents/Info.plist" || exit 3
 app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain; nc; r=$?
 [ $r = 1 ] && grep -q 'a control build' "$FX/o" && ! grep -q codesign "$FX/o" && pass "a control build's bundle in the darwin package: refused before any real-tool check" || fail "marked: rc=$r $(tail -1 "$FX/o")"
-mk signed false; nc; r=$?
+mk signed false; stamp; nc; r=$?
 [ $r = 1 ] && grep -q 'codesign' "$FX/o" && pass "an unsigned bundle in the darwin package: refused, by codesign" || fail "unsigned bundle: rc=$r $(tail -1 "$FX/o")"
+[ ! -e "$D/NPM-CHECKED" ] && pass "a refused npm-check removes an earlier stamp (refused at a real-tool check)" || fail "a refused npm-check left the stamp"
 # the npm page: the main package carries the README (npm shows it), and every package links the
 # repository and its home page
 tar -xzOf "$D/$MT" package/README.md 2>/dev/null | cmp -s - "$SD_ROOT/README.md" && pass "the main package carries the repo's README" || fail "the main package's README is missing or not the repo's"

@@ -8,6 +8,9 @@
 #     read again, the second confirmation, then the PATCH;
 #   - gh and git get only the named environment: no decoy token reaches them;
 #   - no PATCH when a download differs, when the tag moved, or when the second answer is wrong;
+#   - nothing at all without npm-check's stamp for this tag and this manifest;
+#   - a PATCH that fails: the release read again, and its real state said (public: 0; a draft or
+#     unreadable: 1);
 #   - an rc tag's draft is a prerelease;
 #   - __publish-dry refuses stand-ins outside /private/tmp/sd-p3-fixtures.*.
 set -u
@@ -16,11 +19,16 @@ fx_dir; fx_repo
 fx_release 0.1.0 1 v0.1.0
 C=$(g rev-parse "v0.1.0^{commit}"); T=$(g rev-parse v0.1.0)
 DECOY=decoy-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
-mkout() { # dir tag commit
+mkout() { # dir tag commit: the five files, the manifest naming each one's hash, and npm-check's
+           # stamp for that manifest (as a passed npm-check leaves it)
   rm -rf "$1"; mkdir -p "$1"
   for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do echo "$f $1" > "$1/$f"; done
   (cd "$1" && shasum -a 256 sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
-  printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "signed",\n  "control": false,\n  "files": []\n}\n' "$2" "$3" > "$1/MANIFEST.json"
+  { printf '{\n  "v": 1,\n  "tag": "%s",\n  "commit": "%s",\n  "mode": "signed",\n  "control": false,\n  "files": [\n' "$2" "$3"
+    sep=""; for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do
+      printf '%s    {"name": "%s", "sha256": "%s"}' "$sep" "$f" "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)"; sep=",
+"; done; printf '\n  ]\n}\n'; } > "$1/MANIFEST.json"
+  printf '%s %s\n' "$2" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)" > "$1/NPM-CHECKED"
 }
 # the stand-ins
 cat > "$FX/gh" <<EOF
@@ -32,9 +40,10 @@ case "\$*" in
   "api -X POST repos/lukaso/sheepdog/releases "*) echo 4242 ;;
   *"uploads.github.com"*) prev=""; for a; do case \$a in *assets\\?name=*) nm=\${a##*name=} ;; esac; [ "\$prev" = --input ] && in=\$a; prev=\$a; done
     mkdir -p "$FX/up"; cp "\$in" "$FX/up/\$nm"; echo 1 ;;
-  "api repos/lukaso/sheepdog/releases/4242 --jq "*) i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); echo "\$i \$f"; done ;;
+  "api repos/lukaso/sheepdog/releases/4242 --jq .assets"*) i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); echo "\$i \$f"; done ;;
   *"releases/assets/"*) for a; do last=\$a; done; id=\${last##*/}; f=\$(ls "$FX/up" | sed -n "\${id}p"); cat "$FX/up/\$f"; [ -e "$FX/corrupt" ] && [ "\$f" = "\$(cat "$FX/corrupt")" ] && echo x ;;
-  *"PATCH"*) : ;;
+  *"PATCH"*) [ -e "$FX/patchfail" ] && exit 1 ;;
+  *"--jq .draft"*) s=\$(cat "$FX/draftstate" 2>/dev/null); [ "\$s" = fail ] && exit 1; echo "\$s" ;;
 esac
 exit 0
 EOF
@@ -77,6 +86,24 @@ pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/moved"
 [ $r = 1 ] && ! grep -q PATCH "$FX/calls" && pass "the tag moved during the upload: no PATCH (1)" || fail "moved tag: rc=$r"
 pub v0.1.0 no; r=$?
 [ $r = 1 ] && ! grep -q PATCH "$FX/calls" && pass "a wrong second answer: no PATCH (1)" || fail "wrong answer: rc=$r"
+
+# npm-check comes first: without its stamp for this manifest, nothing reaches GitHub
+rm "$FX/out/v0.1.0/NPM-CHECKED"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'npm-check' "$FX/o" && pass "no npm-check stamp: refused before any call, npm-check named" || fail "no stamp: rc=$r calls=$(seq)"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; echo ' ' >> "$FX/out/v0.1.0/MANIFEST.json"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && pass "a stamp for another manifest (changed after npm-check): refused before any call" || fail "stale stamp: rc=$r calls=$(seq)"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; sed 's/^v0.1.0 /v0.1.0-rc.9 /' "$FX/out/v0.1.0/NPM-CHECKED" > "$FX/s" && mv "$FX/s" "$FX/out/v0.1.0/NPM-CHECKED"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && pass "a stamp for another tag: refused before any call" || fail "other tag's stamp: rc=$r calls=$(seq)"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# the last request fails: the release is read again and its real state reported
+touch "$FX/patchfail"
+echo false > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 0 ] && grep -q 'v0.1.0 is public' "$FX/o" && pass "the PATCH failed but the release is public: said so (0)" || fail "patch failed, public: rc=$r $(tail -1 "$FX/o")"
+echo true > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && grep -q 'still a draft' "$FX/o" && pass "the PATCH failed and the release is still a draft: said so (1)" || fail "patch failed, draft: rc=$r $(tail -1 "$FX/o")"
+echo fail > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && grep -q 'check it on GitHub' "$FX/o" && pass "the PATCH failed and the state cannot be read: said so (1)" || fail "patch failed, unreadable: rc=$r $(tail -1 "$FX/o")"
+rm -f "$FX/patchfail" "$FX/draftstate"
 
 fx_release 0.1.1 2 v0.1.1-rc.1; C2=$(g rev-parse "v0.1.1-rc.1^{commit}")
 printf '%s\trefs/tags/v0.1.1-rc.1\n' "$C2" > "$FX/remote"

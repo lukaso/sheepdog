@@ -279,10 +279,17 @@ confirm() { # prompt -> 0 on the tag typed back
   fi
   [ "$a" = "$tag" ]
 }
+# npm-check's stamp (NPM-CHECKED in the output dir): the tag and the sha256 of the MANIFEST.json it
+# passed on. npm is the last one-way step, so its check must pass before anything is public.
+stamp_line() { printf '%s %s' "$tag" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)"; }
+stamp_ok() { # dir -> 0 if npm-check passed on this tag and this manifest
+  [ -f "$1/NPM-CHECKED" ] && [ -f "$1/MANIFEST.json" ] && [ "$(cat "$1/NPM-CHECKED")" = "$(stamp_line "$1")" ]
+}
 publish_exec() { # dir
   d=$1
   pt=$(mktemp -d /private/tmp/sd-publish.XXXXXX) || die "no temp dir"
   trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
@@ -307,7 +314,15 @@ publish_exec() { # dir
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
   cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload; the draft $id stays a draft"
   confirm "release: the draft $id holds the five files, each matching. Type the tag again to make it public:" || die "not confirmed; the draft $id stays a draft"
-  tool "$NETC" "$GH" api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null || die "gh: cannot publish the draft $id"
+  if ! tool "$NETC" "$GH" api -X PATCH "repos/lukaso/sheepdog/releases/$id" -F draft=false >/dev/null; then
+    # the request failed, but GitHub may have made the release public anyway: read it again
+    st=$(tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases/$id" --jq .draft) || st=""
+    case $st in
+      false) echo "release: the publish request failed, but $tag is public (the release reads draft: false)"; return 0 ;;
+      true) die "gh: cannot publish the draft $id; it is still a draft" ;;
+      *) die "gh: cannot publish the draft $id, and cannot read whether it is public: check it on GitHub" ;;
+    esac
+  fi
   echo "release: $tag published"
 }
 publish() {
@@ -340,6 +355,8 @@ npm_check() { # dir
   . "$root/scripts/lib/realtools.sh" || die "cannot read realtools.sh"
   d=$1 m=$1/MANIFEST.json nv=${tag#v}
   [ -f "$m" ] || die "no $m"
+  # a stamp from an earlier pass never outlives a check that does not pass
+  rm -f "$d/NPM-CHECKED" || die "cannot remove $d/NPM-CHECKED"
   mode=$(sed -n 's/^ *"mode": *"\([^"]*\)",*$/\1/p' "$m"); ctl=$(sed -n 's/^ *"control": *\([a-z]*\),*$/\1/p' "$m")
   mtag=$(sed -n 's/^ *"tag": *"\([^"]*\)",*$/\1/p' "$m")
   [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
@@ -375,7 +392,8 @@ npm_check() { # dir
   "$root/scripts/lib/archive.sh" check "$d/sheepdog-macos-universal.tar.gz" --signed || die "the release archive fails its check (above)"
   npy same "$dt" "$d/sheepdog-macos-universal.tar.gz" || die "the darwin package's bundle is not the release archive's bundle (above)"
   rm -rf "$nt"; trap - EXIT
-  echo "release: the npm tarballs of $tag check out; publish them, platform packages first"
+  stamp_line "$d" > "$d/NPM-CHECKED" || die "cannot write $d/NPM-CHECKED"
+  echo "release: the npm tarballs of $tag check out (NPM-CHECKED written); publish comes next, then publish-npm"
 }
 
 # --- verify: the three facts, from the archive, by the real tools (PHASE3.md §1.2) --------------

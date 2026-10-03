@@ -2,7 +2,9 @@
 # PHASE3.md §1.2: scripts/release-plan.sh, the publish planner. It is pure: it reads the release's
 # output directory, the local tag, the remote tag (a `git ls-remote` output given as a file) and
 # the releases that exist (tag names given as a file), and prints the exact GitHub calls, or
-# refuses (exit 1). `release-plan.sh --validate PLAN` refuses a plan that is not of the one shape.
+# refuses (exit 1). Each upload must also match its MANIFEST.json hash: a file changed after the
+# build, with SHA256SUMS made again to match, is refused. `release-plan.sh --validate PLAN` refuses
+# a plan that is not of the one shape.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir; fx_repo
@@ -14,7 +16,10 @@ mkout() { # dir [mode control]
   rm -rf "$1"; mkdir -p "$1"
   for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do echo "$f $1" > "$1/$f"; done
   (cd "$1" && shasum -a 256 sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
-  printf '{\n  "v": 1,\n  "tag": "v0.1.0",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": []\n}\n' "$C" "${2:-signed}" "${3:-false}" > "$1/MANIFEST.json"
+  { printf '{\n  "v": 1,\n  "tag": "v0.1.0",\n  "commit": "%s",\n  "mode": "%s",\n  "control": %s,\n  "files": [\n' "$C" "${2:-signed}" "${3:-false}"
+    sep=""; for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh; do
+      printf '%s    {"name": "%s", "sha256": "%s"}' "$sep" "$f" "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)"; sep=",
+"; done; printf '\n  ]\n}\n'; } > "$1/MANIFEST.json"
 }
 printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
 : > "$FX/releases"
@@ -41,6 +46,14 @@ for f in $FIVE; do
 done
 mkout "$FX/o"; echo changed >> "$FX/o/sheepdog-linux-aarch64"
 no "$FX/o" && pass "a file not matching SHA256SUMS: refused" || fail "hash mismatch: rc=$r"
+# each upload is also the one the build made: a file changed with SHA256SUMS made again to match is
+# refused by its manifest hash (and one the manifest does not list)
+for x in install.sh sheepdog-linux-x86_64; do   # (not f: mkout's own loop sets f)
+  mkout "$FX/o"; echo changed >> "$FX/o/$x"; (cd "$FX/o" && shasum -a 256 sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
+  no "$FX/o" && grep -q "$x does not match its manifest hash" "$FX/err" && pass "$x changed, SHA256SUMS made again: refused by the manifest" || fail "$x changed with a new SHA256SUMS: rc=$r $(cat "$FX/err")"
+done
+mkout "$FX/o"; grep -v '"name": "install.sh"' "$FX/o/MANIFEST.json" | sed 's/},$/}/' > "$FX/o/m" && mv "$FX/o/m" "$FX/o/MANIFEST.json"
+no "$FX/o" && grep -q "install.sh does not match its manifest hash" "$FX/err" && pass "a manifest that does not list install.sh: refused" || fail "unlisted install.sh: rc=$r $(cat "$FX/err")"
 mkout "$FX/o"; echo "0000  sheepdog-linux-aarch64" >> "$FX/o/SHA256SUMS"
 no "$FX/o" && pass "a malformed or fifth SHA256SUMS line: refused" || fail "SHA256SUMS lines: rc=$r"
 mkout "$FX/o"; (cd "$FX/o" && shasum -a 256 sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh > SHA256SUMS)
