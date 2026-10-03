@@ -33,8 +33,8 @@
 #                reaches it (Docker Desktop may show a keychain prompt for its credential helper)
 #   rc           (not automatic) the rc leg: tests/rc against the operator's rc output, read
 #                only; SD_RC_DIR=<out>/vX.Y.Z-rc.N and SD_RC_CONTROL_DIR=<same>-control (PHASE3.md §3)
-#   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs the
-#                operator's Developer ID and a click in System Settings; prints the steps
+#   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs an
+#                installed release or rc and a click in System Settings; prints the steps
 #
 # Needs docker for the Linux legs. Every container is started with --rm or removed by the id this
 # script recorded; nothing else is ever signalled or removed.
@@ -344,11 +344,13 @@ leg_rc() {
 
 leg_tcc() {
   cat <<'TXT'
-The TCC leg needs the operator (PLAN.md §4.4, phase-0 check 2):
-  1. Build the dev bundle (bundle ID com.lukaso.sheepdog.dev) signed with your Developer ID.
-  2. Link its CLI into PATH with a symlink.
-  3. Grant it Full Disk Access in System Settings.
-  4. Run through the symlink: sheepdog run -- ls ~/Library/Mail   (must exit 0)
+The grant leg needs the operator (PHASE3.md S7), with a release or rc installed by its own
+install.sh (so ~/.local/bin/sheepdog links into ~/Applications/Sheepdog.app):
+  1. Full Disk Access off for Sheepdog: sheepdog run -- ls ~/Library/Safari   (must be denied)
+  2. Turn it on: System Settings > Privacy & Security > Full Disk Access.
+  3. The same command through the link: must exit 0.
+  4. Off again: denied, with no prompt.
+The clean-user half is scripts/s7-clean-user.sh (PHASE3.md S7).
 TXT
   record tcc "manual (steps printed)"
 }
