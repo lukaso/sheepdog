@@ -41,6 +41,7 @@ These become GitHub issues when the repo is first pushed (operator, 2026-09-25).
   - macOS 12 to 26. Only macOS 27 on Apple silicon was run.
   - A job whose working directory is a protected folder (Documents, Desktop, Downloads, iCloud Drive), on a release build with no Full Disk Access: does the first access show a prompt, wait until `--timeout`, or fail at once? If it can wait, the timeout message should name privacy as a possible cause.
   - The grant after an upgrade by npm, pnpm or Homebrew. Only `install.sh` over `install.sh` was measured. pnpm's path changes with each version.
+  - pnpm and bun installs on Linux. npm is tested there (Alpine and Debian images, the dist-linux leg); pnpm and bun only on macOS.
   - The Linux PATH hint in a real Linux terminal window (zsh `~/.zshrc`, bash `~/.bashrc`). The premise rows run macOS's own zsh and bash.
 
 ## `sheepdog help <command>` explains each flag (v0.1.1)

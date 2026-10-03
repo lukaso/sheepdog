@@ -24,7 +24,10 @@
 #   release      a release build refuses to run in a test environment (PHASE2.md §0.5)
 #   dist-linux   install.sh in the pinned Alpine (busybox wget) and slim (no downloader) images:
 #                refused with no downloader, installed with wget and with curl, as root and as a
-#                user, a checksum mismatch refused (scripts/dist-linux.sh)
+#                user, a checksum mismatch refused, and the README's Docker snippet
+#                (scripts/dist-linux.sh); the npm packages installed with npm in both images, and
+#                the x64 package in the amd64 image (scripts/dist-linux-npm.sh). On an arm64 host
+#                it needs the amd64 leg's build of this tree: ./test-all amd64 dist-linux
 #   hardened     the macOS suite against a sheepdog signed ad hoc with the hardened runtime (the
 #                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
