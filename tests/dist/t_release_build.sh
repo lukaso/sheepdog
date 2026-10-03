@@ -46,24 +46,25 @@ mkdir -p "$FX/rh"
 v=$("$SD_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepdog" --version 2>&1)
 case $v in *"$short"*) pass "the Mac binary names the tag's commit" ;; *) fail "the Mac binary says: $v" ;; esac
 . "$SD_ROOT/scripts/release.conf"
-# control for the static check: a glibc build has a PT_INTERP (so the check can fire)
-[ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ] || echo "note: no glibc build (./test-all debian makes one); the PT_INTERP control did not run"
-if [ -f "$SD_ROOT/target-linux-gnu/debug/sheepdog" ]; then
-  timeout 120 docker run --rm --pull=never --network none -v "$SD_ROOT/target-linux-gnu/debug/sheepdog":/b:ro "$SD_IMG_ALPINE" sh -c 'readelf -l /b | grep -q INTERP' \
-    && pass "control: a glibc build shows a PT_INTERP" || fail "control: the glibc build shows no PT_INTERP"
-fi
+# the static check, three ways: rc 0 no PT_INTERP, 1 a PT_INTERP, 3 readelf failed (so a missing
+# readelf can never read as "static")
+interp() { # file-in-the-image -> rc
+  timeout 120 docker run --rm --pull=never --network none -v "$D":/d:ro "$SD_IMG_ALPINE" \
+    sh -c 'readelf -l "$1" > /tmp/h 2>&1 || exit 3; grep -q INTERP /tmp/h && exit 1; exit 0' sh "$1"
+}
+# control, always run: the image's own busybox is dynamic (musl), so the check can fire
+interp /bin/busybox; r=$?; [ $r = 1 ] && pass "control: the image's dynamic busybox shows a PT_INTERP" || fail "control: busybox gives rc $r (want 1: a PT_INTERP)"
 for a in aarch64 x86_64; do
   b=$D/sheepdog-linux-$a
   case $a in aarch64) pf=linux/arm64 ;; *) pf=linux/amd64 ;; esac
-  timeout 120 docker run --rm --pull=never --network none -v "$b":/b:ro "$SD_IMG_ALPINE" sh -c 'readelf -l /b | grep -q INTERP' \
-    && fail "$a has a PT_INTERP (dynamic)" || pass "$a has no PT_INTERP"
+  interp /d/sheepdog-linux-$a; r=$?; [ $r = 0 ] && pass "$a has no PT_INTERP" || fail "$a: rc $r (1: a PT_INTERP, dynamic; 3: readelf failed)"
   v=$(timeout 120 docker run --rm --pull=never --network none --platform $pf -v "$b":/sheepdog:ro "sd-scratch:empty-${pf#linux/}" /sheepdog --version 2>&1)
   case $v in *"$short"*) pass "$a runs in an empty image and names the tag's commit" ;; *) fail "$a in an empty image: $v" ;; esac
 done
 grep -q "sha256 \"$(shasum -a 256 "$D/sheepdog-macos-universal.tar.gz" | cut -d' ' -f1)\"" "$D/sheepdog.rb" && pass "the cask names the archive's hash" || fail "the cask's hash"
 (cd "$D" && shasum -a 256 -c --strict SHA256SUMS >/dev/null 2>&1) && pass "SHA256SUMS matches (strict: no malformed line)" || fail "SHA256SUMS does not match, or has a malformed line"
-want=3; [ -e "$D/install.sh" ] && want=4
-n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = "$want" ] && pass "SHA256SUMS has exactly $want lines" || fail "SHA256SUMS has $n lines, want $want"
+[ -s "$D/install.sh" ] && pass "install.sh is in the release" || fail "no install.sh in the release"
+n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = 4 ] && pass "SHA256SUMS has exactly 4 lines" || fail "SHA256SUMS has $n lines, want 4"
 pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SD_ROOT/rust-toolchain.toml")
 rs=$(sed -n 's/.*"rustc": *"\([^"]*\)".*/\1/p' "$D/MANIFEST.json" | sort -u)
 [ -n "$rs" ] && [ "$(printf '%s\n' "$rs" | grep -vc "^rustc $pin ")" = 0 ] && pass "every recorded rustc is $pin" || fail "recorded rustc: $rs"

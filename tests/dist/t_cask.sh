@@ -6,8 +6,9 @@
 # files publish uploads); `app` is the archive's top directory and the `binary` target an
 # executable file in an archive made by archive.sh, installed as `sheepdog`; the zap list is sheepdog's own state dir only;
 # `depends_on macos` matches the bundle's LSMinimumSystemVersion. A bad version or hash (one line
-# or several) is refused with nothing written. No brew command runs here: `brew style` installs
-# gems into the operator's Homebrew, so it and `brew audit` run in the clean-user leg.
+# or several) is refused with nothing written. The one brew command here is `brew --prefix` (to find
+# Homebrew's own Ruby): `brew style` installs gems into the operator's Homebrew, so it and `brew
+# audit` run in the clean-user leg.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir

@@ -33,6 +33,11 @@ row "bash on macOS, ~/.bash_login and ~/.profile" "$(hint /bin/bash "$FX/bp2")" 
 row "bash on macOS, ~/.bash_profile and ~/.profile" "$(hint /bin/bash "$FX/bp3")" '>> ~/.bash_profile'
 row "bash on Linux" "$(hint /bin/bash linux)" '>> ~/.bashrc'
 row fish "$(hint /opt/homebrew/bin/fish)" 'fish_add_path'
+# a bin path with a space: the printed fish line, pasted, passes exactly one argument equal to it
+# (read here with sh's quoting, which agrees with fish's for a space)
+f=$(env -i PATH=/usr/bin:/bin HOME=/x SHELL=/opt/homebrew/bin/fish sh -c '. "$1"; sd_path_hint "/s p/.local/bin"' sh "$FX/hint.sh" | sed 's/^  //')
+a1=$(sh -c 'fish_add_path() { printf "%s|%s" "$#" "$1"; }; eval "$1"' sh "$f")
+[ "$a1" = "1|/s p/.local/bin" ] && pass "the fish line for a path with a space is one argument" || fail "the fish line for a path with a space: '$f' gives '$a1'"
 row "sh" "$(hint /bin/sh)" '>> ~/.profile'
 row "no SHELL" "$(hint '')" '>> ~/.profile'
 # SHELL unset (a container's shell; dash and busybox ash do not fill it in, unlike bash) under

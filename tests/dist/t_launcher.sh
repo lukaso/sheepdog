@@ -101,4 +101,6 @@ done
 # no platform package
 "$FX/none/bin/sheepdog" --version > "$FX/out" 2>&1; rc=$?
 [ $rc = 1 ] && grep -q "@lukaso/sheepdog-$plat" "$FX/out" && pass "missing platform package: exit 1, named" || fail "missing package: rc=$rc $(head -1 "$FX/out")"
+# npm 7 and later spell it --omit=optional (--no-optional is the old spelling)
+grep -q -- '--omit=optional' "$FX/out" && ! grep -q -- '--no-optional' "$FX/out" && pass "missing platform package: the message names --omit=optional" || fail "missing package message: $(head -1 "$FX/out")"
 finish

@@ -231,11 +231,9 @@ build_release() { # mode: unsigned | signed | control
 
   # install.sh (PHASE3.md S3), rendered with this release's version and the door
   step "install.sh, the checksums, the npm packages"
-  files="sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64"
-  if [ -f "$S/install.sh" ]; then
-    tool base sh "$S/lib/render-install.sh" "$S/install.sh" "${tag#v}" "$dest/install.sh" || die "render install.sh"
-    files="$files install.sh"
-  fi
+  files="sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 install.sh"
+  [ -f "$S/install.sh" ] || die "no scripts/install.sh at the tag"
+  tool base sh "$S/lib/render-install.sh" "$S/install.sh" "${tag#v}" "$dest/install.sh" || die "render install.sh"
   (cd "$dest" && shasum -a 256 $files > SHA256SUMS) || die "SHA256SUMS"
   # the Homebrew cask for lukaso/tap (PHASE3.md S4): a file for the tap, never uploaded
   tool base sh "$S/lib/render-cask.sh" "${tag#v}" "$(shasum -a 256 "$dest/sheepdog-macos-universal.tar.gz" | cut -d' ' -f1)" "$dest/sheepdog.rb" \

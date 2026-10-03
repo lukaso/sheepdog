@@ -137,7 +137,7 @@ sd_path_hint() { # bin
             for g in .bash_profile .bash_login .profile; do [ -e "$HOME/$g" ] && { f="~/$g"; break; }; done
           fi
           echo "  echo 'export PATH=\"$1:\$PATH\"' >> $f" ;;
-    fish) echo "  fish_add_path $1" ;;
+    fish) echo "  fish_add_path \"$1\"" ;;
     *) echo "  echo 'export PATH=\"$1:\$PATH\"' >> ~/.profile" ;;
   esac
 }
