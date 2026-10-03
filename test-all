@@ -178,8 +178,10 @@ leg_amd64() {
 # Build sheepdog for amd64 in the amd64 image, into target-linux-amd64 (the suite builds into the
 # container's own dir, so this is the one writer of that build; dist-linux packs it)
 build_amd64() {
+  # built in the container's own target dir (a build into the share fails at random, PHASE2.md),
+  # only the binary copied out
   leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bin sheepdog'
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepdog && mkdir -p /tgt/debug && cp /t/debug/sheepdog /tgt/debug/sheepdog'
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
@@ -321,8 +323,9 @@ leg_dist_linux() {
       "$i" sh /scripts/dist-linux.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
   done
   # the npm packages on Linux (scripts/dist-linux-npm.sh): packed by npm-pack.sh around these
-  # builds, served from static registries; the x64 package runs in the amd64 image, on the amd64
-  # leg's build (an x86_64 host has no arm64 build: its arm64 package holds a stand-in, not run)
+  # builds, served from static registries; on an arm64 host the x64 package runs in the amd64 image,
+  # on this tree built for amd64 below (an x86_64 host has no arm64 build: its arm64 package holds a
+  # stand-in, not run)
   local pk="$LOGDIR/dist-npm" other
   case $NATIVE in aarch64) other=linux-x64 ;; *) other=linux-arm64 ;; esac
   rm -rf "$pk" && mkdir -p "$pk/tgz" "$pk/tgz-noplat" "$pk/app/Sheepdog.app/Contents/MacOS" \
@@ -335,6 +338,8 @@ leg_dist_linux() {
   local amd_why=""
   if [ $NATIVE = aarch64 ]; then
     mkdir -p "$ROOT/target-linux-amd64"
+    # the stamp before the copy of the sources: a source changed after it means the build may not hold it
+    touch "$LOGDIR/amd64-build.stamp"
     if amd64_image; then build_amd64 || amd_why="amd64 build; $LOGDIR/build-amd64.log"; else amd_why=$AMD64_WHY; fi
   fi
   if [ $NATIVE = aarch64 ] && [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ]; then cp "$ROOT/target-linux-amd64/debug/sheepdog" "$pk/bin-$other"
@@ -352,7 +357,7 @@ leg_dist_linux() {
   if [ $NATIVE = aarch64 ]; then
     echo "== dist-linux npm in $AMD64_IMG (linux/amd64)" >> "$LOGDIR/dist-linux.log"
     # the amd64 build must be this tree's: no source newer than it
-    local stale; stale=$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/build.rs" -newer "$ROOT/target-linux-amd64/debug/sheepdog" -type f 2>/dev/null | head -1)
+    local stale; stale=$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/build.rs" -newer "$LOGDIR/amd64-build.stamp" -type f 2>/dev/null | head -1)
     if [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && [ -z "$stale" ]; then
       bg_wait timeout -k 30 2400 docker run --rm --pull=never --platform linux/amd64 -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
         "$AMD64_IMG" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0

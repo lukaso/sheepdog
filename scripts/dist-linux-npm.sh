@@ -73,9 +73,11 @@ n=$(find "$P/lib/node_modules" -path '*/@lukaso/sheepdog-*/bin/sheepdog' | wc -l
 um=$(asu umask); m=$(( 0$um ))
 wb=""; [ $((m & 2)) != 0 ] && wb="-perm -002"; [ $((m & 16)) != 0 ] && wb="${wb:+$wb -o }-perm -020"
 w=""; [ -n "$wb" ] && w=$(find "$P" ! -type l \( $wb \) | head -3 | tr '\n' ' ')
-# control: the same find lists a file with a write bit beyond that umask
-cd0=$(mktemp -d); : > "$cd0/f"; chmod 666 "$cd0/f"; cw=""; [ -n "$wb" ] && cw=$(find "$cd0" ! -type l \( $wb \)); rm -rf "$cd0"
-[ "$cw" = "$cd0/f" ] && ok "control: that find lists a file with write bits beyond the umask" || bad "control: the umask find missed $cd0/f ('$cw')"
+# control: the same find lists, of files with one write bit each, exactly those the umask masks
+cd0=$(mktemp -d); for b in 600 602 620; do : > "$cd0/f$b"; chmod $b "$cd0/f$b"; done
+cw=""; [ -n "$wb" ] && cw=$(find "$cd0" -type f \( $wb \) | sort | tr '\n' ' '); rm -rf "$cd0"
+cwant=""; [ $((m & 2)) != 0 ] && cwant="$cd0/f602 "; [ $((m & 16)) != 0 ] && cwant="$cwant$cd0/f620 "
+[ "$cw" = "$cwant" ] && ok "control: that find lists exactly the files with a write bit the umask masks ($cw)" || bad "control: the umask find gave '$cw', want '$cwant'"
 [ -d "$P/lib/node_modules/@lukaso/sheepdog" ] && [ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
 
 v=$(asu "'$E' --version" 2>&1); case $v in "sheepdog "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
@@ -105,8 +107,10 @@ runs() { # pid -> path
 want=$(readlink -f "$B"); x=""; i=0
 while [ $i -lt 50 ]; do x=$(runs "$lp"); [ "${x#translated: }" = "$want" ] && break; sleep 0.1; i=$((i + 1)); done
 [ -n "$lp" ] && [ "${x#translated: }" = "$want" ] && ok "the process the PATH entry started is the installed binary, with the launcher's pid (pid $lp: $x)" || bad "pid $lp runs '$x', not $B"
-# control: the same read names the escapee's own program (sleep: busybox's, or coreutils')
-xe=$(runs "$esc"); case $xe in *busybox|*sleep) ok "control: the escapee's program reads as $xe, not the binary" ;; *) bad "control: the escapee reads as '$xe'" ;; esac
+# control: the same read names the escapee's own program (sleep: busybox's, or coreutils'), once it
+# has become sleep (it is written down right after its fork)
+xe=""; i=0; while [ $i -lt 50 ]; do xe=$(runs "$esc"); case $xe in *busybox|*sleep) break ;; esac; sleep 0.1; i=$((i + 1)); done
+case $xe in *busybox|*sleep) ok "control: the escapee's program reads as $xe, not the binary" ;; *) bad "control: the escapee reads as '$xe' after 5 s" ;; esac
 [ -n "$esc" ] && [ "$(sed -n 's/^[^)]*) [A-Z] [0-9]* [0-9]* \([0-9]*\).*/\1/p' "/proc/$esc/stat" 2>/dev/null)" = "$esc" ] \
   && ok "the escapee is in a session of its own ($esc)" || bad "the escapee $esc did not leave the session"
 [ -n "$lp" ] && kill -TERM "$lp"; wait $su

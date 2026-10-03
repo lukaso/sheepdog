@@ -473,3 +473,24 @@ fn strays_kill_skips_a_program_inits_child() {
     assert!(kept, "a tini child was killed unnamed: {}", k.err);
     assert!(gone, "control: named, it survived ({:?}): {}", named.code, named.err);
 }
+
+/// On a terminal, `--kill` without `--yes` asks first, and the question starts with `sheepdog:`
+/// as every message sheepdog writes does; "n" signals nothing. (macOS: `script` gives it the
+/// terminal.)
+#[cfg(target_os = "macos")]
+#[test]
+fn strays_kill_asks_with_the_sheepdog_prefix() {
+    use std::io::Write;
+    let _s = serial();
+    let mut a = Cell::new();
+    a.make(&["stray", "{}", "s"], &["s"]);
+    let mut c = Command::new("/usr/bin/script");
+    c.args(["-q", "/dev/null", sheepdog(), "strays", "--kill", "--cmd", &a.word]).env("SHEEPDOG_TEST_INERT", "1");
+    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut ch = c.spawn().unwrap();
+    ch.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    let o = ch.wait_with_output().unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert!(all.contains("sheepdog: kill these 1 process(es)? [y/N]"), "the question: {all:?}");
+    assert!(a.untouched("s"), "a 'no' signalled the stray");
+}

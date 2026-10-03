@@ -352,7 +352,7 @@ pub fn main(args: &[OsString]) -> i32 {
             crate::fail!("sheepdog: --kill without --yes asks first, and stdin is not a terminal. Add --yes to kill these {} process(es). Nothing was signalled.", rows.len());
             return 1;
         }
-        say!("Kill these {} process(es)? [y/N] ", rows.len());
+        say!("sheepdog: kill these {} process(es)? [y/N] ", rows.len());
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
         if !matches!(line.trim(), "y" | "Y" | "yes") {

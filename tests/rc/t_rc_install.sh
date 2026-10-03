@@ -11,7 +11,9 @@
 #   - after every install, nothing but Sheepdog.app is in Applications, and install.sh used its
 #     TMPDIR and left it the same directory (not a link, the same inode), empty (controls for both);
 #   - a second install over the first replaces the app (a planted file is gone) and the link still
-#     resolves; a link that cannot be made (~/.local/bin a file) exits 1 saying the app is in place;
+#     resolves; a link that cannot be made (~/.local/bin a file, or a directory it cannot write)
+#     exits 1 saying the app is in place; when neither the new app nor the old one can be moved into
+#     place (a stand-in mv), it exits 1 naming where the old app is, and it is there;
 #   - refused, with nothing installed and nothing left in Applications or TMPDIR: a copy of the rc
 #     whose archive holds a tampered bundle (codesign), and the control (Gatekeeper: only a control
 #     that carries the control marker can show this; rc.1's shares rc.1's notarized CDHash).
@@ -133,6 +135,14 @@ for how in file dir; do
   apps "$H5" "the cannot-link install ($how)"
   [ $how = dir ] && chmod 755 "$H5/.local/bin"
 done
+# neither move into Applications works (a stand-in mv refuses any move onto the app's path): the
+# old app stays where it was moved aside, and the message says where
+H6=$FX/home6; mkdir -p "$H6" "$FX/mvbin"; inst "$FX/srv" "$H6" >/dev/null 2>&1
+printf '#!/bin/sh\nfor a; do last=$a; done\ncase $last in */Applications/Sheepdog.app) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$FX/mvbin/mv"; chmod 755 "$FX/mvbin/mv"
+inst "$FX/srv" "$H6" "$FX/mvbin"; r=$?
+k=$(sed -n 's/.*nor the old one back; the old one is at \(.*\)$/\1/p' "$FX/o")
+[ $r = 1 ] && [ -n "$k" ] && [ -d "$k" ] && [ ! -e "$H6/Applications/Sheepdog.app" ] \
+  && pass "neither move works: exit 1, the old app kept at the path the message names" || fail "both moves fail: rc=$r kept='$k' $(tail -1 "$FX/o")"
 # refused: nothing installed, nothing left
 refused() { # home what reason
   [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ ! -L "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \
