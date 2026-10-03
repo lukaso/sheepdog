@@ -124,7 +124,8 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
             b"--json" => a.json = true,
             b"--kill" => a.kill = true,
             b"--yes" => a.yes = true,
-            _ => return Err(format!("unknown option {flag}.")),
+            a if a.starts_with(b"-") => return Err(format!("unknown option {flag}.")),
+            _ => return Err(format!("unexpected argument {flag}.")),
         }
         i += 1;
     }
@@ -303,24 +304,19 @@ pub fn main(args: &[OsString]) -> i32 {
         Ok(a) => a,
         Err(why) => return usage_because(why),
     };
+    if a.cmd.as_deref() == Some("") {
+        return usage_because("an empty --cmd matches every command; give a pattern.".to_string());
+    }
     let re = match &a.cmd {
         Some(pat) => match Regex::new(pat) {
             Some(r) => Some(r),
-            None => {
-                crate::fail!("sheepdog: --cmd {pat:?} is not a valid regular expression");
-                return 2;
-            }
+            None => return usage_because(format!("--cmd {}: not a valid regular expression.", crate::kill::clean(pat))),
         },
         None => None,
     };
-    if a.cmd.as_deref() == Some("") {
-        crate::fail!("sheepdog: an empty --cmd matches every command; give a pattern.");
-        return 2;
-    }
     let filtered = a.min_mem > 0 || !a.older_than.is_zero() || re.is_some() || !a.pids.is_empty();
     if a.kill && !filtered {
-        crate::fail!("sheepdog: --kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.");
-        return 2;
+        return usage_because("--kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.".to_string());
     }
     // a phase-2 source: disabled outright under the phase-1 opt-out
     if crate::seam_flag("SHEEPDOG_TEST_PHASE1") {

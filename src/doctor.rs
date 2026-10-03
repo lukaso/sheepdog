@@ -29,7 +29,8 @@ pub fn main(args: &[OsString]) -> i32 {
             b"--json" => json = true,
             b"--grants" => grants = true,
             _ => {
-                fail!("sheepdog: doctor: unknown option {}.", crate::shown(a));
+                let what = if a.as_bytes().starts_with(b"-") { "unknown option" } else { "unexpected argument" };
+                fail!("sheepdog: doctor: {what} {}.", crate::shown(a));
                 crate::say!("usage: {USAGE}");
                 return 2;
             }

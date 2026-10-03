@@ -459,7 +459,11 @@ pub fn main(args: &[OsString]) -> i32 {
             }
             a => {
                 let w = crate::shown(&args[i]);
-                crate::fail!("sheepdog: sweep: {}", if a == b"--owner" { "--owner needs a value: a name.".to_string() } else { format!("unknown option {w}.") });
+                crate::fail!("sheepdog: sweep: {}", match a {
+                    b"--owner" => "--owner needs a value: a name.".to_string(),
+                    a if a.starts_with(b"-") => format!("unknown option {w}."),
+                    _ => format!("unexpected argument {w}."),
+                });
                 crate::say!("usage: {USAGE}");
                 return 2;
             }

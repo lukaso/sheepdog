@@ -105,7 +105,7 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
                 grace = parse_duration(&v.to_string_lossy()).ok_or_else(|| format!("--grace {} is not valid. It must be {RULE_GRACE}.", shown(v)))?;
             }
             a if tgt.is_none() && !a.starts_with(b"-") => {
-                tgt = Some(target(a).ok_or_else(|| format!("{} is not a target. A target is a PID, PID:ID or j-JOBID.", shown(&args[i])))?)
+                tgt = Some(target(a).ok_or_else(|| format!("{} is not a target. A target is a PID, PID:ID or j-JOBID (j- and 4 to 8 hex digits).", shown(&args[i])))?)
             }
             a if !a.starts_with(b"-") => return Err(format!("one target only; {} is a second one.", shown(&args[i]))),
             _ => return Err(format!("unknown option {}.", shown(&args[i]))),
@@ -287,7 +287,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
             }
             (*p, Some(*id))
         }
-        Target::Job(prefix) => match job_target(prefix, a.dry_run) {
+        Target::Job(prefix) => match job_target(prefix, a.dry_run, ps) {
             Ok(JobTarget::Live(sup, id, path)) => {
                 job_path = Some(path);
                 (sup, Some(id))
@@ -672,7 +672,7 @@ enum JobTarget {
 /// `kill j-XXXX` (PHASE2.md §1 decision 11): exactly one journal must match the prefix (none: 1,
 /// several: 2, with the candidates listed). A live supervisor (pid and identity as in the header)
 /// is the target; a dead one (gone, or its pid reused) means the job is swept.
-fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
+fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
     // a job id resolves through a journal: a phase-2 source (the wall's token) before any fact
     let Some(_token) = crate::wall::gate() else { return Err(1) };
     let found: Vec<_> = journal_files().into_iter().filter(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().starts_with(prefix))).collect();
@@ -684,8 +684,7 @@ fn job_target(prefix: &str, dry_run: bool) -> Result<JobTarget, i32> {
         [one] => one.clone(),
         many => {
             let names: Vec<String> = many.iter().filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
-            crate::fail!("sheepdog: {prefix} matches several jobs ({}); give more of the id. Nothing was signalled.", names.join(", "));
-            return Err(2);
+            return Err(usage_because(ps, format!("{prefix} matches several jobs ({}); give more of the id. Nothing was signalled.", names.join(", "))));
         }
     };
     let Some(sup) = journal_sup(&path) else {

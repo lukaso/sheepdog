@@ -297,7 +297,7 @@ fn run_usage_errors_name_the_word_and_its_rule() {
     for (args, want) in [
         (&["run", "--max-mem", "2GB", "--", "/usr/bin/true"][..], &["--max-mem 2GB", "K, M or G"][..]),
         (&["run", "--max-mem", "0", "--", "/usr/bin/true"], &["--max-mem 0", "above 0"]),
-        (&["run", "--timeout", "5min", "--", "/usr/bin/true"], &["--timeout 5min", "ms, s, m, h or d", "bare number is seconds"]),
+        (&["run", "--timeout", "5min", "--", "/usr/bin/true"], &["--timeout 5min", "s, m, h or d", "bare number is seconds", "whole number with ms"]),
         (&["run", "--timeout", "0", "--", "/usr/bin/true"], &["--timeout 0", "above 0", "365d"]),
         (&["run", "--kill-deadline", "2d", "--", "/usr/bin/true"], &["--kill-deadline 2d", "1d"]),
         (&["run", "--grace", "2d", "--", "/usr/bin/true"], &["--grace 2d", "1d"]),
@@ -305,13 +305,16 @@ fn run_usage_errors_name_the_word_and_its_rule() {
         (&["run", "--status-fd", "1", "--", "/usr/bin/true"], &["--status-fd 1", "3 or more"]),
         (&["run", "--timout", "5m", "--", "/usr/bin/true"], &["unknown option --timout"]),
         (&["run", "--timeout", "--", "/usr/bin/true"], &["--timeout needs a value"]),
+        (&["run", "", "--", "/usr/bin/true"], &["''"]),
+        // the rule a message gives is the parser's: bytes and k pass, ms takes whole numbers
+        (&["run", "--max-mem", "2GB", "--", "/usr/bin/true"], &["in bytes or with K, M or G"]),
+        (&["run", "--timeout", "1.5ms", "--", "/usr/bin/true"], &["whole number with ms"]),
         (&["run", "--timeout", "5m", "--"], &["no command after --"]),
-        (&["run", "npm", "--", "test"], &["npm", "not an option", "after --"]),
     ] {
         let o = sd(args);
         assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
         let first = o.err.lines().next().unwrap_or("");
-        assert!(first.starts_with("sheepdog: "), "{args:?}: the first line has no sheepdog: prefix:\n{}", o.err);
+        assert!(first.starts_with("sheepdog: run: "), "{args:?}: the first line does not start with sheepdog: run::\n{}", o.err);
         for w in want {
             assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
         }
@@ -332,12 +335,25 @@ fn run_without_the_separator_prints_the_corrected_command() {
     let o = sd(&["run", "--timeout", "5m", "--quiet", "/usr/bin/touch", fs]);
     assert_eq!(o.code, Some(125), "{}", o.err);
     assert!(!f.exists(), "the command ran without --");
+    let o2 = sd(&["run", "/usr/bin/touch", fs, "--", "x"]);
+    assert_eq!(o2.code, Some(125), "{}", o2.err);
+    assert!(!f.exists(), "the command ran with its own -- taken for sheepdog's");
+    let dash = sd(&["run", "\u{2014}", "/usr/bin/touch", fs]);
+    assert!(!f.exists() && dash.err.lines().next().unwrap_or("").contains('\u{2014}'), "an em dash: not named, or the command ran:\n{}", dash.err);
     assert!(o.err.contains(&format!("sheepdog run --timeout 5m --quiet -- /usr/bin/touch {fs}")), "no corrected command:\n{}", o.err);
     for (args, want) in [
         (&["run", "npm", "test"][..], "sheepdog run -- npm test"),
         (&["run", "--timeout", "5m", "sh", "-c", "echo a b"], "sheepdog run --timeout 5m -- sh -c 'echo a b'"),
         (&["run", "--timeout", "5m"], "sheepdog run --timeout 5m -- COMMAND"),
         (&["run", "--max-mem", "2GB", "npm", "test"], "--max-mem 2GB"),
+        // the command's own `--` is the command's: sheepdog's goes before the first word that is not an option
+        (&["run", "npm", "test", "--", "--watch"], "sheepdog run -- npm test -- --watch"),
+        (&["run", "--timeout", "5m", "cargo", "test", "--", "--nocapture"], "sheepdog run --timeout 5m -- cargo test -- --nocapture"),
+        (&["run", "npm", "--", "test"], "sheepdog run -- npm -- test"),
+        // an editor's dash in place of `--` is named, and the line uses two hyphens
+        (&["run", "--timeout", "5m", "\u{2014}", "npm", "test"], "sheepdog run --timeout 5m -- npm test"),
+        // a word with `=` is quoted (zsh's magic_equal_subst would expand `a==ls`)
+        (&["run", "x", "a==ls"], "sheepdog run -- x 'a==ls'"),
     ] {
         let o = sd(args);
         assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
@@ -362,12 +378,20 @@ fn subcommand_usage_errors_name_the_word_and_its_rule() {
         (&["ps", "--grace", "1", "5"], &["--grace", "kill", "signals nothing"]),
         (&["strays", "--pid", "1247"], &["--pid 1247", "PID:ID", "--json"]),
         (&["strays", "--min-mem", "2GB"], &["--min-mem 2GB", "K, M or G"]),
-        (&["strays", "--older-than", "5x"], &["--older-than 5x", "ms, s, m, h or d"]),
+        (&["strays", "--older-than", "5x"], &["--older-than 5x", "s, m, h or d"]),
         (&["strays", "--cmd"], &["--cmd needs a value"]),
         (&["strays", "--bogus"], &["unknown option --bogus"]),
         (&["sweep", "--owner"], &["--owner needs a value"]),
         (&["sweep", "--bogus"], &["unknown option --bogus"]),
         (&["doctor", "--bogus"], &["unknown option --bogus"]),
+        (&["doctor", ""], &["''"]),
+        (&["kill", ""], &["''", "not a target"]),
+        (&["kill", "j-abc"], &["j-abc", "j- and 4 to 8 hex digits"]),
+        (&["strays", "1234"], &["unexpected argument 1234"]),
+        (&["sweep", "foo"], &["unexpected argument foo"]),
+        (&["strays", "--kill"], &["--kill needs a filter"]),
+        (&["strays", "--cmd", "["], &["--cmd", "not a valid regular expression"]),
+        (&["strays", "--cmd", ""], &["empty --cmd"]),
     ] {
         let sub = args[0];
         let o = sd(args);
@@ -393,4 +417,30 @@ fn the_test_only_mode_flag_is_not_in_the_help() {
     assert!(!bad.err.contains("--mode"), "a usage error shows --mode:\n{}", bad.err);
     let m = sd(&["run", "--mode", "--", "/usr/bin/true"]);
     assert!(m.err.contains("--mode needs a value"), "--mode no longer parses:\n{}", m.err);
+}
+
+/// A word a usage error cannot show as typed (a control character, bytes that are not UTF-8) gets
+/// only the corrected command's shape, never a line that would pass other bytes.
+#[test]
+fn a_word_that_cannot_be_shown_gets_only_the_shape() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    for args in [&[OsStr::new("run"), OsStr::new("a\nb")][..], &[OsStr::new("run"), OsStr::from_bytes(b"\xff")], &[OsStr::new("run"), OsStr::new("--owner"), OsStr::new("\u{1}"), OsStr::new("npm")]] {
+        let o = Command::new(sheepdog()).args(args).stdin(Stdio::null()).output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        let first = err.lines().next().unwrap_or("");
+        assert_eq!(o.status.code(), Some(125), "{args:?}: {err}");
+        assert!(first.ends_with("sheepdog run [options] -- COMMAND") && !first.contains("\\x"), "{args:?}: {first}");
+    }
+}
+
+/// Values the parser takes are within the rule its message gives: a bare size is bytes, `k` is
+/// K, and a fraction of a second is written in s.
+#[test]
+fn the_rules_said_are_the_rules_parsed() {
+    for v in ["4096", "512k", "2G"] {
+        assert_eq!(sd(&["run", "--max-mem", v, "--", "/usr/bin/true"]).code, Some(0), "--max-mem {v}");
+    }
+    assert_eq!(sd(&["run", "--timeout", "1.5s", "--", "/usr/bin/true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "1500ms", "--", "/usr/bin/true"]).code, Some(0));
 }

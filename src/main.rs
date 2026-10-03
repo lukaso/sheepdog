@@ -150,11 +150,11 @@ fn json_flag(sub: &str, args: &[OsString]) -> bool {
     false
 }
 
-/// `s` as one shell word: as it is when it holds only characters no shell treats specially and
-/// does not start with `=` (zsh expands `=cmd` to its path), else single-quoted (a `'` inside
-/// becomes `'\''`).
+/// `s` as one shell word: as it is when it holds only characters no shell treats specially and no
+/// `=` (zsh expands `=cmd` to its path, and with magic_equal_subst `a==ls` too), else single-quoted
+/// (a `'` inside becomes `'\''`).
 fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && !s.starts_with('=') && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:=@%+,".contains(&b)) {
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./:@%+,".contains(&b)) {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -278,20 +278,20 @@ fn usage() -> i32 {
 /// A `run` usage error: what was wrong (the rejected word, the rule it broke, or the corrected
 /// command), then the usage line. Exit 125.
 fn usage_because(why: String) -> i32 {
-    fail!("sheepdog: {why}");
+    fail!("sheepdog: run: {why}");
     usage()
 }
 
 /// The rules a value keeps, as a usage error says them (one home for every command).
-pub(crate) const RULE_GRACE: &str = "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 1d, for example 2s";
-pub(crate) const RULE_AGE: &str = "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 365d, for example 10m";
-pub(crate) const RULE_SIZE: &str = "a size: a whole number above 0 with K, M or G (binary: 1G is 1024M), for example 2G";
+pub(crate) const RULE_GRACE: &str = "a duration: a number with s, m, h or d (a bare number is seconds), or a whole number with ms; at most 1d, for example 2s";
+pub(crate) const RULE_AGE: &str = "a duration: a number with s, m, h or d (a bare number is seconds), or a whole number with ms; at most 365d, for example 10m";
+pub(crate) const RULE_SIZE: &str = "a size: a whole number above 0, in bytes or with K, M or G (binary: 1G is 1024M), for example 2G";
 
 /// `run`'s options that take a value, with the rule a value must keep (said in a usage error).
 fn value_rule(flag: &[u8]) -> Option<&'static str> {
     Some(match flag {
-        b"--timeout" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 365d, for example 5m",
-        b"--kill-deadline" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 1d, for example 30s",
+        b"--timeout" => "a duration: a number with s, m, h or d (a bare number is seconds), or a whole number with ms; above 0 and at most 365d, for example 5m",
+        b"--kill-deadline" => "a duration: a number with s, m, h or d (a bare number is seconds), or a whole number with ms; above 0 and at most 1d, for example 30s",
         b"--grace" => RULE_GRACE,
         b"--max-mem" => RULE_SIZE,
         b"--max-procs" => "a count: a whole number above 0, for example 200",
@@ -301,8 +301,17 @@ fn value_rule(flag: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// A word made only of dashes that are not `-` (an em or en dash, a minus sign): `--` as an editor
+/// or a phone keyboard may change it.
+fn dash_lookalike(a: &OsString) -> bool {
+    a.to_str().is_some_and(|s| !s.is_empty() && s.chars().all(|c| matches!(c, '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{fe58}' | '\u{fe63}' | '\u{ff0d}')))
+}
+
 /// A word as a usage error shows it (control characters and bytes that are not UTF-8 escaped).
 pub(crate) fn shown(a: &OsString) -> String {
+    if a.is_empty() {
+        return "''".to_string();
+    }
     kill::clean(&a.to_string_lossy())
 }
 
@@ -325,12 +334,16 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut no_sweep = false;
     let mut inherit = false;
     let mut i = 1;
+    // sheepdog's own `--` missing: (where the options end, where the command starts). The command
+    // starts at the first word that is not an option (a `--` after it is the command's own), or
+    // after an editor's dash typed in place of `--`.
+    let mut missing: Option<(usize, usize)> = None;
     while i < end {
         let flag = args[i].as_bytes();
         if let Some(rule) = value_rule(flag) {
             let name = shown(&args[i]);
             let Some(raw) = args.get(i + 1).filter(|_| i + 1 < end) else {
-                return Err(usage_because(format!("{name} needs a value before --. It must be {rule}.")));
+                return Err(usage_because(format!("{name} needs a value. It must be {rule}.")));
             };
             let v = raw.to_string_lossy();
             let bad = || usage_because(format!("{name} {} is not valid. It must be {rule}.", shown(raw)));
@@ -354,27 +367,38 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
             b"--inherit-terminal-permissions" => inherit = true,
             b"--quiet" => quiet = true,
             b"--forward-int-to-root" => forward_int_to_root = true,
-            _ if sep.is_none() && !flag.starts_with(b"-") => break,
-            _ if flag.starts_with(b"-") => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&args[i])))),
-            _ => return Err(usage_because(format!("{} is not an option of run. The command goes after --.", shown(&args[i])))),
+            _ if dash_lookalike(&args[i]) => {
+                missing = Some((i, i + 1));
+                break;
+            }
+            _ if !flag.starts_with(b"-") => {
+                missing = Some((i, i));
+                break;
+            }
+            _ => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&args[i])))),
         }
         i += 1;
     }
-    let Some(sep) = sep else {
-        // no `--`: the corrected command, from what was typed (its shape only when a word cannot
-        // be pasted back as typed)
-        let typed: Vec<String> = args.iter().map(shown).collect();
+    if sep.is_none() && missing.is_none() {
+        missing = Some((i, i));
+    }
+    if let Some((o, c)) = missing {
+        // the corrected command, from what was typed (its shape only when a word cannot be pasted
+        // back as typed); an empty word is quoted by shell_quote, not by shown
+        let typed: Vec<String> = args.iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
         let exact = args.iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes());
         let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
-        let (opts, cmd) = (q[1..i].join(" "), q[i..].join(" "));
+        let (opts, cmd) = (q[1..o].join(" "), q[c..].join(" "));
         let fix = match (exact, cmd.is_empty()) {
             (false, _) => "sheepdog run [options] -- COMMAND".to_string(),
             (true, true) => format!("sheepdog run {opts}{}-- COMMAND", if opts.is_empty() { "" } else { " " }),
             (true, false) => format!("sheepdog run {opts}{}-- {cmd}", if opts.is_empty() { "" } else { " " }),
         };
+        let dash = if c > o { format!("{} is not -- (an editor may have changed it): type two hyphens. ", shown(&args[o])) } else { String::new() };
         let what = if cmd.is_empty() { "no command" } else { "no -- before the command, so nothing ran" };
-        return Err(usage_because(format!("{what}. Put -- between the options and the command: {fix}")));
-    };
+        return Err(usage_because(format!("{dash}{what}. Put -- between the options and the command: {fix}")));
+    }
+    let Some(sep) = sep else { unreachable!("no -- is a missing separator, handled above") };
     let cmd = args[sep + 1..].to_vec();
     if cmd.is_empty() {
         return Err(usage_because("no command after --.".to_string()));
