@@ -78,6 +78,12 @@ done
 mkdir -p "$FX/liar"; printf '#!/bin/sh\nexit 0\n' > "$FX/liar/env"; chmod 755 "$FX/liar/env"
 printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/liar:$FX/sh:$PATH" "$FX/ghome" > "$FX/eL"; chmod +x "$FX/eL"
 refused 3 "publish under SHEEPDOG_TEST_STATE with a lying env on PATH" "$FX/eL" SHEEPDOG_TEST_STATE=/x sh "$RS" publish v0.1.0
+# and with a lying `grep` (it never matches): the gate's tools are the system's
+mkdir -p "$FX/liarg"; printf '#!/bin/sh\nexit 1\n' > "$FX/liarg/grep"; chmod 755 "$FX/liarg/grep"
+printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/liarg:$FX/sh:$PATH" "$FX/ghome" > "$FX/eG"; chmod +x "$FX/eG"
+for e in "publish" "publish-npm" "build --sign"; do
+  refused 3 "$e under SHEEPDOG_TEST_STATE with a lying grep on PATH" "$FX/eG" SHEEPDOG_TEST_STATE=/x sh "$RS" $e v0.1.0
+done
 # no terminal: a new session (no controlling tty), the answer piped in
 nott() { perl -MPOSIX -e 'my $p = fork(); die unless defined $p; if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; exec @ARGV or die; } waitpid($p, 0); exit($? >> 8)' "$@"; }
 refused 4 "build --sign with no terminal" sh -c "echo v0.1.0 | $E sh '$RS' build --sign v0.1.0"

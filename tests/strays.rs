@@ -495,20 +495,39 @@ fn strays_kill_asks_with_the_sheepdog_prefix() {
         c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut ch = c.spawn().unwrap();
         let (mut input, mut out) = (ch.stdin.take().unwrap(), ch.stdout.take().unwrap());
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 4096];
-        while !String::from_utf8_lossy(&seen).contains("[y/N]") {
-            let n = out.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
+        // the terminal's output on a thread, so every wait below has a limit (a question that
+        // never comes fails this test, never hangs the suite)
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = out.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
             }
-            seen.extend_from_slice(&buf[..n]);
-        }
+        });
+        let mut seen = Vec::new();
+        let mut until = |seen: &mut Vec<u8>, done: &dyn Fn(&[u8]) -> bool, secs: u64, what: &str, ch: &mut std::process::Child| {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while !done(seen) {
+                match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+                    Ok(chunk) => seen.extend_from_slice(&chunk),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let _ = ch.kill();
+                        let _ = ch.wait();
+                        panic!("{what} within {secs} s: {:?}", String::from_utf8_lossy(seen));
+                    }
+                }
+            }
+        };
+        until(&mut seen, &|s| String::from_utf8_lossy(s).contains("[y/N]"), 20, "the question did not come", &mut ch);
         input.write_all(answer).unwrap();
         input.flush().unwrap();
-        out.read_to_end(&mut seen).unwrap();
+        until(&mut seen, &|_| false, 60, "the command did not end", &mut ch);
         drop(input);
         ch.wait().unwrap();
+        reader.join().unwrap();
         let all = String::from_utf8_lossy(&seen).into_owned();
         let sent = std::fs::read_to_string(&log).unwrap_or_default().lines().filter(|l| l.starts_with("inert ")).count();
         (all, sent)

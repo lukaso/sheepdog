@@ -54,7 +54,8 @@ esac
 
 # the gate of the two operator-only entries
 if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub" = publish-npm ]; then
-  if /usr/bin/env | grep -q '^SHEEPDOG_TEST_'; then
+  # the system's env and grep: a tool on PATH must not be able to hide the test environment
+  if /usr/bin/env | /usr/bin/grep -q '^SHEEPDOG_TEST_'; then
     echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set" >&2; exit 3
   fi
   if ! [ -t 0 ] || ! (: < /dev/tty) 2>/dev/null; then
@@ -480,7 +481,7 @@ npm_check() { # dir
   mv "$nt/ref/sheepdog" "$nt/ref/launcher"
   dt=$d/lukaso-sheepdog-darwin-universal-$nv.tgz
   npy packages "$d" "$nv" "$nt/ref" || die "an npm package is refused (above)"
-  tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"
+  /usr/bin/tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"   # the bundle the real tools judge
   b=$nt/p/package/Sheepdog.app
   /usr/bin/plutil -extract SheepdogControlBuild raw -o - "$b/Contents/Info.plist" >/dev/null 2>&1 && die "the darwin package holds a control build (SheepdogControlBuild in its Info.plist)"
   rt_meets "$b" && rt_meets "$b/Contents/MacOS/sheepdog" || die "codesign: the darwin package's bundle does not meet the release requirement"
@@ -504,7 +505,7 @@ verify() { # dir -> exit 1 naming the tool that refused
   [ -f "$arc" ] || die "no $arc"
   vt=/private/tmp/sd-verify.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$vt"' EXIT; trap 'rm -rf "$vt"; exit 1' HUP INT TERM
-  mkdir -m 700 "$vt" && tar -xzf "$arc" -C "$vt" || die "cannot unpack $arc"
+  mkdir -m 700 "$vt" && /usr/bin/tar -xzf "$arc" -C "$vt" || die "cannot unpack $arc"   # the bundle the real tools judge
   a=$vt/Sheepdog.app
   # a control build's bundle carries the control marker (bundle.sh --control): never a release
   /usr/bin/plutil -extract SheepdogControlBuild raw -o - "$a/Contents/Info.plist" >/dev/null 2>&1 && die "the archive holds a control build (SheepdogControlBuild in its Info.plist)"
