@@ -31,3 +31,30 @@ These become GitHub issues when the repo is first pushed (operator, 2026-09-25).
 ## Dead zombie check in the root-disclaim control mode
 
 - **What:** `responsible_to` in src/macos.rs filters `pbi_status != SZOMB`, but `proc_pidinfo(PROC_PIDTBSDINFO)` fails for a zombie (measured 2026-09-25), so the check never fires. The failure already filters zombies. Remove it with the next change to that mode.
+
+## What v0.1.0 did not measure
+
+- **What:** each of these is stated in the README or PHASE3.md as not measured. Measure it, then change the text.
+  - The Homebrew cask into `/Applications` (Homebrew's default): the Full Disk Access grant, and `tccutil reset`. Only `--appdir=~/Applications` was measured.
+  - `tccutil reset` after an uninstall. The docs say to reset before uninstalling, because PLAN.md §4.4 saw `-10814` when the bundle was gone.
+  - Intel Macs. The x86_64 slice is checked only statically (`minos`, the exec door); the operator's Mac has no Rosetta, so it never ran.
+  - macOS 12 to 26. Only macOS 27 on Apple silicon was run.
+  - A job whose working directory is a protected folder (Documents, Desktop, Downloads, iCloud Drive), on a release build with no Full Disk Access: does the first access show a prompt, wait until `--timeout`, or fail at once? If it can wait, the timeout message should name privacy as a possible cause.
+  - The grant after an upgrade by npm, pnpm or Homebrew. Only `install.sh` over `install.sh` was measured. pnpm's path changes with each version.
+  - The Linux PATH hint in a real Linux terminal window (zsh `~/.zshrc`, bash `~/.bashrc`). The premise rows run macOS's own zsh and bash.
+
+## `sheepdog help <command>` explains each flag (v0.1.1)
+
+- **What:** today `help <command>` prints the usage line only. Add what each flag does and its default, and the SIZE grammar (K, M, G; binary) and the DURATION grammar (ms, s, m, h, d; a bare number is seconds). Usage errors already name the rule they broke (v0.1.0).
+
+## `strays` text output
+
+- **What:** add a header row; show ages as `3m` or `2h`, not raw seconds; show the ID that `--pid PID:ID` needs (today only `--json` prints it); plain words for what `puniq 1246 (dead)` means.
+
+## `ps` refusal wording
+
+- **What:** `sheepdog ps 1` says "refusing to kill pid 1 … Nothing was signalled", although `ps` only reads. In `ps`, say that `kill` would refuse it, and why.
+
+## `doctor --grants` checks a folder that Full Disk Access alone opens
+
+- **What:** it reads `~/Documents`. If the user allows Documents at the macOS prompt, the check passes while Full Disk Access is still off. Read a location that only Full Disk Access opens (for example `~/Library/Safari`), and say which grant it proves.
