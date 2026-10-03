@@ -126,6 +126,9 @@ s7_flag() { # yes | no: the grant flag, in the state file only (the one place it
 
 # the test user's tools, by their own entry files (never looked up through PATH)
 s7_brew() { "$HOME/homebrew/bin/brew" "$@"; }
+# s7_deprecations FILE: 0 when brew's output there names no deprecation (the shipped cask must load
+# without one: --strict audits do not flag them, and rc.2's cask printed one only at uninstall)
+s7_deprecations() { ! grep -qi 'deprecat' "$1"; }
 s7_node() { "$HOME/node/bin/node" "$@"; }
 s7_npm() { "$HOME/node/bin/node" "$HOME/node/lib/node_modules/npm/bin/npm-cli.js" "$@"; }
 s7_corepack() { "$HOME/node/bin/node" "$HOME/node/lib/node_modules/corepack/dist/corepack.js" "$@"; }
@@ -139,7 +142,7 @@ s7_pnpm() { "$HOME/node/bin/node" "$HOME/corepack/v1/pnpm/$S7_PNPM/bin/pnpm.cjs"
 s7_uninstall() {
   s7_state_is "$1" || { echo "s7: the installed channel is '$(s7_state_get channel)', not '$1'" >&2; return 1; }
   [ ! -f "$HOME/s7-env.sh" ] || . "$HOME/s7-env.sh"
-  u_bl=$(s7_state_get bundle) u_e=$(s7_state_get entry)
+  u_bl=$(s7_state_get bundle) u_e=$(s7_state_get entry) u_dep=""
   if [ "$(s7_state_get granted)" = yes ]; then
     if [ -n "$u_e" ] && [ -x "$u_e" ]; then
       u_t=$(mktemp -d "${TMPDIR:-/tmp}/s7-un.XXXXXX") || return 1
@@ -162,7 +165,11 @@ s7_uninstall() {
   printf '%s\n' "$u_bl" | while IFS= read -r u_b; do [ -n "$u_b" ] && [ -d "$u_b" ] && "$S7_LSREG" -u "$u_b"; done
   case $1 in
     install-sh) rm -rf "${HOME:?}/Applications/Sheepdog.app" "${HOME:?}/.local/bin/sheepdog" ;;
-    cask) if [ -d "$HOME/homebrew/Caskroom/sheepdog" ]; then s7_brew uninstall --cask s7/local/sheepdog || return 1; fi ;;
+    cask) if [ -d "$HOME/homebrew/Caskroom/sheepdog" ]; then
+            u_o=$(mktemp "${TMPDIR:-/tmp}/s7-brew.XXXXXX") || return 1
+            s7_brew uninstall --cask s7/local/sheepdog > "$u_o" 2>&1 || { cat "$u_o" >&2; rm -f "$u_o"; return 1; }
+            cat "$u_o"; s7_deprecations "$u_o" || u_dep=$(tr '\n' ' ' < "$u_o"); rm -f "$u_o"
+          fi ;;
     npm) if [ -d "$HOME/npm-global/lib/node_modules/@lukaso/sheepdog" ]; then s7_npm rm -g @lukaso/sheepdog || return 1; fi ;;
     pnpm)
       for u_x in "${HOME:?}"/pnpm/global/*/node_modules/@lukaso/sheepdog; do
@@ -193,6 +200,12 @@ s7_uninstall() {
   [ -z "$u_left" ] || { printf 's7: %s\n' "$u_left" >&2; echo "s7: run 'uninstall $1' again" >&2; return 1; }
   rm -f "$HOME/.s7-channel"
   echo "s7: $1 removed"
+  # removed, and the state cleared, but the cask's text is not clean: say so and fail
+  if [ -n "$u_dep" ]; then
+    echo "s7: brew uninstall printed a deprecation; the shipped cask must not: $u_dep" >&2
+    [ ! -w "$S7_DIR/results" ] || echo "  uninstall: brew printed a deprecation: $u_dep" >> "$S7_DIR/results/cask.txt"
+    return 1
+  fi
 }
 
 # s7_listing PREFIX HOME: what brew-after compares (sorted); fails if a part cannot be read
@@ -431,8 +444,10 @@ s7_cmd_channel() {
       mkdir -p "$c_tap/Casks" && cp "$S7_DIR/sheepdog.rb" "$c_tap/Casks/sheepdog.rb" || s7_stop "install: the tap's Casks/"
       s7_brew audit --cask --strict s7/local/sheepdog > "$c_t/audit" 2>&1; c_ar=$?
       s7_rec "  brew audit --cask --strict (the shipped text): exit $c_ar: $(tr '\n' ' ' < "$c_t/audit")"
+      s7_deprecations "$c_t/audit" || s7_stop "audit: brew printed a deprecation; the shipped cask must load without one"
       s7_cask_local "$S7_DIR/sheepdog.rb" "file://$S7_DIR/sheepdog-macos-universal.tar.gz" "$c_tap/Casks/sheepdog.rb" || s7_stop "install: the cask's local copy"
-      s7_brew install --cask --appdir="$HOME/Applications" s7/local/sheepdog > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: brew install --cask"; } ;;
+      s7_brew install --cask --appdir="$HOME/Applications" s7/local/sheepdog > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: brew install --cask"; }
+      s7_deprecations "$c_t/inst" || { cat "$c_t/inst" >&2; s7_stop "install: brew printed a deprecation (above); the shipped cask must load without one"; } ;;
     install-sh)
       c_e=$HOME/.local/bin/sheepdog c_b=$HOME/Applications/Sheepdog.app; c_bl=$c_b; s7_save
       rm -rf "$HOME/s7-serve"; mkdir -p "$HOME/s7-serve"

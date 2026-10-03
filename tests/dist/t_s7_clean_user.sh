@@ -341,6 +341,20 @@ printf '#!/bin/sh\necho "HOMEBREW_TEMP=$HOMEBREW_TEMP $*" >> "%s/elog"\nrm -rf "
 printf 'channel=cask\nentry=\nbundle=%s\n' "$CH/Applications/Sheepdog.app" > "$CH/.s7-channel"; : > "$FX/elog"
 inlib "$CH" /dev/null s7_uninstall cask; rc=$?
 [ $rc = 0 ] && grep -q "^HOMEBREW_TEMP=$FX/tt uninstall --cask s7/local/sheepdog" "$FX/elog" && pass "uninstall cask runs brew uninstall with the leg's Homebrew temp" || fail "uninstall cask: rc=$rc elog '$(cat "$FX/elog")'"
+# a brew that prints a deprecation while it uninstalls (as Homebrew 7.0.7 did for rc.2's cask): the
+# uninstall finishes (the state is cleared), then exits 1 naming it, and the results record it
+mkdir -p "$CH/homebrew/Caskroom/sheepdog" "$CH/Applications/Sheepdog.app"
+printf '#!/bin/sh
+echo "HOMEBREW_TEMP=$HOMEBREW_TEMP $*" >> "%s/elog"
+echo "Warning: depends_on macos: \\">= :monterey\\" is deprecated!"
+rm -rf "%s/homebrew/Caskroom/sheepdog" "%s/Applications/Sheepdog.app"
+' "$FX" "$CH" "$CH" > "$CH/homebrew/bin/brew"
+printf 'channel=cask\nentry=\nbundle=%s\n' "$CH/Applications/Sheepdog.app" > "$CH/.s7-channel"; : > "$FX/elog"; rm -f "$CD/results/cask.txt"
+inlib "$CH" /dev/null s7_uninstall cask; rc=$?
+[ $rc = 1 ] && [ ! -e "$CH/.s7-channel" ] && grep -q 'deprecation' "$FX/o" && grep -q 'deprecated' "$CD/results/cask.txt" 2>/dev/null \
+  && pass "a deprecation printed by brew uninstall: the uninstall finishes, then exit 1 naming it, recorded" || fail "uninstall deprecation: rc=$rc state=$(cat "$CH/.s7-channel" 2>/dev/null | head -1) $(tr '\n' ' ' < "$FX/o")"
+( SD_S7_LIB=1; . "$SC"; printf 'Warning: X is Deprecated\n' > "$FX/dep"; printf '==> Installing Cask sheepdog\n' > "$FX/nodep"
+  ! s7_deprecations "$FX/dep" && s7_deprecations "$FX/nodep" ) && pass "s7_deprecations: a deprecation found (either case), a clean output passes" || fail "s7_deprecations"
 # tools: a run that did not finish, and one that did, are refused before any download (curl is false)
 mkhome; rm "$CH/s7-env.sh"; mkdir "$CH/homebrew"; inlib "$CH" /dev/null s7_cmd_tools; rc=$?
 [ $rc = 1 ] && grep -q 'did not finish' "$FX/o" && grep -q 'homebrew' "$FX/o" && pass "tools after an unfinished run names what to remove" || fail "tools, unfinished: rc=$rc $(tr '\n' ' ' < "$FX/o")"
