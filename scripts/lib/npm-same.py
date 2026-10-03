@@ -163,5 +163,9 @@ if __name__ == "__main__":
     if len(sys.argv) == 5 and sys.argv[1] == "packages": packages(*sys.argv[2:5])
     elif len(sys.argv) == 4 and sys.argv[1] == "pkgjson": print(json.dumps(pkgjson(sys.argv[2], sys.argv[3]), indent=2))
     elif len(sys.argv) == 4 and sys.argv[1] == "same": same(*sys.argv[2:4])
+    # the integrity npm records for a published tarball (its `dist.integrity`)
+    elif len(sys.argv) == 3 and sys.argv[1] == "integrity":
+        import base64
+        print("sha512-" + base64.b64encode(hashlib.sha512(ref(sys.argv[2])).digest()).decode())
     else:
-        sys.stderr.write("usage: npm-same.py packages DIR VERSION REF | same TGZ ARCHIVE | pkgjson KIND VERSION\n"); sys.exit(2)
+        sys.stderr.write("usage: npm-same.py packages DIR VERSION REF | same TGZ ARCHIVE | pkgjson KIND VERSION | integrity TGZ\n"); sys.exit(2)

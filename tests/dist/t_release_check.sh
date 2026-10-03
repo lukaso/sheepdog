@@ -4,7 +4,7 @@
 # or malformed tag, a tag whose X.Y.Z is not Cargo.toml's version, a build counter not above the
 # previous tag's (previous = highest tag below, with -rc sorting before the final), a final tag
 # whose CHANGELOG has no `## X.Y.Z (YYYY-MM-DD)` entry (still "not yet released", or none): exit 1.
-# `build --sign` and `publish` refuse under the test environment (exit 3) and without a terminal
+# `build --sign`, `publish` and `publish-npm` refuse under the test environment (exit 3) and without a terminal
 # (exit 4), before anything runs; a usage error is exit 2. The codes tell the reasons apart, so a
 # script that refused everything would not pass.
 set -u
@@ -61,10 +61,12 @@ for v in SHEEPDOG_TEST_TAG=0123456789abcdef SHEEPDOG_TEST_STATE=/x; do
   refused 3 "build --sign --no-notarize under $v" $E "$v" sh "$RS" build --sign --no-notarize v0.1.0
   refused 3 "build --no-notarize --sign under $v" $E "$v" sh "$RS" build --no-notarize --sign v0.1.0
   refused 3 "publish under $v" $E "$v" sh "$RS" publish v0.1.0
+  refused 3 "publish-npm under $v" $E "$v" sh "$RS" publish-npm v0.1.0
 done
 # no terminal: a new session (no controlling tty), the answer piped in
 nott() { perl -MPOSIX -e 'my $p = fork(); die unless defined $p; if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; exec @ARGV or die; } waitpid($p, 0); exit($? >> 8)' "$@"; }
 refused 4 "build --sign with no terminal" sh -c "echo v0.1.0 | $E sh '$RS' build --sign v0.1.0"
 refused 4 "build --sign with no terminal (new session)" nott sh -c "echo v0.1.0 | $E sh '$RS' build --sign v0.1.0"
 refused 4 "publish with no terminal (new session)" nott sh -c "echo v0.1.0 | $E sh '$RS' publish v0.1.0"
+refused 4 "publish-npm with no terminal (new session)" nott sh -c "echo v0.1.0 | $E sh '$RS' publish-npm v0.1.0"
 finish

@@ -5,8 +5,9 @@
 #   release.sh build [--out DIR] vTAG                 the unsigned artifacts (the agent may run it)
 #   release.sh build --sign [--no-notarize] [--out DIR] vTAG
 #                                                     the signed, notarized release (the operator)
-#   release.sh publish [--out DIR] vTAG               publish a built release (the operator)
-#   release.sh npm-check [--out DIR] vTAG             check the npm tarballs before `npm publish`
+#   release.sh npm-check [--out DIR] vTAG             check the npm tarballs; first (publish needs it)
+#   release.sh publish [--out DIR] vTAG               publish a built release on GitHub (the operator)
+#   release.sh publish-npm [--out DIR] vTAG           publish the four npm packages (the operator)
 #   release.sh verify [--out DIR] vTAG                the release's facts from its archive (read-only)
 #
 # The checks (check, build): the tag is vX.Y.Z or vX.Y.Z-rc.N; the tree is clean (no change, no
@@ -14,7 +15,7 @@
 # scripts/release.conf SD_BUILD_COUNTER is above the previous tag's (the highest tag below this
 # one, an -rc sorting before its final).
 #
-# `build --sign` and `publish` refuse under the test environment (any SHEEPDOG_TEST_* variable) and
+# `build --sign`, `publish` and `publish-npm` refuse under the test environment (any SHEEPDOG_TEST_* variable) and
 # without a terminal (stdin and /dev/tty), and read the typed tag from /dev/tty. That is a guard
 # against mistakes only: a pty passes it (PHASE3.md §1.2). The gate against an unattended Apple
 # submission is the notary keychain's own password, asked for by sign.sh's unlock (D2 step 3).
@@ -27,7 +28,7 @@ set -u
 LC_ALL=C; export LC_ALL
 DRYHOME=""   # set only by __publish-dry; never inherited (its EXIT trap removes it)
 root=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
-usage() { echo "usage: release.sh check|build|publish|npm-check|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
+usage() { echo "usage: release.sh check|build|npm-check|publish|publish-npm|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
 die() { echo "release: $*" >&2; exit 1; }
 
 [ $# -ge 1 ] || usage
@@ -45,14 +46,14 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tag" ] || usage
 case $sub in
-  check|build|publish|npm-check|verify|__publish-dry) ;;
+  check|build|publish|publish-npm|npm-check|verify|__publish-dry|__publish-npm-dry) ;;
   *) usage ;;
 esac
 [ $sign = no ] || [ "$sub" = build ] || usage
 [ $nonot = no ] || [ $sign = yes ] || usage
 
 # the gate of the two operator-only entries
-if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ]; then
+if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub" = publish-npm ]; then
   if env | grep -q '^SHEEPDOG_TEST_'; then
     echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set" >&2; exit 3
   fi
@@ -131,6 +132,7 @@ docker_env() { # the docker class
 }
 
 step() { echo "release: step: $*"; }
+npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
 npm_pack() { # the four npm tarballs into $dest; sets files_npm
   files_npm=$(tool base sh "$S/lib/npm-pack.sh" "${tag#v}" "$dest/sheepdog-macos-universal.tar.gz" "$dest/sheepdog-linux-aarch64" \
     "$dest/sheepdog-linux-x86_64" "$src/npm/sheepdog/bin/sheepdog" "$dest") || return 1
@@ -329,10 +331,10 @@ publish() {
   verify "$out/$tag"
   GH=gh GITCMD=git DRY=no NETC=net publish_exec "$out/$tag"
 }
-publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
+standins() { # VAR...: each names a stand-in for a dry run, or refuse
   # a stand-in is a script (not a symlink, not a binary), whose real directory is a fixture dir;
   # and every call runs with a fresh temp HOME and nothing else of the caller's (the `dry` class)
-  for v in SD_PUBLISH_DRY_GH SD_PUBLISH_DRY_GIT; do
+  for v in "$@"; do
     eval "p=\${$v:-}"
     # one string is checked and run: no control character (a trailing newline would be stripped
     # when the path is rebuilt, and another file would run)
@@ -343,9 +345,53 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
     [ "$(head -c 2 "$p")" = '#!' ] || die "$v must be a script stand-in"
     eval "$v=\$pd/\$(basename \"\$p\")"
   done
+}
+publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
+  standins SD_PUBLISH_DRY_GH SD_PUBLISH_DRY_GIT
   DRYHOME=$(mktemp -d /private/tmp/sd-dryhome.XXXXXX) || die "no temp HOME"
   echo "release: __publish-dry (stand-ins; verify not run; a temp HOME)"
   GH=$SD_PUBLISH_DRY_GH GITCMD=$SD_PUBLISH_DRY_GIT DRY=yes NETC=dry publish_exec "$out/$tag"
+  rm -rf "$DRYHOME"
+}
+
+# --- publish-npm: the four packages (PHASE3.md §5), after publish --------------------------------
+# Platform packages first, the main one last (its optional dependencies name them). Only the files
+# in <out>/vTAG, each hashed against its manifest entry just before its upload. A version already on
+# npm is skipped when its integrity is this file's (a resumed run) and refused otherwise. An rc goes
+# under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
+# login (`npm login`), never a token from the environment.
+publish_npm_exec() { # dir
+  d=$1 m=$1/MANIFEST.json nv=${tag#v}
+  trap 'rm -rf ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
+  mf() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -1; }
+  [ "$(mf tag)" = "$tag" ] && [ "$(mf mode)" = signed ] && [ "$(mf control)" = false ] \
+    || die "the manifest is not $tag's signed build, or it is a control build"
+  case $tag in *-rc.*) set -- --tag next ;; *) set -- ;; esac
+  for p in sheepdog-linux-arm64 sheepdog-linux-x64 sheepdog-darwin-universal sheepdog; do
+    f=lukaso-$p-$nv.tgz
+    h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
+    [ "$(grep -c "\"name\": \"$f\", \"sha256\": \"$h\"" "$m")" = 1 ] \
+      || die "$f does not match its manifest hash (changed after npm-check?); nothing after it is published"
+    want=$(npy integrity "$d/$f") || die "cannot hash $f"
+    got=$(tool "$NETC" "$NPM" view "@lukaso/$p@$nv" dist.integrity 2>/dev/null) || got=""
+    if [ -n "$got" ]; then
+      [ "$got" = "$want" ] || die "@lukaso/$p@$nv is already on npm with another file ($got); nothing after it is published"
+      echo "release: @lukaso/$p@$nv is already on npm (the same file): skipped"
+      continue
+    fi
+    tool "$NETC" "$NPM" publish --access public "$@" "$d/$f" \
+      || die "npm publish of $f failed; run publish-npm again to go on (a package already on npm is skipped)"
+    echo "release: @lukaso/$p@$nv published"
+  done
+  echo "release: the four npm packages of $tag are on npm. Next: npm logout, and the token check (PHASE3.md §5)"
+}
+publish_npm() { NPM=npm NETC=net publish_npm_exec "$out/$tag"; }
+publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the real one
+  standins SD_PUBLISH_DRY_NPM
+  DRYHOME=$(mktemp -d /private/tmp/sd-dryhome.XXXXXX) || die "no temp HOME"
+  echo "release: __publish-npm-dry (a stand-in npm; a temp HOME)"
+  NPM=$SD_PUBLISH_DRY_NPM NETC=dry publish_npm_exec "$out/$tag"
   rm -rf "$DRYHOME"
 }
 
@@ -377,7 +423,6 @@ npm_check() { # dir
     git -C "$root" show "$tag:$x" > "$nt/ref/$(basename "$x")" 2>/dev/null || die "cannot read $x at $tag"
   done
   mv "$nt/ref/sheepdog" "$nt/ref/launcher"
-  npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
   dt=$d/lukaso-sheepdog-darwin-universal-$nv.tgz
   npy packages "$d" "$nv" "$nt/ref" || die "an npm package is refused (above)"
   tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"
@@ -425,5 +470,7 @@ case $sub in
     else build_release signed; fi ;;
   publish) publish ;;
   __publish-dry) publish_dry ;;
+  publish-npm) publish_npm ;;
+  __publish-npm-dry) publish_npm_dry ;;
   npm-check) npm_check "$out/$tag" ;;
 esac
