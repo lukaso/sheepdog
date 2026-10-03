@@ -12,7 +12,8 @@
 #     user's umask;
 #   - through the PATH entry (the launcher is POSIX sh: busybox ash or dash here): --version; a
 #     job's exit code passes through; the running process is the installed binary, with the
-#     launcher's pid (/proc/<pid>/exe); a job's signal dispositions and mask equal a direct run's;
+#     launcher's pid (/proc/<pid>/exe, or argv[0] under a translator; control: the escapee is told
+#     apart); a job's signal dispositions and mask equal a direct run's;
 #     TERM to that pid ends the job's tree, a setsid escapee included;
 #   - control: from a registry without the platform package, the install still succeeds (the
 #     dependency is optional), and the launcher exits 1 naming the missing package.
@@ -72,7 +73,7 @@ n=$(find "$P/lib/node_modules" -path '*/@lukaso/sheepdog-*/bin/sheepdog' | wc -l
 um=$(asu umask); m=$(( 0$um ))
 wb=""; [ $((m & 2)) != 0 ] && wb="-perm -002"; [ $((m & 16)) != 0 ] && wb="${wb:+$wb -o }-perm -020"
 w=""; [ -n "$wb" ] && w=$(find "$P" ! -type l \( $wb \) | head -3 | tr '\n' ' ')
-[ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
+[ -d "$P/lib/node_modules/@lukaso/sheepdog" ] && [ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
 
 v=$(asu "'$E' --version" 2>&1); case $v in "sheepdog "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
 asu "'$E' run -- sh -c 'exit 7'" >/dev/null 2>&1; r=$?
@@ -86,9 +87,21 @@ rm -f /tmp/lp /tmp/esc
 asu "'$E' run -- sh -c 'setsid sleep 300 & echo \$! > /tmp/esc; exec sleep 300' & echo \$! > /tmp/lp; wait" >/dev/null 2>&1 & su=$!
 i=0; while { [ ! -s /tmp/lp ] || [ ! -s /tmp/esc ]; } && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 lp=$(cat /tmp/lp 2>/dev/null) esc=$(cat /tmp/esc 2>/dev/null)
-# read as the process's own user: root in a container has no CAP_SYS_PTRACE for another user's exe
-x=""; i=0; while [ $i -lt 50 ]; do x=$(asu "readlink /proc/$lp/exe" 2>/dev/null); [ "$x" = "$(readlink -f "$B")" ] && break; sleep 0.1; i=$((i + 1)); done
-[ -n "$lp" ] && [ "$x" = "$(readlink -f "$B")" ] && ok "the process the PATH entry started is the installed binary, with the launcher's pid ($lp)" || bad "pid $lp runs '$x', not $B"
+# what a pid runs: its exe link, read as the process's own user (root in a container has no
+# CAP_SYS_PTRACE for another user's); under a binary translator (Rosetta runs amd64 containers on
+# Apple silicon, qemu-user) the link names the translator, so the program is argv[0], resolved
+# (as src/linux.rs exe_name reads it; PHASE1 measured /proc/<pid>/cmdline clean under Rosetta)
+runs() { # pid -> path
+  e=$(asu "readlink /proc/$1/exe" 2>/dev/null)
+  case ${e##*/} in
+    rosetta|qemu-*) a0=$(asu "tr '\\000' '\\n' < /proc/$1/cmdline" 2>/dev/null | head -1); echo "translated: $(readlink -f "$a0" 2>/dev/null)" ;;
+    *) echo "$e" ;;
+  esac
+}
+want=$(readlink -f "$B"); x=""; i=0
+while [ $i -lt 50 ]; do x=$(runs "$lp"); [ "${x#translated: }" = "$want" ] && break; sleep 0.1; i=$((i + 1)); done
+[ -n "$lp" ] && [ "${x#translated: }" = "$want" ] && ok "the process the PATH entry started is the installed binary, with the launcher's pid (pid $lp: $x)" || bad "pid $lp runs '$x', not $B"
+xe=$(runs "$esc"); [ -n "$esc" ] && [ "${xe#translated: }" != "$want" ] && ok "control: the escapee's program ($xe) is told apart from the binary" || bad "control: the escapee reads as '$xe'"
 [ -n "$esc" ] && [ "$(sed -n 's/^[^)]*) [A-Z] [0-9]* [0-9]* \([0-9]*\).*/\1/p' "/proc/$esc/stat" 2>/dev/null)" = "$esc" ] \
   && ok "the escapee is in a session of its own ($esc)" || bad "the escapee $esc did not leave the session"
 [ -n "$lp" ] && kill -TERM "$lp"; wait $su

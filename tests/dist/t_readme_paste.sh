@@ -54,12 +54,16 @@ if command -v zsh > /dev/null 2>&1; then
   # an interactive zsh, detached from any terminal (its own session, no job control, no line
   # editor), so it reads the pipe and never takes over the terminal the cell runs in
   cat > "$FX/premise.sh" <<'SH'
-printf 'echo a # b\nexit\n' | env -i PATH=/usr/bin:/bin HOME="$1" perl -MPOSIX -e 'POSIX::setsid() != -1 or die "setsid\n"; exec @ARGV' zsh -f -i +m +Z ${2:+"$2"} 2>/dev/null | tr -d '\r'
+h=$1; shift   # then zsh's own options, each a word
+printf 'echo a # b\nexit\n' | env -i PATH=/usr/bin:/bin HOME="$h" perl -MPOSIX -e 'POSIX::setsid() != -1 or die "setsid\n"; exec @ARGV' zsh -f -i +m +Z "$@" 2>/dev/null | tr -d '\r'
 SH
   out=$(sh "$FX/premise.sh" "$FX" | grep -x 'a # b')
   [ "$out" = "a # b" ] && pass "premise: an interactive zsh passes '#' on as an argument" || fail "premise: an interactive zsh read '#' as a comment ('$out')"
-  out=$(sh "$FX/premise.sh" "$FX" -o\ interactivecomments | grep -cx 'a # b')
-  [ "$out" = 0 ] && pass "control: with interactivecomments on, the same zsh reads '#' as a comment" || fail "control: interactivecomments made no difference ($out)"
+  # (the zsh must have run: an exact `a` line, the comment dropped; a zsh that refused the option
+  # prints neither)
+  sh "$FX/premise.sh" "$FX" -o interactivecomments > "$FX/ic.out"
+  [ "$(grep -cx 'a' "$FX/ic.out")" = 1 ] && [ "$(grep -cx 'a # b' "$FX/ic.out")" = 0 ] \
+    && pass "control: with interactivecomments on, the same zsh reads '#' as a comment" || fail "control: interactivecomments: $(tr '\n' '|' < "$FX/ic.out")"
   # the premise run under a pseudo-terminal whose input stays open ends at once (it used to take the
   # terminal over and wait for typing)
   if command -v script > /dev/null 2>&1; then

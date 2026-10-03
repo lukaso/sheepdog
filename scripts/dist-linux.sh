@@ -74,6 +74,7 @@ if [ -s /srv/readme-run.sh ] && [ -s /srv/readme-version ]; then
   ha=$(sha256sum /tmp/rel/sheepdog-linux-aarch64 | cut -d' ' -f1) hx=$(sha256sum /tmp/rel/sheepdog-linux-x86_64 | cut -d' ' -f1)
   cat > /tmp/rs/bin/curl <<EOF
 #!/bin/sh
+echo "curl \$*" >> /tmp/rs/curl.log
 out="" url=""
 while [ \$# -gt 0 ]; do case \$1 in -o) out=\$2; shift ;; -*) ;; *) url=\$1 ;; esac; shift; done
 case \$url in https://github.com/lukaso/sheepdog/releases/download/v$v/sheepdog-linux-*) cp "/tmp/rel/\${url##*/}" "\$out" ;;
@@ -93,8 +94,8 @@ EOF
   done
   snip aarch64 "$hx" "$ha"; r=$?
   [ $r != 0 ] && [ $r != 99 ] && [ ! -x /usr/local/bin/sheepdog ] && ok "the README's Docker snippet: a wrong hash fails the step, nothing executable" || bad "the snippet, a wrong hash: rc=$r"
-  snip riscv64 "$ha" "$hx"; r=$?
-  [ $r != 0 ] && [ $r != 99 ] && [ ! -e /usr/local/bin/sheepdog ] && ok "the README's Docker snippet: an arch with no build fails before any download" || bad "the snippet, riscv64: rc=$r"
+  rm -f /tmp/rs/curl.log; snip riscv64 "$ha" "$hx"; r=$?
+  [ $r != 0 ] && [ $r != 99 ] && [ ! -e /usr/local/bin/sheepdog ] && [ ! -s /tmp/rs/curl.log ] && ok "the README's Docker snippet: an arch with no build fails before any download" || bad "the snippet, riscv64: rc=$r"
   rm -f /usr/local/bin/sheepdog
 else bad "no README Docker snippet in /srv"
 fi

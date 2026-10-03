@@ -328,10 +328,12 @@ leg_dist_linux() {
   done
   if [ $NATIVE = aarch64 ]; then
     echo "== dist-linux npm in $AMD64_IMG (linux/amd64)" >> "$LOGDIR/dist-linux.log"
-    if [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && timeout 60 docker image inspect "$AMD64_IMG" >/dev/null 2>&1; then
+    # the amd64 build must be this tree's: no source newer than it
+    local stale; stale=$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/build.rs" -newer "$ROOT/target-linux-amd64/debug/sheepdog" -type f 2>/dev/null | head -1)
+    if [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && [ -z "$stale" ] && timeout 60 docker image inspect "$AMD64_IMG" >/dev/null 2>&1; then
       bg_wait timeout -k 30 2400 docker run --rm --pull=never --platform linux/amd64 -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
         "$AMD64_IMG" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
-    else echo "FAIL: the x64 package needs the amd64 leg's build and image (./test-all amd64 dist-linux)" >> "$LOGDIR/dist-linux.log"; ok=0; fi
+    else echo "FAIL: the x64 package needs the amd64 leg's build of this tree and its image (./test-all amd64 dist-linux)${stale:+; $stale is newer than the build}" >> "$LOGDIR/dist-linux.log"; ok=0; fi
   fi
   [ $ok = 1 ] && record dist-linux PASS || record dist-linux "FAIL ($LOGDIR/dist-linux.log)"
 }
