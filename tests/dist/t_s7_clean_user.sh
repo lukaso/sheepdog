@@ -353,6 +353,31 @@ printf 'channel=cask\nentry=\nbundle=%s\n' "$CH/Applications/Sheepdog.app" > "$C
 inlib "$CH" /dev/null s7_uninstall cask; rc=$?
 [ $rc = 1 ] && [ ! -e "$CH/.s7-channel" ] && grep -q 'deprecation' "$FX/o" && grep -q 'deprecated' "$CD/results/cask.txt" 2>/dev/null \
   && pass "a deprecation printed by brew uninstall: the uninstall finishes, then exit 1 naming it, recorded" || fail "uninstall deprecation: rc=$rc state=$(cat "$CH/.s7-channel" 2>/dev/null | head -1) $(tr '\n' ' ' < "$FX/o")"
+# the cask channel stops on a deprecation printed by brew audit or brew install (the shipped cask
+# must load without one), with the state kept for uninstall; control: clean output goes past both
+cask_drive() { # where brew prints a deprecation: audit | install | none
+  mkhome; mkdir -p "$CH/homebrew/bin"
+  cat > "$CH/homebrew/bin/brew" <<EOF
+#!/bin/sh
+case "\$1" in
+  tap-new) mkdir -p "$CH/homebrew/Library/Taps/s7/homebrew-local" ;;
+  audit) [ "$1" = audit ] && echo 'Warning: Calling depends_on macos: ">= :monterey" is deprecated!' ;;
+  install) [ "$1" = install ] && echo 'Warning: Calling depends_on macos: ">= :monterey" is deprecated!'
+    mkdir -p "$CH/Applications/Sheepdog.app" "$CH/homebrew/Caskroom/sheepdog" ;;
+esac
+exit 0
+EOF
+  chmod 755 "$CH/homebrew/bin/brew"; cp "$RC/sheepdog.rb" "$CD/sheepdog.rb"; rm -f "$CD/results/cask.txt"; printf 'n\nn\nn\n' > "$FX/answers"
+  inlib "$CH" "$FX/answers" s7_cmd_channel cask; rc=$?
+}
+for w in audit install; do
+  cask_drive $w
+  [ $rc = 1 ] && grep -q "STOPPED at $w: brew printed a deprecation" "$CD/results/cask.txt" 2>/dev/null && grep -qx 'channel=cask' "$CH/.s7-channel" \
+    && pass "the cask channel: a deprecation from brew $w stops it, recorded, the state kept" || fail "cask, deprecation at $w: rc=$rc $(grep STOPPED "$CD/results/cask.txt" 2>/dev/null) $(tail -2 "$FX/o" | tr '\n' ' ')"
+done
+cask_drive none
+grep -q 'brew audit --cask --strict' "$CD/results/cask.txt" 2>/dev/null && ! grep -q 'brew printed a deprecation' "$CD/results/cask.txt" \
+  && pass "control: clean brew output goes past both stops ($(grep -o 'STOPPED at [^:]*' "$CD/results/cask.txt" | head -1))" || fail "cask control: $(grep STOPPED "$CD/results/cask.txt" 2>/dev/null) $(tail -2 "$FX/o" | tr '\n' ' ')"
 ( SD_S7_LIB=1; . "$SC"; printf 'Warning: X is Deprecated\n' > "$FX/dep"; printf '==> Installing Cask sheepdog\n' > "$FX/nodep"
   ! s7_deprecations "$FX/dep" && s7_deprecations "$FX/nodep" ) && pass "s7_deprecations: a deprecation found (either case), a clean output passes" || fail "s7_deprecations"
 # tools: a run that did not finish, and one that did, are refused before any download (curl is false)
