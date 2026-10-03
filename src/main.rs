@@ -264,10 +264,21 @@ fn prescan_status_fd(argv: &[OsString]) -> Option<i32> {
     if args.first().map(|a| a.as_bytes()) != Some(b"run") {
         return None;
     }
-    let end = args.iter().position(|a| a.as_bytes() == b"--").unwrap_or(args.len());
-    // the last one counts, as in `parse`; 0-2 are the command's own streams, never the status fd
-    let i = args[..end].iter().rposition(|a| a.as_bytes() == b"--status-fd")?;
-    args.get(i + 1).filter(|_| i + 1 < end)?.to_str()?.parse().ok().filter(|&n: &i32| n >= 3)
+    // run's options as `parse` reads them (one reading: opts_end); the last one counts, as in
+    // `parse`; 0-2 are the command's own streams, never the status fd
+    let w = &args[1..];
+    let (end, mut fd, mut i) = (opts_end(w).opts(), None, 0);
+    while i < end {
+        if value_rule(w[i].as_bytes()).is_some() {
+            if w[i].as_bytes() == b"--status-fd" {
+                fd = w[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n: &i32| n >= 3);
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    fd
 }
 
 fn usage() -> i32 {
@@ -301,6 +312,11 @@ fn value_rule(flag: &[u8]) -> Option<&'static str> {
     })
 }
 
+/// `run`'s options that take no value.
+fn bool_flag(b: &[u8]) -> bool {
+    matches!(b, b"--leave-strays" | b"--no-sweep" | b"--inherit-terminal-permissions" | b"--quiet" | b"--forward-int-to-root")
+}
+
 /// A word made only of dashes that are not `-` (an em or en dash, a minus sign): `--` as an editor
 /// or a phone keyboard may change it.
 fn dash_lookalike(a: &OsString) -> bool {
@@ -315,14 +331,90 @@ pub(crate) fn shown(a: &OsString) -> String {
     kill::clean(&a.to_string_lossy())
 }
 
+/// Where run's options end in WORDS (the words after `run`, or after `sheepdog` when `run` was left
+/// out): the one reading for run's parser, its status-fd prescan and every line sheepdog suggests.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum OptsEnd {
+    /// sheepdog's own `--` at this index; the command follows it
+    Sep(usize),
+    /// no `--` before the command: the options end at .0, the command starts at .1 (an editor's
+    /// dash between them dropped, and a `--` typed right after that dash)
+    Missing(usize, usize),
+    /// an option run does not have
+    Unknown(usize),
+    /// an empty word where an option or the command should be
+    Empty(usize),
+    /// an option that takes a value, with none (or `--`) after it
+    NoValue(usize),
+}
+
+impl OptsEnd {
+    /// The options are WORDS[..this]: each a run option, each value-taking one with its value.
+    fn opts(self) -> usize {
+        match self {
+            OptsEnd::Sep(i) | OptsEnd::Unknown(i) | OptsEnd::Empty(i) | OptsEnd::NoValue(i) | OptsEnd::Missing(i, _) => i,
+        }
+    }
+}
+
+fn opts_end(w: &[OsString]) -> OptsEnd {
+    let mut i = 0;
+    while i < w.len() {
+        let b = w[i].as_bytes();
+        if b == b"--" {
+            return OptsEnd::Sep(i);
+        }
+        if value_rule(b).is_some() {
+            if i + 1 >= w.len() || w[i + 1].as_bytes() == b"--" {
+                return OptsEnd::NoValue(i);
+            }
+            i += 2;
+            continue;
+        }
+        if bool_flag(b) {
+            i += 1;
+            continue;
+        }
+        if b.is_empty() {
+            return OptsEnd::Empty(i);
+        }
+        if dash_lookalike(&w[i]) {
+            let c = if w.get(i + 1).map(|x| x.as_bytes()) == Some(b"--") { i + 2 } else { i + 1 };
+            return OptsEnd::Missing(i, c);
+        }
+        if b.starts_with(b"-") {
+            return OptsEnd::Unknown(i);
+        }
+        return OptsEnd::Missing(i, i);
+    }
+    OptsEnd::Missing(w.len(), w.len())
+}
+
+/// The line that runs it: WORDS[..O], `--`, WORDS[C..] (or COMMAND when there is none),
+/// shell-quoted so the line pasted runs what was typed; only its shape when a word cannot be
+/// pasted back as typed.
+fn run_line(w: &[OsString], o: usize, c: usize) -> String {
+    let typed: Vec<String> = w.iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
+    if !w.iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes()) {
+        return "sheepdog run [options] -- COMMAND".to_string();
+    }
+    let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
+    let mut parts = vec!["sheepdog run".to_string()];
+    if o > 0 {
+        parts.push(q[..o].join(" "));
+    }
+    parts.push("--".to_string());
+    parts.push(if c < q.len() { q[c..].join(" ") } else { "COMMAND".to_string() });
+    parts.join(" ")
+}
+
 fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let args = &argv[1.min(argv.len())..];
     if args.first().map(|a| a.as_bytes()) != Some(b"run") {
         return Err(usage());
     }
-    // without `--` the options end at the first word that is not one: there the command starts
-    let sep = args.iter().position(|a| a.as_bytes() == b"--");
-    let end = sep.unwrap_or(args.len());
+    let w = &args[1..];
+    let end = opts_end(w);
     let mut mode = None;
     let mut grace = Duration::from_secs(2);
     let mut leave_strays = false;
@@ -333,18 +425,12 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let (mut timeout, mut max_mem, mut max_procs, mut kill_deadline) = (None, None, None, None);
     let mut no_sweep = false;
     let mut inherit = false;
-    let mut i = 1;
-    // sheepdog's own `--` missing: (where the options end, where the command starts). The command
-    // starts at the first word that is not an option (a `--` after it is the command's own), or
-    // after an editor's dash typed in place of `--`.
-    let mut missing: Option<(usize, usize)> = None;
-    while i < end {
-        let flag = args[i].as_bytes();
+    // the options' values first, in order: a bad value is the first problem said
+    let mut i = 0;
+    while i < end.opts() {
+        let flag = w[i].as_bytes();
         if let Some(rule) = value_rule(flag) {
-            let name = shown(&args[i]);
-            let Some(raw) = args.get(i + 1).filter(|_| i + 1 < end) else {
-                return Err(usage_because(format!("{name} needs a value. It must be {rule}.")));
-            };
+            let (name, raw) = (shown(&w[i]), &w[i + 1]);
             let v = raw.to_string_lossy();
             let bad = || usage_because(format!("{name} {} is not valid. It must be {rule}.", shown(raw)));
             match flag {
@@ -367,39 +453,31 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
             b"--inherit-terminal-permissions" => inherit = true,
             b"--quiet" => quiet = true,
             b"--forward-int-to-root" => forward_int_to_root = true,
-            _ if dash_lookalike(&args[i]) => {
-                missing = Some((i, i + 1));
-                break;
-            }
-            _ if !flag.starts_with(b"-") => {
-                missing = Some((i, i));
-                break;
-            }
-            _ => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&args[i])))),
+            _ => unreachable!("opts_end passes only run's options, and bool_flag names these five"),
         }
         i += 1;
     }
-    if sep.is_none() && missing.is_none() {
-        missing = Some((i, i));
-    }
-    if let Some((o, c)) = missing {
-        // the corrected command, from what was typed (its shape only when a word cannot be pasted
-        // back as typed); an empty word is quoted by shell_quote, not by shown
-        let typed: Vec<String> = args.iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
-        let exact = args.iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes());
-        let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
-        let (opts, cmd) = (q[1..o].join(" "), q[c..].join(" "));
-        let fix = match (exact, cmd.is_empty()) {
-            (false, _) => "sheepdog run [options] -- COMMAND".to_string(),
-            (true, true) => format!("sheepdog run {opts}{}-- COMMAND", if opts.is_empty() { "" } else { " " }),
-            (true, false) => format!("sheepdog run {opts}{}-- {cmd}", if opts.is_empty() { "" } else { " " }),
-        };
-        let dash = if c > o { format!("{} is not -- (an editor may have changed it): type two hyphens. ", shown(&args[o])) } else { String::new() };
-        let what = if cmd.is_empty() { "no command" } else { "no -- before the command, so nothing ran" };
-        return Err(usage_because(format!("{dash}{what}. Put -- between the options and the command: {fix}")));
-    }
-    let Some(sep) = sep else { unreachable!("no -- is a missing separator, handled above") };
-    let cmd = args[sep + 1..].to_vec();
+    let s = match end {
+        OptsEnd::Sep(s) => s,
+        OptsEnd::NoValue(i) => {
+            let rule = value_rule(w[i].as_bytes()).unwrap_or("a value");
+            return Err(usage_because(format!("{} needs a value. It must be {rule}.", shown(&w[i]))));
+        }
+        OptsEnd::Unknown(i) => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&w[i])))),
+        OptsEnd::Empty(i) => return Err(usage_because(format!("{} is not an option of run, or a command.", shown(&w[i])))),
+        OptsEnd::Missing(o, c) => {
+            let line = run_line(w, o, c);
+            let dash = if c > o { format!("{} is not -- (an editor may have changed it): type two hyphens. ", shown(&w[o])) } else { String::new() };
+            let what = match (c >= w.len(), dash.is_empty()) {
+                (true, true) => "no command",
+                (true, false) => "No command",
+                (false, true) => "no -- before the command, so nothing ran",
+                (false, false) => "Nothing ran",
+            };
+            return Err(usage_because(format!("{dash}{what}. Put -- between the options and the command: {line}")));
+        }
+    };
+    let cmd = w[s + 1..].to_vec();
     if cmd.is_empty() {
         return Err(usage_because("no command after --.".to_string()));
     }
@@ -1701,14 +1779,22 @@ fn run(argv: Vec<OsString>) -> i32 {
                     let name = rest.remove(i);
                     format!("sheepdog {name} {}", rest.join(" "))
                 }
-                // options (or `--`) first: they are run's, so `run` goes in front of them
-                _ if typed[0].starts_with('-') => {
-                    let tail = match dash {
-                        None => " -- COMMAND",
-                        Some(d) if d + 1 == typed.len() => " COMMAND",
-                        Some(_) => "",
-                    };
-                    format!("sheepdog run {}{tail}", q.join(" "))
+                // run's options (or `--`, or an editor's dash) first: `run` goes in front of them,
+                // and `--` where opts_end, run's own reading, says the command starts
+                _ if typed[0].starts_with('-') || dash_lookalike(&argv[1]) => {
+                    let w = &argv[1..];
+                    match opts_end(w) {
+                        OptsEnd::Sep(s) => run_line(w, s, s + 1),
+                        OptsEnd::Missing(o, c) => run_line(w, o, c),
+                        OptsEnd::NoValue(i) => {
+                            fail!("sheepdog: '{}' is not a sheepdog command; as an option of run it needs a value. Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).", typed[i]);
+                            return 2;
+                        }
+                        OptsEnd::Unknown(i) | OptsEnd::Empty(i) => {
+                            fail!("sheepdog: {} is not a sheepdog command or an option of run. Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).", shown(&argv[1 + i]));
+                            return 2;
+                        }
+                    }
                 }
                 _ => format!("sheepdog run -- {}", q.join(" ")),
             };

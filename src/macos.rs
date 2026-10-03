@@ -560,7 +560,7 @@ fn spawn(cmd: &[OsString], disclaim_root: bool, suspended: bool, caller_mask: &l
         libc::posix_spawnp(&mut pid, ptrs[0], std::ptr::null(), &attr, ptrs.as_ptr(), env)
     };
     if rc != 0 {
-        let m = format!("cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(rc));
+        let m = format!("cannot run {}: {}", crate::shown(&cmd[0]), std::io::Error::from_raw_os_error(rc));
         say!("sheepdog: {m}");
         crate::status::set_error(&m);
         crate::status::set_root("not-started");

@@ -581,7 +581,7 @@ pub fn root_shim(a: &[OsString]) -> i32 {
     if eacces && goes_on(last) {
         last = libc::EACCES;
     }
-    say!("sheepdog: cannot run {}: {}", cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(last));
+    say!("sheepdog: cannot run {}: {}", crate::shown(&cmd[0]), std::io::Error::from_raw_os_error(last));
     tell(&format!("E{last}\n"));
     unsafe { libc::_exit(if last == libc::ENOENT { 127 } else { 126 }) }
 }
@@ -960,7 +960,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     }
     if let Some(e) = status.and_then(|_| shim.exec_failed()) {
         crate::status::set_root_final("not-started"); // the shim could not exec the command
-        crate::status::set_error(&format!("cannot run {}: {}", a.cmd[0].to_string_lossy(), std::io::Error::from_raw_os_error(e)));
+        crate::status::set_error(&format!("cannot run {}: {}", crate::shown(&a.cmd[0]), std::io::Error::from_raw_os_error(e)));
     }
     if a.leave_strays && status.is_some() {
         let mut j = journal.into_inner();

@@ -453,3 +453,89 @@ fn help_for_a_command_that_does_not_exist_names_it() {
     let first = o.err.lines().next().unwrap_or("");
     assert!(first.starts_with("sheepdog: ") && first.contains("frob"), "{}", o.err);
 }
+
+/// A call that starts with run's options and no `run`: the suggested line puts `--` before the
+/// first word that is not a run option or an option's value, so pasted into a shell it runs what
+/// was meant. An option run does not have gets no run line; options with no command, the shape.
+#[test]
+fn an_options_first_call_suggests_the_separator_before_the_command() {
+    let o = sd(&["--timeout", "5m", "sh", "-c", "exit 3"]);
+    assert_eq!(o.code, Some(2), "{}", o.err);
+    let want = "sheepdog run --timeout 5m -- sh -c 'exit 3'";
+    assert!(o.err.lines().next().unwrap_or("").ends_with(want), "{}", o.err);
+    let line = want.replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let st = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap();
+    assert_eq!(st.code(), Some(3), "the suggested line did not run the command: {line}");
+    let u = sd(&["--frob", "x"]);
+    assert_eq!(u.code, Some(2), "{}", u.err);
+    assert!(!u.err.contains("sheepdog run") && u.err.lines().next().unwrap_or("").contains("--frob"), "{}", u.err);
+    let n = sd(&["--timeout", "5m"]);
+    assert!(n.err.lines().next().unwrap_or("").ends_with("sheepdog run --timeout 5m -- COMMAND"), "{}", n.err);
+}
+
+/// Every line sheepdog suggests for a missing `run` or `--`, pasted into a shell, runs the typed
+/// command and exits with its code (never 125, a usage error, or 127, a command that is not one):
+/// one reading of where run's options end serves `run`'s parser and the top-level suggestion.
+#[test]
+fn every_suggested_line_runs_the_typed_command() {
+    for (args, code) in [
+        (&["--quiet", "/usr/bin/true"][..], 0),
+        (&["--timeout", "5m", "sh", "-c", "exit 3", "--", "x"], 3),
+        (&["\u{2014}", "/usr/bin/true"], 0),
+        (&["--timeout", "5m", "\u{2014}", "sh", "-c", "exit 4"], 4),
+        (&["run", "\u{2014}", "--", "/usr/bin/true"], 0),
+        (&["run", "--quiet", "sh", "-c", "exit 5", "--", "y"], 5),
+        (&["--timeout", "5m", "--", "sh", "-c", "exit 6"], 6),
+    ] {
+        let o = sd(args);
+        let first = o.err.lines().next().unwrap_or("").to_string();
+        let at = first.find("sheepdog run ").unwrap_or_else(|| panic!("{args:?}: no suggested line: {first}"));
+        let line = first[at..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+        let st = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap();
+        assert_eq!(st.code(), Some(code), "{args:?}: the suggested line {line} exits {:?}", st.code());
+    }
+    // an empty word before `--` is never offered as the command
+    let e = sd(&["run", "", "--", "/usr/bin/true"]);
+    assert!(!e.err.contains("sheepdog run -- ''"), "{}", e.err);
+}
+
+/// The command's own `--status-fd` (after the first word that is not an option) is never
+/// sheepdog's: nothing is written to that fd; control: sheepdog's own still gets the line.
+#[test]
+fn status_fd_after_the_command_is_the_commands() {
+    use std::os::unix::process::CommandExt;
+    let d = std::env::temp_dir().join(format!("sd-sfd-{}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    for (args, want_line) in [(&["run", "mytool", "--status-fd", "3", "--", "x"][..], false), (&["run", "--status-fd", "3", "mytool"], true)] {
+        let f = d.join("fd3");
+        let file = std::fs::File::create(&f).unwrap();
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
+        let mut c = Command::new(sheepdog());
+        c.args(args).stdin(Stdio::null()).stderr(Stdio::null());
+        // fd 3 in the child, open across exec (dup2 onto itself would keep close-on-exec)
+        unsafe {
+            c.pre_exec(move || {
+                let r = if fd == 3 { libc::fcntl(3, libc::F_SETFD, 0) } else { libc::dup2(fd, 3) };
+                if r < 0 { return Err(std::io::Error::last_os_error()); }
+                Ok(())
+            });
+        }
+        let st = c.status().unwrap();
+        assert_eq!(st.code(), Some(125), "{args:?}");
+        let got = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(!got.is_empty(), want_line, "{args:?}: fd 3 got {got:?}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A command that cannot run is named as a usage error shows a word: '' for an empty one,
+/// control characters escaped (never sent raw to the terminal).
+#[test]
+fn a_command_that_cannot_run_is_shown_escaped() {
+    let e = sd(&["run", "--", ""]);
+    assert_eq!(e.code, Some(127), "{}", e.err);
+    assert!(e.err.contains("cannot run ''"), "{}", e.err);
+    let c = sd(&["run", "--", "zz\u{1b}[31mred\nx"]);
+    assert_eq!(c.code, Some(127), "{}", c.err);
+    assert!(!c.err.contains('\u{1b}') && c.err.contains("\\x1b"), "{:?}", c.err);
+}
