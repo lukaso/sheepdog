@@ -78,6 +78,9 @@ done
 mkdir -p "$FX/liar"; printf '#!/bin/sh\nexit 0\n' > "$FX/liar/env"; chmod 755 "$FX/liar/env"
 printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/liar:$FX/sh:$PATH" "$FX/ghome" > "$FX/eL"; chmod +x "$FX/eL"
 refused 3 "publish under SHEEPDOG_TEST_STATE with a lying env on PATH" "$FX/eL" SHEEPDOG_TEST_STATE=/x sh "$RS" publish v0.1.0
+# premise for the GREP_OPTIONS rows below: the system grep reads it (else they would pass on any gate)
+printf 'SHEEPDOG_TEST_X=1\n' | GREP_OPTIONS='-e ^ZZZ' /usr/bin/grep -q '^SHEEPDOG_TEST_' 2>/dev/null \
+  && fail "premise: the system grep ignores GREP_OPTIONS (the GREP_OPTIONS rows prove nothing here)" || pass "premise: the system grep reads GREP_OPTIONS"
 # and with a lying `grep` (it never matches): the gate's tools are the system's
 mkdir -p "$FX/liarg"; printf '#!/bin/sh\nexit 1\n' > "$FX/liarg/grep"; chmod 755 "$FX/liarg/grep"
 printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/liarg:$FX/sh:$PATH" "$FX/ghome" > "$FX/eG"; chmod +x "$FX/eG"

@@ -55,9 +55,11 @@ esac
 # the gate of the two operator-only entries
 if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub" = publish-npm ]; then
   # the system's env and grep, the grep with no environment: neither a tool on PATH nor a variable
-  # it reads (GREP_OPTIONS) can hide the test environment
-  if /usr/bin/env | /usr/bin/env -i /usr/bin/grep -q '^SHEEPDOG_TEST_'; then
-    echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set" >&2; exit 3
+  # it reads (GREP_OPTIONS) can hide the test environment; only grep's "no match" (1) lets it on,
+  # so a grep that fails refuses too
+  /usr/bin/env | /usr/bin/env -i /usr/bin/grep -q '^SHEEPDOG_TEST_'; g=$?
+  if [ $g != 1 ]; then
+    echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set$( [ $g = 0 ] || echo ", or it cannot be checked (grep exit $g)")" >&2; exit 3
   fi
   if ! [ -t 0 ] || ! (: < /dev/tty) 2>/dev/null; then
     echo "release: refused: $sub$( [ $sign = yes ] && echo ' --sign') needs a terminal" >&2; exit 4

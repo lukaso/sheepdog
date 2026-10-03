@@ -30,7 +30,7 @@ mkdir -p "$FX/mk" "$FX/liar-tar" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -i
 cp "$D/sheepdog-macos-universal.tar.gz" "$FX/plain.tar.gz" && "$SD_ROOT/scripts/lib/archive.sh" make "$FX/mk/Sheepdog.app" "$D/sheepdog-macos-universal.tar.gz" || exit 3
 printf '#!/bin/sh\nd=""; while [ $# -gt 0 ]; do [ "$1" = -C ] && d=$2; shift; done\nexec /usr/bin/tar -xzf "%s" -C "$d"\n' "$FX/plain.tar.gz" > "$FX/liar-tar/tar"; chmod 755 "$FX/liar-tar/tar"
 v env PATH="$FX/liar-tar:$PATH"; rc=$?
-[ $rc = 1 ] && grep -q 'a control build' "$FX/o" && pass "a lying tar on PATH: the archive's control build is still refused as one" || fail "lying tar: rc=$rc $(tail -1 "$FX/o")"
+[ $rc = 1 ] && grep -q 'the archive holds a control build' "$FX/o" && pass "a lying tar on PATH: the archive's control build is still refused as one" || fail "lying tar: rc=$rc $(tail -1 "$FX/o")"
 cp "$FX/plain.tar.gz" "$D/sheepdog-macos-universal.tar.gz"
 # the staple check itself, with a lying `env` first on PATH (it would say yes to anything): the
 # real tool still answers (no staple ticket on a plain directory)

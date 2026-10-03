@@ -98,11 +98,11 @@ app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain; nc; r=$?
 [ $r = 1 ] && grep -q 'a control build' "$FX/o" && ! grep -q codesign "$FX/o" && pass "a control build's bundle in the darwin package: refused before any real-tool check" || fail "marked: rc=$r $(tail -1 "$FX/o")"
 # the same, with a lying `tar` first on PATH that unpacks a plain darwin package: still refused as a
 # control build (the bundle the real tools judge is unpacked by the system's tar)
-mkdir -p "$FX/liar-tar" "$FX/plainpk"; cp "$D/$DT" "$FX/marked.tgz"; (app=$app_plain; mk signed false); cp "$D/$DT" "$FX/plainpk/p.tgz"
+mkdir -p "$FX/liar-tar" "$FX/plainpk"; (app=$app_plain; mk signed false); cp "$D/$DT" "$FX/plainpk/p.tgz"
 app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain
 printf '#!/bin/sh\nd=""; while [ $# -gt 0 ]; do [ "$1" = -C ] && d=$2; shift; done\nexec /usr/bin/tar -xzf "%s" -C "$d"\n' "$FX/plainpk/p.tgz" > "$FX/liar-tar/tar"; chmod 755 "$FX/liar-tar/tar"
 (cd "$REPO" && env PATH="$FX/liar-tar:$PATH" HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 sh scripts/release.sh npm-check --out "$FX/out" v0.1.0) > "$FX/o" 2>&1; r=$?
-[ $r = 1 ] && grep -q 'a control build' "$FX/o" && pass "a lying tar on PATH: the darwin package's control build is still refused as one" || fail "lying tar: rc=$r $(tail -1 "$FX/o")"
+[ $r = 1 ] && grep -q 'the darwin package holds a control build' "$FX/o" && pass "a lying tar on PATH: the darwin package's control build is still refused as one" || fail "lying tar: rc=$r $(tail -1 "$FX/o")"
 mk signed false; stamp; nc; r=$?
 [ $r = 1 ] && grep -q 'codesign' "$FX/o" && pass "an unsigned bundle in the darwin package: refused, by codesign" || fail "unsigned bundle: rc=$r $(tail -1 "$FX/o")"
 [ ! -e "$D/NPM-CHECKED" ] && pass "a refused npm-check removes an earlier stamp (refused at a real-tool check)" || fail "a refused npm-check left the stamp"
