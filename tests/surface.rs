@@ -499,6 +499,25 @@ fn every_suggested_line_runs_the_typed_command() {
         let e = sd(args);
         assert!(matches!(e.code, Some(125) | Some(2)) && !e.err.contains("-- ''"), "{args:?}: {:?} {}", e.code, e.err);
     }
+    // an empty word after an editor's dash, or after `--`, is a usage error that names it, never a panic
+    for args in [&["run", "\u{2014}", ""][..], &["run", "--quiet", "\u{2014}", "", "x"], &["run", "\u{2014}", "--", ""], &["run", "\u{2014}", "", "--", "/usr/bin/true"]] {
+        let e = sd(args);
+        assert_eq!(e.code, Some(125), "{args:?}: {}", e.err);
+        assert!(!e.err.contains("panicked") && e.err.lines().next().unwrap_or("").contains("''"), "{args:?}: {}", e.err);
+    }
+    // the top level never offers '' or -- as the command
+    for args in [&["--", "", "x"][..], &["--quiet", "--", ""], &["--", "--", "x"]] {
+        let e = sd(args);
+        assert_eq!(e.code, Some(2), "{args:?}: {}", e.err);
+        assert!(!e.err.contains("-- ''") && !e.err.contains("-- --"), "{args:?}: {}", e.err);
+    }
+    // run named after its options: the line puts -- before the command, and runs it
+    let r = sd(&["--quiet", "run", "echo", "hi"]);
+    let first = r.err.lines().next().unwrap_or("").to_string();
+    assert!(first.ends_with("sheepdog run --quiet -- echo hi"), "{first}");
+    let line = first[first.find("sheepdog run ").unwrap()..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let out = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).output().unwrap();
+    assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).trim().to_string()), (Some(0), "hi".to_string()), "{line}");
     // a subcommand word counts only where run's command would start, never as an option's value
     // or the command's own argument
     let o = sd(&["--owner", "sweep", "--", "echo", "hi"]);
@@ -529,6 +548,13 @@ fn status_fd_after_the_command_is_the_commands() {
         (&["run", "--status-fd", "bad", "--status-fd", "3", "--", "/usr/bin/true"], false),
         (&["run", "--status-fd", "2", "--status-fd", "3", "--", "/usr/bin/true"], false),
         (&["run", "--status-fd", "3", "--timeout", "--", "/usr/bin/true"], true),
+        // the rule is the options' own: any unusable --status-fd among them, no line, whatever error
+        // parse names first; with none, a usage error elsewhere still gets its line
+        (&["run", "--status-fd", "3", "--timeout", "bad", "--status-fd", "--", "/usr/bin/true"], false),
+        (&["run", "--timeout", "bad", "--status-fd", "3", "--", "/usr/bin/true"], true),
+        // an empty word after an editor's dash: a usage error, its line written
+        (&["run", "--status-fd", "3", "\u{2014}", ""], true),
+        (&["run", "--status-fd", "3", "\u{2014}", "", "--", "/usr/bin/true"], true),
     ] {
         let f = d.join("fd3");
         let file = std::fs::File::create(&f).unwrap();
@@ -547,6 +573,7 @@ fn status_fd_after_the_command_is_the_commands() {
         assert_eq!(st.code(), Some(125), "{args:?}");
         let got = std::fs::read_to_string(&f).unwrap();
         assert_eq!(!got.is_empty(), want_line, "{args:?}: fd 3 got {got:?}");
+        assert!(!want_line || got.contains("\"error\":\"usage\""), "{args:?}: the line is not a usage error: {got:?}");
     }
     let _ = std::fs::remove_dir_all(&d);
 }

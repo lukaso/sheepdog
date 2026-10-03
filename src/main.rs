@@ -350,8 +350,9 @@ enum OptsEnd {
     Missing(usize, usize),
     /// an option run does not have
     Unknown(usize),
-    /// an empty word where an option or the command should be
-    Empty(usize),
+    /// an empty word where an option or the command should be: the options end at .0, the empty
+    /// word is at .1 (after an editor's dash, past it)
+    Empty(usize, usize),
     /// an option that takes a value, with none (or `--`) after it
     NoValue(usize),
 }
@@ -360,7 +361,7 @@ impl OptsEnd {
     /// The options are WORDS[..this]: each a run option, each value-taking one with its value.
     fn opts(self) -> usize {
         match self {
-            OptsEnd::Sep(i) | OptsEnd::Unknown(i) | OptsEnd::Empty(i) | OptsEnd::NoValue(i) | OptsEnd::Missing(i, _) => i,
+            OptsEnd::Sep(i) | OptsEnd::Unknown(i) | OptsEnd::NoValue(i) | OptsEnd::Missing(i, _) | OptsEnd::Empty(i, _) => i,
         }
     }
 }
@@ -384,13 +385,13 @@ fn opts_end(w: &[OsString]) -> OptsEnd {
             continue;
         }
         if b.is_empty() {
-            return OptsEnd::Empty(i);
+            return OptsEnd::Empty(i, i);
         }
         if dash_lookalike(&w[i]) {
             let c = if w.get(i + 1).map(|x| x.as_bytes()) == Some(b"--") { i + 2 } else { i + 1 };
             // an empty word where the command would start is never offered as the command
             if w.get(c).is_some_and(|x| x.is_empty()) {
-                return OptsEnd::Empty(c);
+                return OptsEnd::Empty(i, c);
             }
             return OptsEnd::Missing(i, c);
         }
@@ -404,11 +405,14 @@ fn opts_end(w: &[OsString]) -> OptsEnd {
 
 /// The line that runs it: WORDS[..O], `--`, WORDS[C..] (or COMMAND when there is none),
 /// shell-quoted so the line pasted runs what was typed; only its shape when a word cannot be
-/// pasted back as typed.
-fn run_line(w: &[OsString], o: usize, c: usize) -> String {
+/// pasted back as typed; None when the command word would be '' or `--` (no command runs).
+fn run_line(w: &[OsString], o: usize, c: usize) -> Option<String> {
+    if w.get(c).is_some_and(|x| x.is_empty() || x.as_bytes() == b"--") {
+        return None;
+    }
     let typed: Vec<String> = w.iter().map(|a| kill::clean(&a.to_string_lossy())).collect();
     if !w.iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes()) {
-        return "sheepdog run [options] -- COMMAND".to_string();
+        return Some("sheepdog run [options] -- COMMAND".to_string());
     }
     let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
     let mut parts = vec!["sheepdog run".to_string()];
@@ -417,7 +421,19 @@ fn run_line(w: &[OsString], o: usize, c: usize) -> String {
     }
     parts.push("--".to_string());
     parts.push(if c < q.len() { q[c..].join(" ") } else { "COMMAND".to_string() });
-    parts.join(" ")
+    Some(parts.join(" "))
+}
+
+/// What sheepdog suggests for WORDS read as run's arguments: the line, or why there is none.
+fn run_suggestion(w: &[OsString]) -> Result<String, String> {
+    const CMDS: &str = "Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).";
+    let no_line = |c: usize| format!("{} is not a command to run. {CMDS}", shown(&w[c]));
+    match opts_end(w) {
+        OptsEnd::Sep(s) => run_line(w, s, s + 1).ok_or_else(|| no_line(s + 1)),
+        OptsEnd::Missing(o, c) => run_line(w, o, c).ok_or_else(|| no_line(c)),
+        OptsEnd::NoValue(i) => Err(format!("{} is not a sheepdog command; as an option of run it needs a value. {CMDS}", shown(&w[i]))),
+        OptsEnd::Unknown(i) | OptsEnd::Empty(_, i) => Err(format!("{} is not a sheepdog command or an option of run. {CMDS}", shown(&w[i]))),
+    }
 }
 
 fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
@@ -465,7 +481,8 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
             b"--inherit-terminal-permissions" => inherit = true,
             b"--quiet" => quiet = true,
             b"--forward-int-to-root" => forward_int_to_root = true,
-            _ => unreachable!("opts_end passes only run's options, and bool_flag names these five"),
+            // opts_end passes only run's options, and bool_flag names these five; never a panic
+            _ => return Err(usage_because(format!("unknown option {}.", shown(&w[i])))),
         }
         i += 1;
     }
@@ -476,9 +493,11 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
             return Err(usage_because(format!("{} needs a value. It must be {rule}.", shown(&w[i]))));
         }
         OptsEnd::Unknown(i) => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&w[i])))),
-        OptsEnd::Empty(i) => return Err(usage_because(format!("{} is not an option of run, or a command.", shown(&w[i])))),
+        OptsEnd::Empty(_, i) => return Err(usage_because(format!("{} is not an option of run, or a command.", shown(&w[i])))),
         OptsEnd::Missing(o, c) => {
-            let line = run_line(w, o, c);
+            let Some(line) = run_line(w, o, c) else {
+                return Err(usage_because(format!("{} is not a command to run.", shown(&w[c]))));
+            };
             let dash = if c > o { format!("{} is not -- (an editor may have changed it): type two hyphens. ", shown(&w[o])) } else { String::new() };
             let what = match (c >= w.len(), dash.is_empty()) {
                 (true, true) => "no command",
@@ -1792,17 +1811,21 @@ fn run(argv: Vec<OsString>) -> i32 {
             // after an option run does not have (a subcommand's own, like --json): the first
             // subcommand word before any `--`
             let sub_after = |i: usize| typed[i..].iter().take_while(|t| t.as_str() != "--").position(|t| SUBS.contains(&t.as_str())).map(|j| i + j);
-            let fix = match e {
-                OptsEnd::Missing(o, c) if o == c && exact && o < w.len() && SUBS.contains(&typed[o].as_str()) => sub_line(o),
-                OptsEnd::Unknown(i) if exact && sub_after(i).is_some() => sub_line(sub_after(i).unwrap_or(i)),
-                OptsEnd::Sep(s) => run_line(w, s, s + 1),
-                OptsEnd::Missing(o, c) => run_line(w, o, c),
-                OptsEnd::NoValue(i) => {
-                    fail!("sheepdog: '{}' is not a sheepdog command; as an option of run it needs a value. Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).", typed[i]);
-                    return 2;
-                }
-                OptsEnd::Unknown(i) | OptsEnd::Empty(i) => {
-                    fail!("sheepdog: {} is not a sheepdog command or an option of run. Commands: run, kill, strays, ps, sweep, doctor (`sheepdog help`).", shown(&w[i]));
+            let at = match e {
+                OptsEnd::Missing(o, c) if o == c && exact && o < w.len() && SUBS.contains(&typed[o].as_str()) => Some(o),
+                OptsEnd::Unknown(i) if exact => sub_after(i),
+                _ => None,
+            };
+            let fix = match at {
+                // `run` named after its options: the rest is run's arguments, read as run reads them
+                Some(o) if typed[o] == "run" => run_suggestion(&[&w[..o], &w[o + 1..]].concat()),
+                Some(o) => Ok(sub_line(o)),
+                None => run_suggestion(w),
+            };
+            let fix = match fix {
+                Ok(line) => line,
+                Err(why) => {
+                    fail!("sheepdog: {why}");
                     return 2;
                 }
             };
