@@ -438,11 +438,12 @@ fn a_word_that_cannot_be_shown_gets_only_the_shape() {
 /// K, and a fraction of a second is written in s.
 #[test]
 fn the_rules_said_are_the_rules_parsed() {
-    for v in ["4096", "512k", "2G"] {
-        assert_eq!(sd(&["run", "--max-mem", v, "--", "/usr/bin/true"]).code, Some(0), "--max-mem {v}");
+    // (sizes far above the tree: a cap a process can reach would fire)
+    for v in ["8589934592", "4194304k", "2G"] {
+        assert_eq!(sd(&["run", "--max-mem", v, "--", "true"]).code, Some(0), "--max-mem {v}");
     }
-    assert_eq!(sd(&["run", "--timeout", "1.5s", "--", "/usr/bin/true"]).code, Some(0));
-    assert_eq!(sd(&["run", "--timeout", "1500ms", "--", "/usr/bin/true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "1.5s", "--", "true"]).code, Some(0));
+    assert_eq!(sd(&["run", "--timeout", "1500ms", "--", "true"]).code, Some(0));
 }
 
 /// `sheepdog help` with a command that does not exist names the word it rejected (exit 2).
@@ -479,11 +480,11 @@ fn an_options_first_call_suggests_the_separator_before_the_command() {
 #[test]
 fn every_suggested_line_runs_the_typed_command() {
     for (args, code) in [
-        (&["--quiet", "/usr/bin/true"][..], 0),
+        (&["--quiet", "true"][..], 0),
         (&["--timeout", "5m", "sh", "-c", "exit 3", "--", "x"], 3),
-        (&["\u{2014}", "/usr/bin/true"], 0),
+        (&["\u{2014}", "true"], 0),
         (&["--timeout", "5m", "\u{2014}", "sh", "-c", "exit 4"], 4),
-        (&["run", "\u{2014}", "--", "/usr/bin/true"], 0),
+        (&["run", "\u{2014}", "--", "true"], 0),
         (&["run", "--quiet", "sh", "-c", "exit 5", "--", "y"], 5),
         (&["--timeout", "5m", "--", "sh", "-c", "exit 6"], 6),
     ] {
@@ -495,12 +496,12 @@ fn every_suggested_line_runs_the_typed_command() {
         assert_eq!(st.code(), Some(code), "{args:?}: the suggested line {line} exits {:?}", st.code());
     }
     // an empty word is never offered as the command, wherever it stands
-    for args in [&["run", "", "--", "/usr/bin/true"][..], &["run", "\u{2014}", ""], &["run", "--quiet", "\u{2014}", "", "x"], &["\u{2014}", ""], &["", "x"]] {
+    for args in [&["run", "", "--", "true"][..], &["run", "\u{2014}", ""], &["run", "--quiet", "\u{2014}", "", "x"], &["\u{2014}", ""], &["", "x"]] {
         let e = sd(args);
         assert!(matches!(e.code, Some(125) | Some(2)) && !e.err.contains("-- ''"), "{args:?}: {:?} {}", e.code, e.err);
     }
     // an empty word after an editor's dash, or after `--`, is a usage error that names it, never a panic
-    for args in [&["run", "\u{2014}", ""][..], &["run", "--quiet", "\u{2014}", "", "x"], &["run", "\u{2014}", "--", ""], &["run", "\u{2014}", "", "--", "/usr/bin/true"]] {
+    for args in [&["run", "\u{2014}", ""][..], &["run", "--quiet", "\u{2014}", "", "x"], &["run", "\u{2014}", "--", ""], &["run", "\u{2014}", "", "--", "true"]] {
         let e = sd(args);
         assert_eq!(e.code, Some(125), "{args:?}: {}", e.err);
         assert!(!e.err.contains("panicked") && e.err.lines().next().unwrap_or("").contains("''"), "{args:?}: {}", e.err);
@@ -513,12 +514,12 @@ fn every_suggested_line_runs_the_typed_command() {
     }
     // a value run would refuse is named, as run names it, and no line is offered (pasted, it would
     // fail again); control: --quiet before run still gets a line that runs
-    for args in [&["--timeout", "bad", "x"][..], &["--timeout", "bad", "run", "/usr/bin/true"], &["--status-fd", "2", "x"]] {
+    for args in [&["--timeout", "bad", "x"][..], &["--timeout", "bad", "run", "true"], &["--status-fd", "2", "x"]] {
         let e = sd(args);
         let first = e.err.lines().next().unwrap_or("").to_string();
         assert!(e.code == Some(2) && !first.contains("sheepdog run ") && first.contains(&format!("{} {}", args[0], args[1])) && first.contains("is not valid"), "{args:?}: {first}");
     }
-    let ok = sd(&["--quiet", "run", "/usr/bin/true"]);
+    let ok = sd(&["--quiet", "run", "true"]);
     let line = ok.err.lines().next().unwrap_or("").to_string();
     let line = line[line.find("sheepdog run ").unwrap_or_else(|| panic!("no line: {line}"))..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
     assert_eq!(Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap().code(), Some(0), "{line}");
