@@ -4,8 +4,8 @@
 # (rendered by the build) with a temp HOME and a temp TMPDIR.
 #   - the install: install.sh names the version, commit and an active responsibility API; the
 #     app in ~/Applications is a directory (not a link), file for file the release archive's
-#     bundle; ~/.local/bin/sheepdog links to its executable; the PATH hint names ~/.local/bin
-#     (control: no hint when it is on PATH);
+#     bundle; ~/.local/bin/sheepdog links to its executable; the PATH hint names ~/.local/bin,
+#     and with SHELL=/bin/zsh its line goes into ~/.zprofile (control: no hint when it is on PATH);
 #   - the installed sheepdog, after the door: a job's process is the app's executable, its exit
 #     code passes through, and scripts/smoke.sh passes, all of its state under a temp HOME;
 #   - after every install, nothing but Sheepdog.app is in Applications, and install.sh used its
@@ -41,7 +41,7 @@ n=0
 inst() { # served-dir HOME [extra PATH] -> rc; output in $FX/o; install.sh's TMPDIR in $TD (fresh;
   # its mtime and inode before the install in $TDM, $TDI)
   n=$((n + 1)); TD=$FX/tmp.$n; mkdir -p "$TD"; TDM=$(stat -f %Fm "$TD") TDI=$(stat -f %i "$TD"); sleep 0.01
-  env -i PATH="${3:+$3:}/usr/bin:/bin:/usr/sbin" HOME="$2" TMPDIR="$TD" SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
+  env -i PATH="${3:+$3:}/usr/bin:/bin:/usr/sbin" HOME="$2" TMPDIR="$TD" ${ISHELL:+SHELL="$ISHELL"} SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$(cat "$1.port")" sh "$1/install.sh" > "$FX/o" 2>&1
 }
 tmp_ok() { # dir mtime inode -> rc 0: still the same directory (not a link, the same inode), used by
   # install.sh (its mtime moved) and left with nothing in it
@@ -77,10 +77,12 @@ c12=$(sed -n 's/^ *"commit": *"\([0-9a-f]\{12\}\).*/\1/p' "$RC/MANIFEST.json")
 [ -n "$c12" ] || fail "no commit in the rc's manifest"
 H=$FX/home; mkdir -p "$H"
 A=$H/Applications/Sheepdog.app L=$H/.local/bin/sheepdog
-inst "$FX/srv" "$H"; r=$?
+ISHELL=/bin/zsh   # the first install as from macOS's default shell (the PATH hint's file is zsh's)
+inst "$FX/srv" "$H"; r=$?; ISHELL=""
 [ $r = 0 ] && grep -q "installed: sheepdog $xyz ($c12, macos, responsibility API: active)" "$FX/o" \
   && pass "install.sh installs the rc: sheepdog $xyz ($c12), the responsibility API active" || fail "install: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
 grep -q "$H/.local/bin is not on your PATH" "$FX/o" && pass "the PATH hint names ~/.local/bin" || fail "no PATH hint naming $H/.local/bin"
+grep -qF "echo 'export PATH=\"$H/.local/bin:\$PATH\"' >> ~/.zprofile" "$FX/o" && pass "with SHELL=/bin/zsh the hint's line goes into ~/.zprofile" || fail "the zsh hint: $(grep -F '.local/bin:' "$FX/o" | head -1)"
 clean "the first install"
 apps "$H" "the first install"
 mkdir -p "$FX/x" && tar -xzf "$RC/$ARC" -C "$FX/x" || fail "cannot unpack the rc"
