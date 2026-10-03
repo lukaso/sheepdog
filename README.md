@@ -93,10 +93,12 @@ sheepdog is not a sandbox. It does not reach:
 - a process that leaves on purpose: `sudo`, another user, ptrace.
 
 A caller that sends INT to sheepdog's pid alone and then SIGKILLs it (for example Node's
-`child.kill('SIGINT')` and then `child.kill('SIGKILL')`) kills only sheepdog; the rest of the tree is then ended by
-your next `sheepdog run` or `sheepdog sweep` with the same `--owner` and the same state directory,
-before a reboot (in a container: in the same container). A `run` with `--no-sweep` skips that, and
-a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run. Send TERM instead.
+`child.kill('SIGINT')` and then `child.kill('SIGKILL')`) kills sheepdog (on Linux, the command it
+started dies with it), not the rest of the tree. Such a caller should send TERM instead. What was
+left is ended by your next `sheepdog run` or `sheepdog sweep` with the same `--owner` and the same
+state directory, before a reboot (in a container: in the same container). A `run` with `--no-sweep`
+skips that, and a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more
+than one run.
 
 On macOS a running job costs some CPU: sheepdog checks your processes four times a second to find
 the ones that escaped. Measured on a busy Mac (about 1000 of your processes, load average 16): about 1.5% of one CPU
@@ -122,8 +124,10 @@ and pnpm, where these commands print it:
 
 In a standard (not admin) account the row may not appear in the list after you add it; the grant
 still works. An upgrade with install.sh keeps the grant. After another kind of upgrade, run
-`sheepdog run -- ls ~/Library/Safari`: only Full Disk Access lets it list that folder (open Safari
-once first if the folder does not exist). If it is denied, add Sheepdog again.
+`sheepdog run --timeout 20s -- ls ~/Library/Safari`: only Full Disk Access lets it list that folder
+(open Safari once first if the folder does not exist). If it is denied, add Sheepdog again. If
+sheepdog says tracking falls back to parent ids, the result proves nothing: the job then has your
+terminal's permissions.
 `sheepdog doctor --grants` checks whether Sheepdog can read `~/Documents` (this can show a macOS
 privacy prompt; allowing Documents there is not Full Disk Access).
 
@@ -182,11 +186,11 @@ that is an absolute path, else in `~/.local/state/sheepdog`; delete that directo
 - Exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired (`--timeout`, a
   cap); 125 when sheepdog failed, for a usage error of `run`, or when a process was still alive at
   the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
-  The other commands exit 2 for a usage error.
-  `--status-fd` says which, as one JSON line.
+  `--status-fd` says which, as one JSON line. The other commands exit 2 for a usage error.
 - Stable interfaces: the subcommands and the flags `sheepdog help <command>` shows, the exit codes,
-  the `--status-fd` and `--json` schemas (`"v": 1`), and the `sheepdog:` prefix on its stderr
-  messages (a usage error's first line says what was wrong). Every release has a
+  the `--status-fd` and `--json` schemas (`"v": 1`), and the `sheepdog:` at the start of the first
+  line of each stderr message (for a usage error, that line says what was wrong; `sheepdog` alone
+  prints the overview and exits 2). Every release has a
   [CHANGELOG](CHANGELOG.md) entry.
 
 ## License

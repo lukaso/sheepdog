@@ -406,7 +406,7 @@ fn subcommand_usage_errors_name_the_word_and_its_rule() {
 }
 
 /// `--mode` exists so the cells can compare tracking methods (one loses escapees): the help never
-/// shows it, so it is outside the stable flags (the README's "the flags `sheepdog help` shows"),
+/// shows it, so it is outside the stable flags (the README's "the flags `sheepdog help <command>` shows"),
 /// and it still parses.
 #[test]
 fn the_test_only_mode_flag_is_not_in_the_help() {

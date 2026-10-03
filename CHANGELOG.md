@@ -2,8 +2,8 @@
 
 Every release has an entry here. sheepdog follows semver; the stable interfaces are the subcommands
 and the flags `sheepdog help <command>` shows, the exit codes, the `--status-fd` and `--json`
-schemas (`"v": 1`, additive changes only) and the `sheepdog:` prefix on its stderr messages (a
-usage error's first line says what was wrong).
+schemas (`"v": 1`, additive changes only) and the `sheepdog:` at the start of the first line of
+each stderr message (for a usage error, that line says what was wrong).
 
 ## 0.1.0 (not yet released)
 
