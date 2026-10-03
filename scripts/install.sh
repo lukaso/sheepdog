@@ -107,7 +107,7 @@ if [ "$(uname -s)" = Darwin ]; then
   if ! mv "$new" "$app"; then
     # put the old one back; if that fails too, keep it where it is and say where
     if [ -n "$old" ] && mv "$old" "$app"; then old=""; die "cannot move Sheepdog.app into $apps (the old one is back in place)"; fi
-    [ -n "$old" ] && { keep=$old; old=""; stage=""; die "cannot move Sheepdog.app into $apps: no Sheepdog.app is there now; the old one is at $keep"; }
+    [ -n "$old" ] && { keep=$old; old=""; stage=""; die "cannot move Sheepdog.app into $apps, nor the old one back; the old one is at $keep"; }
     die "cannot move Sheepdog.app into $apps"
   fi
   old=""

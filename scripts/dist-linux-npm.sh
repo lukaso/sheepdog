@@ -73,6 +73,9 @@ n=$(find "$P/lib/node_modules" -path '*/@lukaso/sheepdog-*/bin/sheepdog' | wc -l
 um=$(asu umask); m=$(( 0$um ))
 wb=""; [ $((m & 2)) != 0 ] && wb="-perm -002"; [ $((m & 16)) != 0 ] && wb="${wb:+$wb -o }-perm -020"
 w=""; [ -n "$wb" ] && w=$(find "$P" ! -type l \( $wb \) | head -3 | tr '\n' ' ')
+# control: the same find lists a file with a write bit beyond that umask
+cd0=$(mktemp -d); : > "$cd0/f"; chmod 666 "$cd0/f"; cw=""; [ -n "$wb" ] && cw=$(find "$cd0" ! -type l \( $wb \)); rm -rf "$cd0"
+[ "$cw" = "$cd0/f" ] && ok "control: that find lists a file with write bits beyond the umask" || bad "control: the umask find missed $cd0/f ('$cw')"
 [ -d "$P/lib/node_modules/@lukaso/sheepdog" ] && [ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
 
 v=$(asu "'$E' --version" 2>&1); case $v in "sheepdog "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
@@ -88,20 +91,22 @@ asu "'$E' run -- sh -c 'setsid sleep 300 & echo \$! > /tmp/esc; exec sleep 300' 
 i=0; while { [ ! -s /tmp/lp ] || [ ! -s /tmp/esc ]; } && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 lp=$(cat /tmp/lp 2>/dev/null) esc=$(cat /tmp/esc 2>/dev/null)
 # what a pid runs: its exe link, read as the process's own user (root in a container has no
-# CAP_SYS_PTRACE for another user's); under a binary translator (Rosetta runs amd64 containers on
-# Apple silicon, qemu-user) the link names the translator, so the program is argv[0], resolved
-# (as src/linux.rs exe_name reads it; PHASE1 measured /proc/<pid>/cmdline clean under Rosetta)
+# CAP_SYS_PTRACE for another user's). Under Rosetta (amd64 containers on Apple silicon) the link
+# names the translator and /proc/<pid>/cmdline stays clean (PHASE1.md, measured), so the program is
+# argv[0], resolved, as src/linux.rs exe_name reads it; qemu-user is treated the same way there,
+# not measured.
 runs() { # pid -> path
   e=$(asu "readlink /proc/$1/exe" 2>/dev/null)
   case ${e##*/} in
-    rosetta|qemu-*) a0=$(asu "tr '\\000' '\\n' < /proc/$1/cmdline" 2>/dev/null | head -1); echo "translated: $(readlink -f "$a0" 2>/dev/null)" ;;
+    rosetta|qemu-*) a0=$(asu "tr '\\000' '\\n' < /proc/$1/cmdline" 2>/dev/null | head -1); r=$(readlink -f "$a0" 2>/dev/null); echo "translated: ${r:-$a0}" ;;
     *) echo "$e" ;;
   esac
 }
 want=$(readlink -f "$B"); x=""; i=0
 while [ $i -lt 50 ]; do x=$(runs "$lp"); [ "${x#translated: }" = "$want" ] && break; sleep 0.1; i=$((i + 1)); done
 [ -n "$lp" ] && [ "${x#translated: }" = "$want" ] && ok "the process the PATH entry started is the installed binary, with the launcher's pid (pid $lp: $x)" || bad "pid $lp runs '$x', not $B"
-xe=$(runs "$esc"); [ -n "$esc" ] && [ "${xe#translated: }" != "$want" ] && ok "control: the escapee's program ($xe) is told apart from the binary" || bad "control: the escapee reads as '$xe'"
+# control: the same read names the escapee's own program (sleep: busybox's, or coreutils')
+xe=$(runs "$esc"); case $xe in *busybox|*sleep) ok "control: the escapee's program reads as $xe, not the binary" ;; *) bad "control: the escapee reads as '$xe'" ;; esac
 [ -n "$esc" ] && [ "$(sed -n 's/^[^)]*) [A-Z] [0-9]* [0-9]* \([0-9]*\).*/\1/p' "/proc/$esc/stat" 2>/dev/null)" = "$esc" ] \
   && ok "the escapee is in a session of its own ($esc)" || bad "the escapee $esc did not leave the session"
 [ -n "$lp" ] && kill -TERM "$lp"; wait $su

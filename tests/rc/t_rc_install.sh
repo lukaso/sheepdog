@@ -121,11 +121,18 @@ inst "$FX/srv" "$H3" "$H3/.local/bin"; r=$?
 [ $r = 0 ] && ! grep -q 'is not on your PATH' "$FX/o" && pass "control: no PATH hint when ~/.local/bin is on PATH" || fail "PATH-hint control: rc=$r $(tail -1 "$FX/o")"
 clean "the PATH-hint control install"
 apps "$H3" "the PATH-hint control install"
-# a failure after the app is in place says so: ~/.local/bin is a file, so the link cannot be made
-H5=$FX/home5; mkdir -p "$H5/.local"; : > "$H5/.local/bin"
-inst "$FX/srv" "$H5"; r=$?
-[ $r = 1 ] && [ -d "$H5/Applications/Sheepdog.app" ] && grep -q "Sheepdog.app is installed in $H5/Applications, but $H5/.local/bin/sheepdog cannot be linked" "$FX/o" \
-  && pass "a link that cannot be made: exit 1, the app in place, and the message says so" || fail "cannot link: rc=$r app=$(ls -d "$H5/Applications/Sheepdog.app" 2>&1) $(tail -1 "$FX/o")"
+# a failure after the app is in place says so: ~/.local/bin a file (mkdir -p fails), or a directory
+# that cannot be written (ln fails)
+for how in file dir; do
+  H5=$FX/home5$how; mkdir -p "$H5/.local"
+  if [ $how = file ]; then : > "$H5/.local/bin"; else mkdir "$H5/.local/bin" && chmod 555 "$H5/.local/bin"; fi
+  inst "$FX/srv" "$H5"; r=$?
+  [ $r = 1 ] && [ -d "$H5/Applications/Sheepdog.app" ] && grep -q "Sheepdog.app is installed in $H5/Applications, but $H5/.local/bin/sheepdog cannot be linked" "$FX/o" \
+    && pass "a link that cannot be made (~/.local/bin a $how): exit 1, the app in place, and the message says so" || fail "cannot link ($how): rc=$r app=$(ls -d "$H5/Applications/Sheepdog.app" 2>&1) $(tail -1 "$FX/o")"
+  clean "the cannot-link install ($how)"
+  apps "$H5" "the cannot-link install ($how)"
+  [ $how = dir ] && chmod 755 "$H5/.local/bin"
+done
 # refused: nothing installed, nothing left
 refused() { # home what reason
   [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ ! -L "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \

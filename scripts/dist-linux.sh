@@ -90,6 +90,7 @@ EOF
   for a in aarch64 x86_64; do
     snip $a "$ha" "$hx"; r=$?
     [ $r = 0 ] && [ -x /usr/local/bin/sheepdog ] && cmp -s /usr/local/bin/sheepdog /tmp/rel/sheepdog-linux-$a \
+      && grep -q "releases/download/v$v/sheepdog-linux-$a" /tmp/rs/curl.log \
       && ok "the README's Docker snippet on $a: the $a file, its hash checked, executable" || bad "the README's snippet on $a: rc=$r $(tr '\n' ' ' < /tmp/rs/o)"
   done
   snip aarch64 "$hx" "$ha"; r=$?

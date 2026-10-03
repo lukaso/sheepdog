@@ -26,8 +26,8 @@
 #                refused with no downloader, installed with wget and with curl, as root and as a
 #                user, a checksum mismatch refused, and the README's Docker snippet
 #                (scripts/dist-linux.sh); the npm packages installed with npm in both images, and
-#                the x64 package in the amd64 image (scripts/dist-linux-npm.sh). On an arm64 host
-#                it needs the amd64 leg's build of this tree: ./test-all amd64 dist-linux
+#                the x64 package in the amd64 image (scripts/dist-linux-npm.sh), built here for
+#                amd64 in that image (needs the local amd64 base: ./test-all pull)
 #   hardened     the macOS suite against a sheepdog signed ad hoc with the hardened runtime (the
 #                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
@@ -146,9 +146,11 @@ leg_debian() {
     && record debian PASS || record debian "FAIL ($LOGDIR/debian.log)"
 }
 
-leg_amd64() {
-  # tagged by the pinned base's digest, so a new pin builds a new image
+amd64_image() { # the amd64 test image ($AMD64_IMG), built once from the local base; AMD64_WHY says
+  # why not (a variable, not output: a command substitution would run bg_wait in a subshell, out of
+  # cleanup's reach). Tagged by the pinned base's digest, so a new pin builds a new image.
   local img=$AMD64_IMG a
+  AMD64_WHY=""
   if ! timeout 60 docker image inspect "$img" >/dev/null 2>&1; then
     # the Dockerfile goes in a file, never through stdin: bg_wait runs its command in the
     # background, where a non-interactive bash gives it /dev/null as stdin (and a pipe into
@@ -158,15 +160,26 @@ leg_amd64() {
     # the base is the local amd64 copy `./test-all pull` tags; a missing one fails here instead of
     # a registry call, which can show a keychain prompt
     timeout 60 docker image inspect "$AMD64_BASE" >/dev/null 2>&1 \
-      || { record amd64 "FAIL (no local $AMD64_BASE: run ./test-all pull)"; return; }
+      || { AMD64_WHY="no local $AMD64_BASE: run ./test-all pull"; return 1; }
     bg_wait timeout -k 30 1800 docker build --pull=false --platform linux/amd64 -t "$img" -f "$LOGDIR/amd64.Dockerfile" "$LOGDIR/amd64-context" \
       > "$LOGDIR/amd64-image.log" 2>&1 \
-      || { record amd64 "FAIL (image build; $LOGDIR/amd64-image.log)"; return; }
+      || { AMD64_WHY="image build; $LOGDIR/amd64-image.log"; return 1; }
   fi
   a=$(img_arch "$img" linux/amd64)
-  [ "$a" = x86_64 ] || { record amd64 "FAIL ($img runs as '$a', not x86_64)"; return; }
+  [ "$a" = x86_64 ] || { AMD64_WHY="$img runs as '$a', not x86_64"; return 1; }
+}
+leg_amd64() {
+  local img=$AMD64_IMG
+  amd64_image || { record amd64 "FAIL ($AMD64_WHY)"; return; }
   suite_in "$img" target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
     && record amd64 PASS || record amd64 "FAIL ($LOGDIR/amd64.log)"
+}
+
+# Build sheepdog for amd64 in the amd64 image, into target-linux-amd64 (the suite builds into the
+# container's own dir, so this is the one writer of that build; dist-linux packs it)
+build_amd64() {
+  leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bin sheepdog'
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
@@ -317,7 +330,14 @@ leg_dist_linux() {
     && chmod 755 "$pk/app/Sheepdog.app/Contents/MacOS/sheepdog" && sh scripts/lib/archive.sh make "$pk/app/Sheepdog.app" "$pk/mac.tar.gz" \
     && cp "$ROOT/target-linux/debug/sheepdog" "$pk/bin-$( [ $NATIVE = aarch64 ] && echo linux-arm64 || echo linux-x64)" \
     || { record dist-linux "FAIL (npm fixture)"; return; }
-  if [ $NATIVE = aarch64 ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ]; then cp "$ROOT/target-linux-amd64/debug/sheepdog" "$pk/bin-$other"
+  # the other arch's package: on an arm64 host, this tree built for amd64 in the amd64 image (run in
+  # that image below); on an x86_64 host, a stand-in (an arm64 build there is not run)
+  local amd_why=""
+  if [ $NATIVE = aarch64 ]; then
+    mkdir -p "$ROOT/target-linux-amd64"
+    if amd64_image; then build_amd64 || amd_why="amd64 build; $LOGDIR/build-amd64.log"; else amd_why=$AMD64_WHY; fi
+  fi
+  if [ $NATIVE = aarch64 ] && [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ]; then cp "$ROOT/target-linux-amd64/debug/sheepdog" "$pk/bin-$other"
   else printf '#!/bin/sh\necho stand-in\n' > "$pk/bin-$other"; fi
   sh scripts/lib/npm-pack.sh 0.0.0 "$pk/mac.tar.gz" "$pk/bin-linux-arm64" "$pk/bin-linux-x64" npm/sheepdog/bin/sheepdog "$pk/tgz" > /dev/null \
     && cp npm/sheepdog/bin/sheepdog "$pk/launcher" && python3 scripts/lib/static-registry.py "$pk/reg" 4873 "" "$pk/tgz" \
@@ -333,10 +353,10 @@ leg_dist_linux() {
     echo "== dist-linux npm in $AMD64_IMG (linux/amd64)" >> "$LOGDIR/dist-linux.log"
     # the amd64 build must be this tree's: no source newer than it
     local stale; stale=$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/build.rs" -newer "$ROOT/target-linux-amd64/debug/sheepdog" -type f 2>/dev/null | head -1)
-    if [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && [ -z "$stale" ] && timeout 60 docker image inspect "$AMD64_IMG" >/dev/null 2>&1; then
+    if [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && [ -z "$stale" ]; then
       bg_wait timeout -k 30 2400 docker run --rm --pull=never --platform linux/amd64 -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
         "$AMD64_IMG" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
-    else echo "FAIL: the x64 package needs the amd64 leg's build of this tree and its image (./test-all amd64 dist-linux)${stale:+; $stale is newer than the build}" >> "$LOGDIR/dist-linux.log"; ok=0; fi
+    else echo "FAIL: the x64 package was not built for this tree (${amd_why:-${stale:+$stale is newer than the build}})" >> "$LOGDIR/dist-linux.log"; ok=0; fi
   fi
   [ $ok = 1 ] && record dist-linux PASS || record dist-linux "FAIL ($LOGDIR/dist-linux.log)"
 }
