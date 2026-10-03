@@ -281,13 +281,18 @@ fn usage_because(why: String) -> i32 {
     usage()
 }
 
+/// The rules a value keeps, as a usage error says them (one home for every command).
+pub(crate) const RULE_GRACE: &str = "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 1d, for example 2s";
+pub(crate) const RULE_AGE: &str = "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 365d, for example 10m";
+pub(crate) const RULE_SIZE: &str = "a size: a whole number above 0 with K, M or G (binary: 1G is 1024M), for example 2G";
+
 /// `run`'s options that take a value, with the rule a value must keep (said in a usage error).
 fn value_rule(flag: &[u8]) -> Option<&'static str> {
     Some(match flag {
         b"--timeout" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 365d, for example 5m",
         b"--kill-deadline" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 1d, for example 30s",
-        b"--grace" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 1d, for example 2s",
-        b"--max-mem" => "a size: a whole number above 0 with K, M or G (binary: 1G is 1024M), for example 2G",
+        b"--grace" => RULE_GRACE,
+        b"--max-mem" => RULE_SIZE,
         b"--max-procs" => "a count: a whole number above 0, for example 200",
         b"--status-fd" => "a file descriptor number, 3 or more",
         b"--owner" | b"--mode" => "a word",
@@ -296,7 +301,7 @@ fn value_rule(flag: &[u8]) -> Option<&'static str> {
 }
 
 /// A word as a usage error shows it (control characters and bytes that are not UTF-8 escaped).
-fn shown(a: &OsString) -> String {
+pub(crate) fn shown(a: &OsString) -> String {
     kill::clean(&a.to_string_lossy())
 }
 

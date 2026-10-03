@@ -19,7 +19,7 @@
 use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
-use crate::{kill_failed, kill_tree, parse_duration, say, signal, trace, KillOpts};
+use crate::{kill_failed, kill_tree, parse_duration, say, shown, signal, trace, KillOpts, RULE_GRACE};
 use sheepdog::ident::{identity, same};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -61,14 +61,16 @@ struct Args {
 pub(crate) const USAGE_KILL: &str = "sheepdog kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID";
 pub(crate) const USAGE_PS: &str = "sheepdog ps [--json] PID | PID:ID | j-JOBID";
 
-fn usage() -> i32 {
-    crate::fail!("usage: {USAGE_KILL}");
-    say!("       {USAGE_PS}");
-    2
-}
-
-fn usage_ps() -> i32 {
-    crate::fail!("usage: {USAGE_PS}");
+/// A usage error of `kill` (or `ps`): the command typed and what was wrong, then its usage.
+fn usage_because(ps: bool, why: String) -> i32 {
+    if ps {
+        crate::fail!("sheepdog ps: {why}");
+        say!("usage: {USAGE_PS}");
+    } else {
+        crate::fail!("sheepdog kill: {why}");
+        say!("usage: {USAGE_KILL}");
+        say!("       {USAGE_PS}");
+    }
     2
 }
 
@@ -84,7 +86,8 @@ fn target(a: &[u8]) -> Option<Target> {
     (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())).then(|| s.parse().ok().filter(|&p| p > 0).map(Target::Pid)).flatten()
 }
 
-fn parse(args: &[OsString]) -> Option<Args> {
+/// The arguments, or what was wrong with them (said in the usage error).
+fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut tgt = None;
     let mut dry_run = false;
     let mut include_suspects = false;
@@ -98,14 +101,18 @@ fn parse(args: &[OsString]) -> Option<Args> {
             b"--json" => json = true,
             b"--grace" => {
                 i += 1;
-                grace = parse_duration(&args.get(i)?.to_string_lossy())?;
+                let v = args.get(i).ok_or_else(|| format!("--grace needs a value. It must be {RULE_GRACE}."))?;
+                grace = parse_duration(&v.to_string_lossy()).ok_or_else(|| format!("--grace {} is not valid. It must be {RULE_GRACE}.", shown(v)))?;
             }
-            a if tgt.is_none() && !a.starts_with(b"-") => tgt = Some(target(a)?),
-            _ => return None,
+            a if tgt.is_none() && !a.starts_with(b"-") => {
+                tgt = Some(target(a).ok_or_else(|| format!("{} is not a target. A target is a PID, PID:ID or j-JOBID.", shown(&args[i])))?)
+            }
+            a if !a.starts_with(b"-") => return Err(format!("one target only; {} is a second one.", shown(&args[i]))),
+            _ => return Err(format!("unknown option {}.", shown(&args[i]))),
         }
         i += 1;
     }
-    Some(Args { target: tgt?, dry_run, grace, include_suspects, json })
+    Ok(Args { target: tgt.ok_or("no target. Give a PID, PID:ID or j-JOBID.")?, dry_run, grace, include_suspects, json })
 }
 
 /// Is `pid` a sheepdog (its executable's file name)?
@@ -231,7 +238,7 @@ pub fn ps(args: &[OsString]) -> i32 {
     let mut a: Vec<OsString> = vec!["--dry-run".into()];
     for x in args {
         if matches!(x.as_bytes(), b"--dry-run" | b"--include-suspects" | b"--grace") {
-            return usage_ps();
+            return usage_because(true, format!("{} is an option of kill; ps signals nothing.", shown(x)));
         }
         a.push(x.clone());
     }
@@ -256,7 +263,10 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
         }
         libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
     }
-    let Some(a) = parse(args) else { return if ps { usage_ps() } else { usage() } };
+    let a = match parse(args) {
+        Ok(a) => a,
+        Err(why) => return usage_because(ps, why),
+    };
     #[cfg(target_os = "linux")]
     if let Some(why) = os::proc_problem() {
         crate::fail!("sheepdog: {why}, so sheepdog cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");

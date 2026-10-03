@@ -138,14 +138,15 @@ fn the_help_durations_parse() {
 }
 
 /// The JSON error message is the error itself, recorded where it happens, not the last line
-/// said: `kill --json` with no target prints kill's usage and then ps's; the message is kill's.
+/// said: `kill --json` with no target says so, then prints kill's usage and ps's; the message is
+/// the first line, kill's.
 #[test]
 fn the_json_error_message_is_the_error_line() {
     let o = sd(&["kill", "--json"]);
     assert_eq!(o.code, Some(2));
     let j = json::parse(o.out.lines().last().unwrap_or("")).unwrap_or_else(|e| panic!("not JSON ({e:?}): {}", o.out));
     let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
-    assert!(m.starts_with("usage: sheepdog kill"), "message: {m:?}");
+    assert!(m.starts_with("sheepdog kill: no target"), "message: {m:?}");
 }
 
 /// A call that starts with `--` or an option is a usage error whose fix puts `run` in front
@@ -194,12 +195,12 @@ fn json_mode_does_not_depend_on_argument_order() {
     assert!(sd(&["strays", "--cmd", "--json", "--bogus"]).out.trim().is_empty(), "control: --cmd's value");
 }
 
-/// A `ps` usage error's JSON message is ps's usage, from its parse and from its refusal of
-/// kill's own options; the control, `kill`'s, is kill's.
+/// A `ps` usage error's JSON message names ps, from its parse and from its refusal of kill's own
+/// options; the control, `kill`'s, names kill.
 #[test]
 fn a_ps_usage_error_names_ps() {
     // ps refuses kill's own options itself, before its parse
-    for (args, want) in [(&["ps", "--json"][..], "usage: sheepdog ps"), (&["ps", "--json", "--grace", "1", "5"][..], "usage: sheepdog ps"), (&["kill", "--json"][..], "usage: sheepdog kill")] {
+    for (args, want) in [(&["ps", "--json"][..], "sheepdog ps: "), (&["ps", "--json", "--grace", "1", "5"][..], "sheepdog ps: "), (&["kill", "--json"][..], "sheepdog kill: ")] {
         let sub = args[0];
         let o = sd(args);
         let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{sub}: ({e:?}) {:?}", o.out));
@@ -342,4 +343,38 @@ fn run_without_the_separator_prints_the_corrected_command() {
         assert!(o.err.lines().next().unwrap_or("").contains(want), "{args:?}: the first line does not say {want:?}:\n{}", o.err);
     }
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Every other subcommand's usage error (exit 2) names the command typed and what it rejected,
+/// with the rule it broke, on its first line, then its usage line.
+#[test]
+fn subcommand_usage_errors_name_the_word_and_its_rule() {
+    for (args, want) in [
+        (&["kill", "12ab"][..], &["12ab", "PID, PID:ID or j-JOBID"][..]),
+        (&["kill"], &["no target"]),
+        (&["kill", "5", "6"], &["one target", "6"]),
+        (&["kill", "--grace", "2d", "5"], &["--grace 2d", "1d"]),
+        (&["kill", "--grace"], &["--grace needs a value"]),
+        (&["kill", "--bogus", "5"], &["unknown option --bogus"]),
+        (&["ps", "12ab"], &["12ab", "PID, PID:ID or j-JOBID"]),
+        (&["ps", "--grace", "1", "5"], &["--grace", "kill", "signals nothing"]),
+        (&["strays", "--pid", "1247"], &["--pid 1247", "PID:ID", "--json"]),
+        (&["strays", "--min-mem", "2GB"], &["--min-mem 2GB", "K, M or G"]),
+        (&["strays", "--older-than", "5x"], &["--older-than 5x", "ms, s, m, h or d"]),
+        (&["strays", "--cmd"], &["--cmd needs a value"]),
+        (&["strays", "--bogus"], &["unknown option --bogus"]),
+        (&["sweep", "--owner"], &["--owner needs a value"]),
+        (&["sweep", "--bogus"], &["unknown option --bogus"]),
+        (&["doctor", "--bogus"], &["unknown option --bogus"]),
+    ] {
+        let sub = args[0];
+        let o = sd(args);
+        assert_eq!(o.code, Some(2), "{args:?}: {}", o.err);
+        let first = o.err.lines().next().unwrap_or("");
+        assert!(first.starts_with(&format!("sheepdog {sub}: ")), "{args:?}: the first line does not name {sub}:\n{}", o.err);
+        for w in want {
+            assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
+        }
+        assert!(o.err.contains(&format!("usage: sheepdog {sub}")), "{args:?}: no usage line:\n{}", o.err);
+    }
 }

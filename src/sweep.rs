@@ -457,8 +457,10 @@ pub fn main(args: &[OsString]) -> i32 {
                 owner = args[i + 1].to_string_lossy().into_owned();
                 i += 2;
             }
-            _ => {
-                crate::fail!("usage: {USAGE}");
+            a => {
+                let w = crate::shown(&args[i]);
+                crate::fail!("sheepdog sweep: {}", if a == b"--owner" { "--owner needs a value: a name.".to_string() } else { format!("unknown option {w}.") });
+                crate::say!("usage: {USAGE}");
                 return 2;
             }
         }

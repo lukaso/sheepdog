@@ -16,7 +16,7 @@
 use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
-use crate::{parse_long_duration, say};
+use crate::{parse_long_duration, say, shown, RULE_AGE, RULE_SIZE};
 use sheepdog::ident::same;
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
@@ -81,43 +81,54 @@ struct Args {
 
 pub(crate) const USAGE: &str = "sheepdog strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]";
 
-fn usage() -> i32 {
-    crate::fail!("usage: {USAGE}");
+/// A usage error: what was wrong, then the usage.
+fn usage_because(why: String) -> i32 {
+    crate::fail!("sheepdog strays: {why}");
+    say!("usage: {USAGE}");
     2
 }
 
-fn parse(args: &[OsString]) -> Option<Args> {
+/// The arguments, or what was wrong with them (said in the usage error).
+fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut a = Args { min_mem: 0, older_than: Duration::ZERO, cmd: None, pids: Vec::new(), json: false, kill: false, yes: false };
+    const PID_ID: &str = "PID:ID, a process and its id as `sheepdog strays --json` lists them";
     let mut i = 0;
     while i < args.len() {
-        let val = |i: usize| args.get(i + 1).map(|v| v.to_string_lossy().into_owned());
+        let flag = shown(&args[i]);
+        // the option's value, or the error that names the rule it keeps
+        let val = |i: usize, rule: &str| {
+            args.get(i + 1).map(|v| (v.to_string_lossy().into_owned(), shown(v))).ok_or_else(|| format!("{flag} needs a value. It must be {rule}."))
+        };
+        let bad = |v: &str, rule: &str| format!("{flag} {v} is not valid. It must be {rule}.");
         match args[i].as_bytes() {
             b"--min-mem" => {
-                a.min_mem = crate::caps::parse_size(&val(i)?)?;
+                let (v, s) = val(i, RULE_SIZE)?;
+                a.min_mem = crate::caps::parse_size(&v).ok_or_else(|| bad(&s, RULE_SIZE))?;
                 i += 1;
             }
             b"--older-than" => {
-                a.older_than = parse_long_duration(&val(i)?)?;
+                let (v, s) = val(i, RULE_AGE)?;
+                a.older_than = parse_long_duration(&v).ok_or_else(|| bad(&s, RULE_AGE))?;
                 i += 1;
             }
             b"--cmd" => {
-                a.cmd = Some(val(i)?);
+                a.cmd = Some(val(i, "a regular expression")?.0);
                 i += 1;
             }
             b"--pid" => {
-                let v = val(i)?;
-                let (p, id) = v.split_once(':')?;
-                a.pids.push((p.parse().ok().filter(|&p: &i32| p > 1)?, id.parse().ok()?));
+                let (v, s) = val(i, PID_ID)?;
+                let pid_id = v.split_once(':').and_then(|(p, id)| Some((p.parse().ok().filter(|&p: &i32| p > 1)?, id.parse().ok()?)));
+                a.pids.push(pid_id.ok_or_else(|| bad(&s, PID_ID))?);
                 i += 1;
             }
             b"--json" => a.json = true,
             b"--kill" => a.kill = true,
             b"--yes" => a.yes = true,
-            _ => return None,
+            _ => return Err(format!("unknown option {flag}.")),
         }
         i += 1;
     }
-    Some(a)
+    Ok(a)
 }
 
 /// A POSIX extended regex (libc), matched against a whole command line.
@@ -288,7 +299,10 @@ fn app_helper(pid: i32) -> bool {
 }
 
 pub fn main(args: &[OsString]) -> i32 {
-    let Some(a) = parse(args) else { return usage() };
+    let a = match parse(args) {
+        Ok(a) => a,
+        Err(why) => return usage_because(why),
+    };
     let re = match &a.cmd {
         Some(pat) => match Regex::new(pat) {
             Some(r) => Some(r),
