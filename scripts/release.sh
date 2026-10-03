@@ -54,7 +54,7 @@ esac
 
 # the gate of the two operator-only entries
 if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub" = publish-npm ]; then
-  if env | grep -q '^SHEEPDOG_TEST_'; then
+  if /usr/bin/env | grep -q '^SHEEPDOG_TEST_'; then
     echo "release: refused: a test environment (SHEEPDOG_TEST_*) is set" >&2; exit 3
   fi
   if ! [ -t 0 ] || ! (: < /dev/tty) 2>/dev/null; then
@@ -111,9 +111,9 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
           # uses its own stored login)
   cls=$1; shift
   case $cls in
-    base) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+    base) /usr/bin/env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
             ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$@" ;;
-    net) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+    net) /usr/bin/env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
             ${SSH_AUTH_SOCK:+SSH_AUTH_SOCK="$SSH_AUTH_SOCK"} ${GIT_SSH_COMMAND:+GIT_SSH_COMMAND="$GIT_SSH_COMMAND"} \
             ${GH_CONFIG_DIR:+GH_CONFIG_DIR="$GH_CONFIG_DIR"} ${XDG_CONFIG_HOME:+XDG_CONFIG_HOME="$XDG_CONFIG_HOME"} \
             ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
@@ -126,13 +126,13 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
     npmdry) npm_env "$DRYHOME" "" "$@" ;;
     # the dry publish: a fresh temp HOME and nothing else of the caller's, so even a real gh reached
     # through a stand-in would have no login
-    dry) env -i HOME="$DRYHOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" "$@" ;;
+    dry) /usr/bin/env -i HOME="$DRYHOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" "$@" ;;
   esac
 }
 npm_env() { # HOME USERCONFIG command...: base, the proxies and a CA npm may need, never the git/gh
             # transport (one construction for the real run and the dry one)
   h=$1 u=$2; shift 2
-  env -i HOME="$h" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" ${u:+NPM_CONFIG_USERCONFIG="$u"} \
+  /usr/bin/env -i HOME="$h" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" ${u:+NPM_CONFIG_USERCONFIG="$u"} \
     ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
     ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
     ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} \
@@ -140,15 +140,15 @@ npm_env() { # HOME USERCONFIG command...: base, the proxies and a CA npm may nee
 }
 cargo_env() { # CARGO_HOME TARGET_DIR command... (the cargo class)
   ch=$1 td=$2; shift 2
-  tool base env CARGO_HOME="$ch" CARGO_TARGET_DIR="$td" MACOSX_DEPLOYMENT_TARGET=12.0 \
+  tool base /usr/bin/env CARGO_HOME="$ch" CARGO_TARGET_DIR="$td" MACOSX_DEPLOYMENT_TARGET=12.0 \
     SHEEPDOG_COMMIT_OVERRIDE="$short" ${RUSTUP_HOME:+RUSTUP_HOME="$RUSTUP_HOME"} "$@"
 }
 docker_env() { # the docker class
-  tool base env ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} docker "$@"
+  tool base /usr/bin/env ${DOCKER_HOST:+DOCKER_HOST="$DOCKER_HOST"} ${DOCKER_CONFIG:+DOCKER_CONFIG="$DOCKER_CONFIG"} docker "$@"
 }
 
 step() { echo "release: step: $*"; }
-npy() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
+npy() { /usr/bin/env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" "$@"; }
 npm_pack() { # the four npm tarballs into $dest; sets files_npm
   files_npm=$(tool base sh "$S/lib/npm-pack.sh" "${tag#v}" "$dest/sheepdog-macos-universal.tar.gz" "$dest/sheepdog-linux-aarch64" \
     "$dest/sheepdog-linux-x86_64" "$src/npm/sheepdog/bin/sheepdog" "$dest") || return 1
@@ -248,7 +248,7 @@ build_release() { # mode: unsigned | signed | control
     [ "$mode" = control ] && set -- "$@" --no-notarize
     # in the foreground: a background child of a non-interactive sh ignores INT, so ctrl-C would
     # not reach it (measured); env execs sign.sh, so its parent is still this shell
-    env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+    /usr/bin/env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
       ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$S/lib/sign.sh" "$@" || die "signing failed"
   fi
 
@@ -528,6 +528,6 @@ case $sub in
   publish-npm) publish_npm ;;
   __publish-npm-dry) publish_npm_dry ;;
   # the cells' view of the npm class: the environment the real run's npm gets (it runs only env)
-  __npm-env) tool npm env ;;
+  __npm-env) tool npm /usr/bin/env ;;
   npm-check) npm_check "$out/$tag" ;;
 esac

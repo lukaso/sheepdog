@@ -19,7 +19,7 @@ cp "$launcher" "$pk/main/bin/sheepdog" && chmod 755 "$pk/main/bin/sheepdog" || e
 # the README, for the npm page (npm packs a README whatever "files" says)
 cp "$root/README.md" "$pk/main/README.md" || { echo "npm-pack: no README.md in $root" >&2; exit 1; }
 # each package.json from npm-same.py, which npm-check compares against (one source for both)
-pj() { env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" pkgjson "$@"; }
+pj() { /usr/bin/env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/python3 -I "$root/scripts/lib/npm-same.py" pkgjson "$@"; }
 pj main "$nv" > "$pk/main/package.json" || { echo "npm-pack: package.json (main)" >&2; exit 1; }
 tar -xzf "$arc" -C "$pk/darwin" || exit 1
 pj darwin "$nv" > "$pk/darwin/package.json" || { echo "npm-pack: package.json (darwin)" >&2; exit 1; }
@@ -29,7 +29,7 @@ for a in arm64 x64; do
 done
 for d in main darwin linux-arm64 linux-x64; do
   cp "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$pk/$d/" || { echo "npm-pack: no license texts in $root" >&2; exit 1; }
-  (cd "$pk/$d" && env HOME="$pk/home" npm_config_cache="$pk/cache" npm_config_userconfig="$pk/npmrc" npm pack --silent --pack-destination "$dest" >/dev/null) || { echo "npm-pack: npm pack $d failed" >&2; exit 1; }
+  (cd "$pk/$d" && /usr/bin/env HOME="$pk/home" npm_config_cache="$pk/cache" npm_config_userconfig="$pk/npmrc" npm pack --silent --pack-destination "$dest" >/dev/null) || { echo "npm-pack: npm pack $d failed" >&2; exit 1; }
 done
 for f in "lukaso-sheepdog-$nv.tgz" "lukaso-sheepdog-darwin-universal-$nv.tgz" "lukaso-sheepdog-linux-arm64-$nv.tgz" "lukaso-sheepdog-linux-x64-$nv.tgz"; do
   [ -s "$dest/$f" ] || { echo "npm-pack: no $f" >&2; exit 1; }

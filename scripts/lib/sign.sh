@@ -53,7 +53,7 @@ done
 [ -n "$bin" ] && [ -n "$version" ] && [ -n "$build" ] && [ -n "$tag" ] && [ -n "$commit" ] && [ -n "$dest" ] || usage
 . "$lib/../release.conf" || die "cannot read release.conf"
 
-tool() { env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+tool() { /usr/bin/env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
   ${DEVELOPER_DIR:+DEVELOPER_DIR="$DEVELOPER_DIR"} "$@"; }
 
 # --- the guard -----------------------------------------------------------------------------------

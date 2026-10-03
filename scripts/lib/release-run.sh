@@ -72,6 +72,6 @@ done
 [ $# -gt 0 ] && shift
 mkdir -p "$h/xdg" "$h/state" "$h/tmp" || exit 1
 set -- ${sub:+"$sub"} ${extra:+"$extra"} "$@"
-exec env -i PATH=/usr/bin:/bin HOME="$h" XDG_STATE_HOME="$h/xdg" SHEEPDOG_STATE="$h/state" TMPDIR="$h/tmp" \
+exec /usr/bin/env -i PATH=/usr/bin:/bin HOME="$h" XDG_STATE_HOME="$h/xdg" SHEEPDOG_STATE="$h/state" TMPDIR="$h/tmp" \
   ${SD_EXEC_RECORD:+SD_EXEC_RECORD="$SD_EXEC_RECORD"} \
   "$(dirname "$0")/exec-guard.sh" exec "$bin" "$@"

@@ -86,6 +86,12 @@ for v in "DT|add|zzz/Sheepdog.app/Contents/MacOS/sheepdog|NOT THE RELEASE|outsid
   nc; r=$?
   [ $r = 1 ] && grep -q "$why" "$FX/o" && ! grep -q codesign "$FX/o" && pass "$t with $op $nm: refused ($why), before any real-tool check" || fail "$t $op $nm: rc=$r $(tail -1 "$FX/o")"
 done
+# with a lying `env` first on PATH (it would say yes to anything): a package npm-same.py refuses is
+# still refused by it, before any real-tool check (every env the release scripts run is /usr/bin/env)
+mkdir -p "$FX/liar"; printf '#!/bin/sh\nexit 0\n' > "$FX/liar/env"; chmod 755 "$FX/liar/env"
+mk signed false; python3 "$E" "$D/$MT" "$FX/e.tgz" replace package/README.md "not the readme" && mv "$FX/e.tgz" "$D/$MT" && resum "$MT" || fail "could not make the README variant"
+(cd "$REPO" && env PATH="$FX/liar:$PATH" HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 sh scripts/release.sh npm-check --out "$FX/out" v0.1.0) > "$FX/o" 2>&1; r=$?
+[ $r = 1 ] && grep -q "README.md differs from the repo's" "$FX/o" && [ ! -e "$D/NPM-CHECKED" ] && pass "a lying env on PATH: npm-same.py still refuses the package, no stamp" || fail "lying env: rc=$r $(tail -1 "$FX/o")"
 # a control build's bundle (the control marker) in the darwin package: refused before any real tool
 app_plain=$app; mkdir -p "$FX/mk" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -insert SheepdogControlBuild -bool true "$FX/mk/Sheepdog.app/Contents/Info.plist" || exit 3
 app=$FX/mk/Sheepdog.app; mk signed false; app=$app_plain; nc; r=$?

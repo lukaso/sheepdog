@@ -74,6 +74,10 @@ for v in SHEEPDOG_TEST_TAG=0123456789abcdef SHEEPDOG_TEST_STATE=/x; do
   refused 3 "publish under $v" $E "$v" sh "$RS" publish v0.1.0
   refused 3 "publish-npm under $v" $E "$v" sh "$RS" publish-npm v0.1.0
 done
+# with a lying `env` first on PATH (it lists nothing), the test environment is still seen
+mkdir -p "$FX/liar"; printf '#!/bin/sh\nexit 0\n' > "$FX/liar/env"; chmod 755 "$FX/liar/env"
+printf '#!/bin/sh\nexec env PATH="%s" HOME="%s" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$@"\n' "$FX/liar:$FX/sh:$PATH" "$FX/ghome" > "$FX/eL"; chmod +x "$FX/eL"
+refused 3 "publish under SHEEPDOG_TEST_STATE with a lying env on PATH" "$FX/eL" SHEEPDOG_TEST_STATE=/x sh "$RS" publish v0.1.0
 # no terminal: a new session (no controlling tty), the answer piped in
 nott() { perl -MPOSIX -e 'my $p = fork(); die unless defined $p; if ($p == 0) { POSIX::setsid() != -1 or die "setsid"; exec @ARGV or die; } waitpid($p, 0); exit($? >> 8)' "$@"; }
 refused 4 "build --sign with no terminal" sh -c "echo v0.1.0 | $E sh '$RS' build --sign v0.1.0"
