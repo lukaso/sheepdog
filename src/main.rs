@@ -118,7 +118,7 @@ fn help(cmd: Option<&OsString>) -> i32 {
         Some(b"sweep") => ("end the processes of your dead jobs, from their journals", sweep::USAGE),
         Some(b"doctor") => ("which mechanisms work on this machine, and what is degraded", doctor::USAGE),
         Some(_) => {
-            say!("sheepdog: no such command. Commands: run, kill, strays, ps, sweep, doctor.");
+            say!("sheepdog: no such command {}. Commands: run, kill, strays, ps, sweep, doctor.", shown(cmd.unwrap_or(&OsString::new())));
             return 2;
         }
     };

@@ -444,3 +444,12 @@ fn the_rules_said_are_the_rules_parsed() {
     assert_eq!(sd(&["run", "--timeout", "1.5s", "--", "/usr/bin/true"]).code, Some(0));
     assert_eq!(sd(&["run", "--timeout", "1500ms", "--", "/usr/bin/true"]).code, Some(0));
 }
+
+/// `sheepdog help` with a command that does not exist names the word it rejected (exit 2).
+#[test]
+fn help_for_a_command_that_does_not_exist_names_it() {
+    let o = sd(&["help", "frob"]);
+    assert_eq!(o.code, Some(2), "{}", o.err);
+    let first = o.err.lines().next().unwrap_or("");
+    assert!(first.starts_with("sheepdog: ") && first.contains("frob"), "{}", o.err);
+}
