@@ -11,7 +11,7 @@
 #   - after every install, nothing but Sheepdog.app is in Applications, and install.sh used its
 #     TMPDIR and left it the same directory (not a link, the same inode), empty (controls for both);
 #   - a second install over the first replaces the app (a planted file is gone) and the link still
-#     resolves;
+#     resolves; a link that cannot be made (~/.local/bin a file) exits 1 saying the app is in place;
 #   - refused, with nothing installed and nothing left in Applications or TMPDIR: a copy of the rc
 #     whose archive holds a tampered bundle (codesign), and the control (Gatekeeper: only a control
 #     that carries the control marker can show this; rc.1's shares rc.1's notarized CDHash).
@@ -121,6 +121,11 @@ inst "$FX/srv" "$H3" "$H3/.local/bin"; r=$?
 [ $r = 0 ] && ! grep -q 'is not on your PATH' "$FX/o" && pass "control: no PATH hint when ~/.local/bin is on PATH" || fail "PATH-hint control: rc=$r $(tail -1 "$FX/o")"
 clean "the PATH-hint control install"
 apps "$H3" "the PATH-hint control install"
+# a failure after the app is in place says so: ~/.local/bin is a file, so the link cannot be made
+H5=$FX/home5; mkdir -p "$H5/.local"; : > "$H5/.local/bin"
+inst "$FX/srv" "$H5"; r=$?
+[ $r = 1 ] && [ -d "$H5/Applications/Sheepdog.app" ] && grep -q "Sheepdog.app is installed in $H5/Applications, but $H5/.local/bin/sheepdog cannot be linked" "$FX/o" \
+  && pass "a link that cannot be made: exit 1, the app in place, and the message says so" || fail "cannot link: rc=$r app=$(ls -d "$H5/Applications/Sheepdog.app" 2>&1) $(tail -1 "$FX/o")"
 # refused: nothing installed, nothing left
 refused() { # home what reason
   [ $r = 1 ] && grep -q "$3" "$FX/o" && [ ! -e "$1/.local/bin/sheepdog" ] && [ ! -L "$1/.local/bin/sheepdog" ] && [ -z "$(ls -A "$1/Applications" 2>/dev/null)" ] \

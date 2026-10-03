@@ -15,8 +15,9 @@
 # SHEEPDOG_INSTALL_BASE overrides where the files come from: https, or http on 127.0.0.1, ::1 or
 # localhost only.
 #
-# Exit: 0 installed; 1 a check or a step failed (nothing installed, except when the new sheepdog is
-# in place and then does not run: the message says so); 2 usage; 3 a refused SHEEPDOG_INSTALL_BASE.
+# Exit: 0 installed; 1 a check or a step failed: nothing installed, unless the last message says
+# what is in place (the new app with no link, or one that does not run; or no app, with the old
+# one kept aside); 2 usage; 3 a refused SHEEPDOG_INSTALL_BASE.
 set -u
 SHEEPDOG_VERSION=
 REPO=lukaso/sheepdog
@@ -106,13 +107,14 @@ if [ "$(uname -s)" = Darwin ]; then
   if ! mv "$new" "$app"; then
     # put the old one back; if that fails too, keep it where it is and say where
     if [ -n "$old" ] && mv "$old" "$app"; then old=""; die "cannot move Sheepdog.app into $apps (the old one is back in place)"; fi
-    [ -n "$old" ] && { keep=$old; old=""; stage=""; die "cannot move Sheepdog.app into $apps; the old app is at $keep"; }
+    [ -n "$old" ] && { keep=$old; old=""; stage=""; die "cannot move Sheepdog.app into $apps: no Sheepdog.app is there now; the old one is at $keep"; }
     die "cannot move Sheepdog.app into $apps"
   fi
   old=""
   rm -rf "$stage"; stage=""
   bin=$HOME/.local/bin
-  mkdir -p "$bin" && ln -sf "$app/Contents/MacOS/sheepdog" "$bin/sheepdog" || die "cannot link $bin/sheepdog"
+  mkdir -p "$bin" && ln -sf "$app/Contents/MacOS/sheepdog" "$bin/sheepdog" \
+    || die "Sheepdog.app is installed in $apps, but $bin/sheepdog cannot be linked to it (link it yourself, or remove what is in the way and run this again)"
   v=$(/bin/sh -p "$tmp/door/lib/exec-guard.sh" exec "$bin/sheepdog" --version) || die "Sheepdog.app is installed in $apps, but sheepdog does not run (the lines above say why)"
 else
   if [ "$(id -u)" = 0 ]; then bin=/usr/local/bin; else bin=$HOME/.local/bin; fi
