@@ -6,7 +6,7 @@ schemas (`"v": 1`, additive changes only) and the `sheepdog:` at the start of th
 each message sheepdog itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepdog` alone prints the overview and exits 2).
 
-## 0.1.0 (not yet released)
+## 0.1.0 (2026-10-03)
 
 The first release.
 
