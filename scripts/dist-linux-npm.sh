@@ -8,9 +8,8 @@
 # Cells:
 #   - the platform package's tarball came from this registry; the PATH entry is a link to the
 #     main package's launcher, byte for byte the package's; the installed binary is this platform's
-#     package's, byte for byte, the only one; no regular file of the packages is group- or
-#     world-writable, and nothing under the prefix world-writable (the directories npm makes follow
-#     the user's umask);
+#     package's, byte for byte, the only one; every installed file's write bits are within the
+#     user's umask;
 #   - through the PATH entry (the launcher is POSIX sh: busybox ash or dash here): --version; a
 #     job's exit code passes through; the running process is the installed binary, with the
 #     launcher's pid (/proc/<pid>/exe); a job's signal dispositions and mask equal a direct run's;
@@ -68,11 +67,12 @@ L=$P/lib/node_modules/@lukaso/sheepdog/bin/sheepdog
 B=$(find "$P/lib/node_modules" -path "*/@lukaso/sheepdog-$plat/bin/sheepdog" -type f | head -1)
 n=$(find "$P/lib/node_modules" -path '*/@lukaso/sheepdog-*/bin/sheepdog' | wc -l | tr -d ' ')
 [ -n "$B" ] && [ "$n" = 1 ] && cmp -s "$B" "/pk/bin-$plat" && ok "the installed binary is the $plat package's, byte for byte, the only one" || bad "the installed binary: '$B', $n found"
-# the packages' files (their modes come from the tarballs): never group- or world-writable; the
-# directories npm makes follow the user's umask (Debian's su gives 002, with a group of the user's
-# own: measured, the prefix and the @lukaso scope), and nothing is world-writable
-w=$( { find "$P/lib/node_modules/@lukaso" -type f \( -perm -020 -o -perm -002 \); find "$P" ! -type l -perm -002; } | head -3)
-[ -z "$w" ] && ok "no file of the packages is group- or world-writable, nothing under the prefix world-writable" || bad "writable: $w"
+# write bits stay within the user's umask (npm applies it to every file and directory: Debian's su
+# gives 002, so group-writable there, measured; bun was measured to make files world-writable)
+um=$(asu umask); m=$(( 0$um ))
+wb=""; [ $((m & 2)) != 0 ] && wb="-perm -002"; [ $((m & 16)) != 0 ] && wb="${wb:+$wb -o }-perm -020"
+w=""; [ -n "$wb" ] && w=$(find "$P" ! -type l \( $wb \) | head -3 | tr '\n' ' ')
+[ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
 
 v=$(asu "'$E' --version" 2>&1); case $v in "sheepdog "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
 asu "'$E' run -- sh -c 'exit 7'" >/dev/null 2>&1; r=$?
