@@ -97,6 +97,10 @@ pub v0.1.0 no; r=$?
 echo sheepdog-linux-aarch64 > "$FX/mutate"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/mutate"
 [ $r = 1 ] && ! grep -q PATCH "$FX/calls" && grep -q 'manifest' "$FX/o" && pass "a file changed during its upload: no PATCH, the manifest named (1)" || fail "changed during upload: rc=$r $(tail -1 "$FX/o")"
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# SHA256SUMS (not in the manifest): its hash is the one the planner checked, before any upload
+echo SHA256SUMS > "$FX/mutate"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/mutate"
+[ $r = 1 ] && ! grep -q PATCH "$FX/calls" && pass "SHA256SUMS changed during its upload: no PATCH (1)" || fail "SHA256SUMS changed during upload: rc=$r $(tail -1 "$FX/o")"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 # every file npm-check checked is still the manifest's: an npm package changed or gone after it
 # is refused before any call
 for x in change rm; do

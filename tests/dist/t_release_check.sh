@@ -44,10 +44,11 @@ g tag -d v0.1.0 >/dev/null; sed -i.bak '/^## 0.1.0 /d' "$REPO/CHANGELOG.md" && r
 grep -q "CHANGELOG" "$FX/o" && pass "that refusal names the CHANGELOG" || fail "no-entry refusal: $(tail -1 "$FX/o")"
 g tag -d v0.1.0 >/dev/null; g checkout -q HEAD~1 -- CHANGELOG.md
 # a date that is not one, and a dated entry beside a leftover undated one, are refused too
-for bad in "## 0.1.0 (9999-99-99)" "## 0.1.0 (2026-13-45)" "## 0.1.0 (2026-10-04)
+for bad in "## 0.1.0 (9999-99-99)" "## 0.1.0 (2026-13-01)" "## 0.1.0 (2026-01-32)" "## 0.1.0 (1999-01-01)" "## 0.1.0 (2026-10-04) " "## 0.1.0 (2026-10-04)
 ## 0.1.0 (not yet released)"; do
   sed -i.bak '/^## 0\.1\.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak" && printf '\n%s\n' "$bad" >> "$REPO/CHANGELOG.md"
-  (FX_UNDATED=1; fx_release 0.1.0 3 v0.1.0); chk no "a final whose CHANGELOG has $(printf '%s' "$bad" | head -1)$( [ "$(printf '%s\n' "$bad" | wc -l | tr -d ' ')" = 2 ] && echo ' and an undated one')" v0.1.0
+  (FX_UNDATED=1; fx_release 0.1.0 3 v0.1.0); chk no "a final whose CHANGELOG has '$(printf '%s' "$bad" | head -1)'$( [ "$(printf '%s\n' "$bad" | wc -l | tr -d ' ')" = 2 ] && echo ' and an undated one')" v0.1.0
+  grep -q 'CHANGELOG' "$FX/o" && grep -q 'dated' "$FX/o" && pass "  that refusal names the CHANGELOG and what is dated" || fail "  the refusal: $(tail -1 "$FX/o")"
   g tag -d v0.1.0 >/dev/null
 done
 sed -i.bak '/^## 0\.1\.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak" && printf '\n## 0.1.0 (not yet released)\n' >> "$REPO/CHANGELOG.md"

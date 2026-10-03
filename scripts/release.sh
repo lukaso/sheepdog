@@ -87,7 +87,7 @@ checks() {
     cl=$(git -C "$root" show "$tag:CHANGELOG.md" 2>/dev/null)
     n=$(printf '%s\n' "$cl" | grep -Ec "^## $xre( |\$)")
     d=$(printf '%s\n' "$cl" | grep -Ec "^## $xre \(20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\)\$")
-    [ "$n" = 1 ] && [ "$d" = 1 ] || die "CHANGELOG.md needs exactly one '## $xyz (YYYY-MM-DD)' entry, dated (found $n heading(s) for $xyz): date it, commit, and tag again" ;;
+    [ "$n" = 1 ] && [ "$d" = 1 ] || die "CHANGELOG.md needs exactly one '## $xyz (YYYY-MM-DD)' heading for $xyz, with a real date (found $n heading(s) for $xyz, $d of them dated so; a trailing space or CR leaves one undated): fix it, commit, and tag again" ;;
   esac
   c=$(counter_at "$tag"); [ -n "$c" ] && [ "$c" -ge 1 ] || die "the tag has no SD_BUILD_COUNTER >= 1 in scripts/release.conf"
   prev=""
@@ -120,17 +120,23 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
             ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
             ${ALL_PROXY:+ALL_PROXY="$ALL_PROXY"} ${all_proxy:+all_proxy="$all_proxy"} \
             ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} "$@" ;;
-    # npm: base and the proxies (and a CA npm may need), never the git/gh transport; its login is the
-    # operator's own ~/.npmrc, never a token from the environment
-    npm) env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
-            ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
-            ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
-            ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} \
-            ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} "$@" ;;
+    # npm: its login is the operator's own npmrc (~/.npmrc, or where NPM_CONFIG_USERCONFIG says),
+    # never a token from the environment; the dry run's npm gets a temp HOME and no npmrc
+    npm) npm_env "${HOME:-}" "${NPM_CONFIG_USERCONFIG:-${npm_config_userconfig:-}}" "$@" ;;
+    npmdry) npm_env "$DRYHOME" "" "$@" ;;
     # the dry publish: a fresh temp HOME and nothing else of the caller's, so even a real gh reached
     # through a stand-in would have no login
     dry) env -i HOME="$DRYHOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" "$@" ;;
   esac
+}
+npm_env() { # HOME USERCONFIG command...: base, the proxies and a CA npm may need, never the git/gh
+            # transport (one construction for the real run and the dry one)
+  h=$1 u=$2; shift 2
+  env -i HOME="$h" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" ${u:+NPM_CONFIG_USERCONFIG="$u"} \
+    ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
+    ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
+    ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} \
+    ${NODE_EXTRA_CA_CERTS:+NODE_EXTRA_CA_CERTS="$NODE_EXTRA_CA_CERTS"} "$@"
 }
 cargo_env() { # CARGO_HOME TARGET_DIR command... (the cargo class)
   ch=$1 td=$2; shift 2
@@ -317,6 +323,8 @@ publish_exec() { # dir
   tool "$NETC" "$GH" api "repos/lukaso/sheepdog/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
   sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
+  # SHA256SUMS is not in the manifest: the bytes the planner checked are the ones that must arrive
+  sums_h=$(shasum -a 256 "$d/SHA256SUMS" | cut -d' ' -f1)
   echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
   set -- $(sed -n 's/^POST [^ ]* //p' "$pt/plan")
   id=$(tool "$NETC" "$GH" api -X POST repos/lukaso/sheepdog/releases "$@" --jq .id) || die "gh: cannot make the draft"
@@ -332,8 +340,9 @@ publish_exec() { # dir
     || die "the draft's assets are not exactly the five: $(awk '{print $2}' "$pt/assets" | tr '\n' ' ')"
   while read -r aid name; do
     tool "$NETC" "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepdog/releases/assets/$aid" > "$pt/dl" || die "gh: cannot download $name"
-    # the build's bytes: the manifest's hash (SHA256SUMS, not in the manifest, against the local file the planner checked)
-    want=$(man_hash "$d" "$name"); [ -n "$want" ] || want=$(shasum -a 256 "$d/$name" | cut -d' ' -f1)
+    # the build's bytes: the manifest's hash (SHA256SUMS: the hash of the file the planner checked)
+    if [ "$name" = SHA256SUMS ]; then want=$sums_h; else want=$(man_hash "$d" "$name"); fi
+    [ -n "$want" ] || die "$name has no manifest hash; the draft $id stays a draft"
     [ "$(shasum -a 256 "$pt/dl" | cut -d' ' -f1)" = "$want" ] || die "the uploaded $name is not the build's (its manifest hash); the draft $id stays a draft"
   done < "$pt/assets"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
@@ -395,6 +404,8 @@ publish_npm_exec() { # dir
     || die "the manifest is not $tag's signed build, or it is a control build"
   lc=$(git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}") || die "no local tag $tag"
   [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
+  # every file npm-check checked, before the first npm call (each is checked again just before its upload)
+  files_ok "$d" || die "a file npm-check checked has changed since (above); nothing is published. Run release.sh npm-check $tag again"
   case $tag in *-rc.*) set -- --tag next ;; *) set -- ;; esac
   for p in sheepdog-linux-arm64 sheepdog-linux-x64 sheepdog-darwin-universal sheepdog; do
     f=lukaso-$p-$nv.tgz
@@ -406,13 +417,13 @@ publish_npm_exec() { # dir
     want=$(npy integrity "$pc/$f") || die "cannot hash $f"
     # on npm already? measured (npm 11.6.0): a version there is exit 0 and its integrity (quoted
     # under --json); one that is not, exit 1 with E404; anything else cannot say
-    out=$(tool "$NETC" "$NPM" view --json --prefer-online --registry="$NPMREG" --@lukaso:registry="$NPMREG" "@lukaso/$p@$nv" dist.integrity 2> "$pc/err"); r=$?
-    got=$(printf '%s' "$out" | tr -d ' "\n\r')
+    vout=$(tool "$NETC" "$NPM" view --json --prefer-online --registry="$NPMREG" --@lukaso:registry="$NPMREG" "@lukaso/$p@$nv" dist.integrity 2> "$pc/err"); r=$?
+    got=$(printf '%s' "$vout" | tr -d ' "\n\r')
     if [ $r = 0 ] && [ -n "$got" ]; then
       [ "$got" = "$want" ] || die "@lukaso/$p@$nv is already on npm with another file ($got); nothing after it is published"
       echo "release: @lukaso/$p@$nv is already on npm (the same file): skipped"
       continue
-    elif ! { [ $r != 0 ] && printf '%s\n' "$out" | cat - "$pc/err" | grep -q 'E404'; }; then
+    elif ! { [ $r != 0 ] && printf '%s\n' "$vout" | cat - "$pc/err" | grep -q 'E404'; }; then
       die "cannot tell whether @lukaso/$p@$nv is on npm (npm view: exit $r, $(head -c 300 "$pc/err" | tr '\n' ' ')); nothing after it is published"
     fi
     tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" --@lukaso:registry="$NPMREG" "$@" "$pc/$f" \
@@ -426,7 +437,7 @@ publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the r
   standins SD_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sd-dryhome.XXXXXX) || die "no temp HOME"
   echo "release: __publish-npm-dry (a stand-in npm; a temp HOME)"
-  NPM=$SD_PUBLISH_DRY_NPM NETC=dry publish_npm_exec "$out/$tag"
+  NPM=$SD_PUBLISH_DRY_NPM NETC=npmdry publish_npm_exec "$out/$tag"
   rm -rf "$DRYHOME"
 }
 

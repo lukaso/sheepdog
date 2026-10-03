@@ -2,7 +2,8 @@
 # PHASE3.md §5: `release.sh publish-npm vTAG`, dry (`__publish-npm-dry`: npm is a stand-in given by
 # path under /private/tmp/sd-p3-fixtures.*, never the real one; a fresh temp HOME). With decoy
 # tokens in the environment:
-#   - the whole run: for each package, platform packages first and the main one last, npm.org is
+#   - the whole run: for each package, platform packages first and the main one last, the npm
+#     registry (registry.npmjs.org) is
 #     asked whether that version is there (`view --json --prefer-online`, the registry pinned on the
 #     command line), then `npm publish --access public` of a private copy of <out>/vTAG's file
 #     whose bytes are the manifest's (a sibling -unsigned directory's packages never named); an rc
@@ -44,6 +45,7 @@ echo "npm \$*" >> "$FX/calls"
 case \$1 in
   view) for a; do case \$a in @lukaso/*) p=\${a%@*}; p=\${p#@lukaso/} ;; esac; done
     [ -f "$FX/onview.\$p" ] && sh "$FX/onview.\$p"
+    if [ -f "$FX/viewempty.\$p" ]; then exit 0; fi
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
     if [ -f "$FX/view.\$p" ]; then printf '"%s"\\n' "\$(cat "$FX/view.\$p")"; exit 0; fi
     printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1 ;;
@@ -57,6 +59,7 @@ chmod +x "$FX/npm"
 pub() { # tag -> rc; output in $FX/o
   rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha"
   (cd "$REPO" && env HOME="$FX/ghome" NPM_TOKEN="$DECOY" NODE_AUTH_TOKEN="$DECOY" npm_config__authToken="$DECOY" GH_TOKEN="$DECOY" \
+    HTTPS_PROXY=http://127.0.0.1:9 NPM_CONFIG_USERCONFIG="$FX/decoy-npmrc" \
     SD_PUBLISH_DRY_NPM="$FX/npm" sh scripts/release.sh __publish-npm-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
 # "view NAME" or "publish NAME" per call (a name's parts start with a letter, a version with a digit)
@@ -80,13 +83,28 @@ done
 [ "$(grep -c "^npm view --json --prefer-online $REG @lukaso/sheepdog[a-z0-9-]*@0.1.0 dist.integrity\$" "$FX/calls")" = 4 ] \
   && pass "each view: --json, --prefer-online (not npm's cache), the registry pinned" || fail "view lines: $(grep '^npm view' "$FX/calls" | head -1)"
 grep -q 'unsigned' "$FX/calls" && fail "a call names the -unsigned sibling" || pass "the -unsigned sibling's packages are never named"
-n=$(ls -d /private/tmp/sd-npmpub.* 2>/dev/null | wc -l | tr -d ' '); [ "$n" = 0 ] && pass "no private copy is left" || fail "$n private copy dirs left"
+pd=$(awk 'NR == 1 {print $3}' "$FX/pubsha"); pd=${pd%/*}
+case $pd in /private/tmp/sd-npmpub.*) [ ! -e "$pd" ] && pass "this run's private copy dir is gone" || fail "$pd is left" ;; *) fail "no private copy dir recorded: '$pd'" ;; esac
+# npm's environment class (npm_env, the real run's too): only the named variables; a proxy reaches
+# it (the control), a token or an npmrc of the caller's never does in the dry run
 bad=""; for f in "$FX"/env.npm.*; do for k in $(sed 's/=.*//' "$f"); do
-  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac
+  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD|HTTPS_PROXY) ;; *) bad="$bad $k" ;; esac
 done; done
 [ -z "$bad" ] && pass "npm got only the named environment" || fail "extra environment:$(printf '%s\n' $bad | sort -u | tr '\n' ' ')"
+grep -q '^HTTPS_PROXY=http://127.0.0.1:9$' "$FX/env.npm.0" && pass "control: the proxy reaches npm" || fail "control: no HTTPS_PROXY for npm"
 grep -rl "$DECOY" "$FX"/env.npm.* "$FX/calls" "$FX/o" >/dev/null 2>&1 && fail "a decoy token reached npm or the output" || pass "no decoy token reached npm or the output"
 h=$(sed -n 's/^HOME=//p' "$FX/env.npm.0"); case $h in /private/tmp/sd-dryhome.*) pass "the dry npm's HOME is a fresh temp dir" ;; *) fail "the dry npm's HOME is '$h'" ;; esac
+
+# every package is checked before the first npm call: one changed before the run means none is published
+mkout "$D" v0.1.0; echo x >> "$D/lukaso-sheepdog-0.1.0.tgz"; pub v0.1.0; r=$?
+[ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"
+# a view that answers nothing (exit 0, no integrity) cannot say the version is absent
+mkout "$D" v0.1.0; : > "$FX/viewempty.sheepdog-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/viewempty.sheepdog-linux-arm64"
+[ $r = 1 ] && ! grep -q '^npm publish' "$FX/calls" && grep -q 'cannot tell' "$FX/o" && pass "a view with no answer: refused, nothing published" || fail "empty view: rc=$r $(order)"
+# a refused run leaves its private copy dir behind neither
+mkout "$D" v0.1.0; : > "$FX/viewfail.sheepdog-darwin-universal"; pub v0.1.0; rm -f "$FX/viewfail.sheepdog-darwin-universal"
+pd=$(awk 'NR == 1 {print $3}' "$FX/pubsha"); pd=${pd%/*}
+case $pd in /private/tmp/sd-npmpub.*) [ ! -e "$pd" ] && pass "a refused run's private copy dir is gone" || fail "$pd is left after a refusal" ;; *) fail "no private copy dir recorded after the refusal: '$pd'" ;; esac
 
 # nothing at all without the stamp, with a stamp for another manifest, or with a control manifest
 rm "$D/NPM-CHECKED"; pub v0.1.0; r=$?
