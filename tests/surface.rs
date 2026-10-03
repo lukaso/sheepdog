@@ -288,3 +288,58 @@ fn the_suggested_fix_keeps_every_word_as_typed() {
         assert!(f.ends_with("-- COMMAND"), "{w:?}: a runnable line for a word it cannot show: {f}");
     }
 }
+
+/// A `run` usage error names what it rejected, with the rule it broke, before the usage line
+/// (exit 125): a value with its grammar, an option with no value, an unknown option, no command.
+#[test]
+fn run_usage_errors_name_the_word_and_its_rule() {
+    for (args, want) in [
+        (&["run", "--max-mem", "2GB", "--", "/usr/bin/true"][..], &["--max-mem 2GB", "K, M or G"][..]),
+        (&["run", "--max-mem", "0", "--", "/usr/bin/true"], &["--max-mem 0", "above 0"]),
+        (&["run", "--timeout", "5min", "--", "/usr/bin/true"], &["--timeout 5min", "ms, s, m, h or d", "bare number is seconds"]),
+        (&["run", "--timeout", "0", "--", "/usr/bin/true"], &["--timeout 0", "above 0", "365d"]),
+        (&["run", "--kill-deadline", "2d", "--", "/usr/bin/true"], &["--kill-deadline 2d", "1d"]),
+        (&["run", "--grace", "2d", "--", "/usr/bin/true"], &["--grace 2d", "1d"]),
+        (&["run", "--max-procs", "0", "--", "/usr/bin/true"], &["--max-procs 0", "whole number above 0"]),
+        (&["run", "--status-fd", "1", "--", "/usr/bin/true"], &["--status-fd 1", "3 or more"]),
+        (&["run", "--timout", "5m", "--", "/usr/bin/true"], &["unknown option --timout"]),
+        (&["run", "--timeout", "--", "/usr/bin/true"], &["--timeout needs a value"]),
+        (&["run", "--timeout", "5m", "--"], &["no command after --"]),
+        (&["run", "npm", "--", "test"], &["npm", "not an option", "after --"]),
+    ] {
+        let o = sd(args);
+        assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
+        let first = o.err.lines().next().unwrap_or("");
+        for w in want {
+            assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
+        }
+        assert!(o.err.contains("usage: sheepdog run"), "{args:?}: no usage line:\n{}", o.err);
+    }
+}
+
+/// `run` with no `--` runs nothing and prints the corrected command, shell-quoted, so the line
+/// pasted runs what was meant: the options stay in front, `--` goes before the first word that is
+/// not an option. A bad value is named first; no command at all shows the shape.
+#[test]
+fn run_without_the_separator_prints_the_corrected_command() {
+    let d = std::env::temp_dir().join(format!("sd-sep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let f = d.join("ran");
+    let fs = f.to_str().unwrap();
+    let o = sd(&["run", "--timeout", "5m", "--quiet", "/usr/bin/touch", fs]);
+    assert_eq!(o.code, Some(125), "{}", o.err);
+    assert!(!f.exists(), "the command ran without --");
+    assert!(o.err.contains(&format!("sheepdog run --timeout 5m --quiet -- /usr/bin/touch {fs}")), "no corrected command:\n{}", o.err);
+    for (args, want) in [
+        (&["run", "npm", "test"][..], "sheepdog run -- npm test"),
+        (&["run", "--timeout", "5m", "sh", "-c", "echo a b"], "sheepdog run --timeout 5m -- sh -c 'echo a b'"),
+        (&["run", "--timeout", "5m"], "sheepdog run --timeout 5m -- COMMAND"),
+        (&["run", "--max-mem", "2GB", "npm", "test"], "--max-mem 2GB"),
+    ] {
+        let o = sd(args);
+        assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
+        assert!(o.err.lines().next().unwrap_or("").contains(want), "{args:?}: the first line does not say {want:?}:\n{}", o.err);
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

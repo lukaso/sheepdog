@@ -274,12 +274,40 @@ fn usage() -> i32 {
     125
 }
 
+/// A `run` usage error: what was wrong (the rejected word, the rule it broke, or the corrected
+/// command), then the usage line. Exit 125.
+fn usage_because(why: String) -> i32 {
+    fail!("sheepdog: {why}");
+    usage()
+}
+
+/// `run`'s options that take a value, with the rule a value must keep (said in a usage error).
+fn value_rule(flag: &[u8]) -> Option<&'static str> {
+    Some(match flag {
+        b"--timeout" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 365d, for example 5m",
+        b"--kill-deadline" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), above 0 and at most 1d, for example 30s",
+        b"--grace" => "a duration: a number with ms, s, m, h or d (a bare number is seconds), at most 1d, for example 2s",
+        b"--max-mem" => "a size: a whole number above 0 with K, M or G (binary: 1G is 1024M), for example 2G",
+        b"--max-procs" => "a count: a whole number above 0, for example 200",
+        b"--status-fd" => "a file descriptor number, 3 or more",
+        b"--owner" | b"--mode" => "a word",
+        _ => return None,
+    })
+}
+
+/// A word as a usage error shows it (control characters and bytes that are not UTF-8 escaped).
+fn shown(a: &OsString) -> String {
+    kill::clean(&a.to_string_lossy())
+}
+
 fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let args = &argv[1.min(argv.len())..];
     if args.first().map(|a| a.as_bytes()) != Some(b"run") {
         return Err(usage());
     }
-    let sep = args.iter().position(|a| a.as_bytes() == b"--").ok_or_else(usage)?;
+    // without `--` the options end at the first word that is not one: there the command starts
+    let sep = args.iter().position(|a| a.as_bytes() == b"--");
+    let end = sep.unwrap_or(args.len());
     let mut mode = None;
     let mut grace = Duration::from_secs(2);
     let mut leave_strays = false;
@@ -291,68 +319,59 @@ fn parse(argv: Vec<OsString>) -> Result<Args, i32> {
     let mut no_sweep = false;
     let mut inherit = false;
     let mut i = 1;
-    while i < sep {
-        match args[i].as_bytes() {
-            b"--mode" if i + 1 < sep => {
-                mode = Some(args[i + 1].to_string_lossy().into_owned());
-                i += 2;
-            }
-            b"--timeout" if i + 1 < sep => {
-                timeout = Some(parse_long_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
-                i += 2;
-            }
-            b"--kill-deadline" if i + 1 < sep => {
-                kill_deadline = Some(parse_duration(&args[i + 1].to_string_lossy()).filter(|d| !d.is_zero()).ok_or_else(usage)?);
-                i += 2;
-            }
-            b"--max-mem" if i + 1 < sep => {
-                max_mem = Some(caps::parse_size(&args[i + 1].to_string_lossy()).ok_or_else(usage)?);
-                i += 2;
-            }
-            b"--max-procs" if i + 1 < sep => {
-                max_procs = Some(args[i + 1].to_str().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(usage)?);
-                i += 2;
-            }
-            b"--owner" if i + 1 < sep => {
-                owner = args[i + 1].to_string_lossy().into_owned();
-                i += 2;
-            }
-            b"--status-fd" if i + 1 < sep => {
+    while i < end {
+        let flag = args[i].as_bytes();
+        if let Some(rule) = value_rule(flag) {
+            let name = shown(&args[i]);
+            let Some(raw) = args.get(i + 1).filter(|_| i + 1 < end) else {
+                return Err(usage_because(format!("{name} needs a value before --. It must be {rule}.")));
+            };
+            let v = raw.to_string_lossy();
+            let bad = || usage_because(format!("{name} {} is not valid. It must be {rule}.", shown(raw)));
+            match flag {
+                b"--mode" => mode = Some(v.into_owned()),
+                b"--timeout" => timeout = Some(parse_long_duration(&v).filter(|d| !d.is_zero()).ok_or_else(bad)?),
+                b"--kill-deadline" => kill_deadline = Some(parse_duration(&v).filter(|d| !d.is_zero()).ok_or_else(bad)?),
+                b"--max-mem" => max_mem = Some(caps::parse_size(&v).ok_or_else(bad)?),
+                b"--max-procs" => max_procs = Some(raw.to_str().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(bad)?),
+                b"--owner" => owner = v.into_owned(),
                 // 0-2 would be the command's own streams (the status fd is set close-on-exec)
-                let fd: i32 = args[i + 1].to_str().and_then(|v| v.parse().ok()).filter(|&n| n >= 3).ok_or_else(usage)?;
-                status_fd = Some(fd);
-                i += 2;
+                b"--status-fd" => status_fd = Some(raw.to_str().and_then(|v| v.parse::<i32>().ok()).filter(|&n| n >= 3).ok_or_else(bad)?),
+                _ => grace = parse_duration(&v).ok_or_else(bad)?,
             }
-            b"--grace" if i + 1 < sep => {
-                grace = parse_duration(&args[i + 1].to_string_lossy()).ok_or_else(usage)?;
-                i += 2;
-            }
-            b"--leave-strays" => {
-                leave_strays = true;
-                i += 1;
-            }
-            b"--no-sweep" => {
-                no_sweep = true;
-                i += 1;
-            }
-            b"--inherit-terminal-permissions" => {
-                inherit = true;
-                i += 1;
-            }
-            b"--quiet" => {
-                quiet = true;
-                i += 1;
-            }
-            b"--forward-int-to-root" => {
-                forward_int_to_root = true;
-                i += 1;
-            }
-            _ => return Err(usage()),
+            i += 2;
+            continue;
         }
+        match flag {
+            b"--leave-strays" => leave_strays = true,
+            b"--no-sweep" => no_sweep = true,
+            b"--inherit-terminal-permissions" => inherit = true,
+            b"--quiet" => quiet = true,
+            b"--forward-int-to-root" => forward_int_to_root = true,
+            _ if sep.is_none() && !flag.starts_with(b"-") => break,
+            _ if flag.starts_with(b"-") => return Err(usage_because(format!("unknown option {}. Options go between run and --. `sheepdog help run` lists them.", shown(&args[i])))),
+            _ => return Err(usage_because(format!("{} is not an option of run. The command goes after --.", shown(&args[i])))),
+        }
+        i += 1;
     }
+    let Some(sep) = sep else {
+        // no `--`: the corrected command, from what was typed (its shape only when a word cannot
+        // be pasted back as typed)
+        let typed: Vec<String> = args.iter().map(shown).collect();
+        let exact = args.iter().zip(&typed).all(|(a, t)| a.as_bytes() == t.as_bytes());
+        let q: Vec<String> = typed.iter().map(|t| shell_quote(t)).collect();
+        let (opts, cmd) = (q[1..i].join(" "), q[i..].join(" "));
+        let fix = match (exact, cmd.is_empty()) {
+            (false, _) => "sheepdog run [options] -- COMMAND".to_string(),
+            (true, true) => format!("sheepdog run {opts}{}-- COMMAND", if opts.is_empty() { "" } else { " " }),
+            (true, false) => format!("sheepdog run {opts}{}-- {cmd}", if opts.is_empty() { "" } else { " " }),
+        };
+        let what = if cmd.is_empty() { "no command" } else { "no -- before the command, so nothing ran" };
+        return Err(usage_because(format!("{what}. Put -- between the options and the command: {fix}")));
+    };
     let cmd = args[sep + 1..].to_vec();
     if cmd.is_empty() {
-        return Err(usage());
+        return Err(usage_because("no command after --.".to_string()));
     }
     Ok(Args { argv, mode, cmd, grace, leave_strays, quiet, forward_int_to_root, owner, status_fd, no_sweep, inherit, timeout, max_mem, max_procs, kill_deadline })
 }
