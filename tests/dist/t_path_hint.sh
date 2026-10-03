@@ -1,12 +1,14 @@
 #!/bin/sh
 # install.sh's PATH hint (sd_path_hint, read from the rendered install.sh): the line it prints puts
-# ~/.local/bin on PATH in the startup file the user's login shell ($SHELL) really reads: zsh
-# ~/.zprofile; bash on macOS the first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists
-# (else ~/.bash_profile), on Linux ~/.bashrc; fish its own command; any other shell, or SHELL
-# unset under install.sh's set -u (dash), ~/.profile. Premise rows, with the real shells and a temp
-# HOME: a login zsh reads ~/.zprofile and not ~/.profile (the old hint's file); a login bash reads
-# ~/.bash_profile, and after the printed line is applied where only ~/.profile exists it keeps that
-# file's settings. Nothing is installed and no sheepdog runs.
+# ~/.local/bin on PATH in the startup file the user's shell ($SHELL) really reads. On macOS
+# (Terminal opens login shells): zsh ~/.zprofile; bash the first of ~/.bash_profile,
+# ~/.bash_login, ~/.profile that exists (else ~/.bash_profile). On Linux (a terminal window opens a
+# non-login shell): zsh ~/.zshrc, bash ~/.bashrc. fish its own command, its path one argument; any
+# other shell, or SHELL unset under install.sh's set -u (dash), ~/.profile. Premise rows, with the
+# real shells and a temp HOME: a login zsh reads ~/.zprofile and not ~/.profile (the old hint's
+# file); a login bash reads ~/.bash_profile and not ~/.bashrc, and after the printed line is
+# applied where only ~/.profile exists it keeps that file's settings; an interactive non-login zsh
+# reads ~/.zshrc and not ~/.zprofile, and bash ~/.bashrc. Nothing is installed and no sheepdog runs.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
@@ -24,6 +26,9 @@ row() { # what got want-substring
   case $2 in *"$3"*) pass "the hint for $1 uses $3" ;; *) fail "the hint for $1: '$2' (wanted $3)" ;; esac
 }
 row zsh "$(hint /bin/zsh)" '>> ~/.zprofile'
+# on Linux a terminal window starts a non-login shell: zsh reads ~/.zshrc there (and a login zsh
+# reads it too), never ~/.zprofile
+row "zsh on Linux" "$(hint /bin/zsh linux)" '>> ~/.zshrc'
 row "bash on macOS" "$(hint /bin/bash)" '>> ~/.bash_profile'
 # a login bash reads only the first of ~/.bash_profile, ~/.bash_login, ~/.profile: the hint names the
 # first that exists, so it never makes a file that hides another
@@ -55,9 +60,18 @@ login_path() { # shell file -> PATH of a login shell after the hint's line went 
   env -i HOME="$h" PATH=/usr/bin:/bin TERM=dumb "$1" -l -c 'printf %s "$PATH"' 2>/dev/null < /dev/null
   printf '|%s' "$h"
 }
+rc_path() { # shell file -> PATH of an interactive non-login shell after the hint's line went into FILE
+  h=$(mktemp -d "$FX/h.XXXXXX"); mkdir -p "$h/.local/bin"
+  printf 'export PATH="%s/.local/bin:$PATH"\n' "$h" > "$h/$2"
+  env -i HOME="$h" PATH=/usr/bin:/bin TERM=dumb perl -MPOSIX -e 'POSIX::setsid() != -1 or die; exec @ARGV' "$1" -i -c 'printf %s "$PATH"' 2>/dev/null < /dev/null
+  printf '|%s' "$h"
+}
 if [ -x /bin/zsh ]; then
   r=$(login_path /bin/zsh .zprofile); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) pass "premise: a login zsh reads ~/.zprofile" ;; *) fail "premise: a login zsh did not read ~/.zprofile (${r%|*})" ;; esac
   r=$(login_path /bin/zsh .profile); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) fail "premise: a login zsh read ~/.profile (the old hint would have worked)" ;; *) pass "premise: a login zsh does not read ~/.profile" ;; esac
+  # a terminal window on Linux: an interactive zsh that is not a login shell reads ~/.zshrc, not ~/.zprofile
+  r=$(rc_path /bin/zsh .zshrc); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) pass "premise: an interactive non-login zsh reads ~/.zshrc" ;; *) fail "premise: an interactive non-login zsh did not read ~/.zshrc (${r%|*})" ;; esac
+  r=$(rc_path /bin/zsh .zprofile); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) fail "premise: an interactive non-login zsh read ~/.zprofile" ;; *) pass "premise: an interactive non-login zsh does not read ~/.zprofile" ;; esac
 fi
 if [ -x /bin/bash ]; then
   # with only ~/.profile, the hint's line applied as printed: a login bash keeps ~/.profile's settings
@@ -66,5 +80,9 @@ if [ -x /bin/bash ]; then
   r=$(env -i HOME="$h" PATH=/usr/bin:/bin TERM=dumb /bin/bash -l -c 'printf "%s|%s" "${MYTOOL:-unset}" "$PATH"' 2>/dev/null < /dev/null)
   case $r in "kept|"*"$h/.local/bin"*) pass "premise: after the hint, a login bash keeps ~/.profile's settings and has the PATH entry" ;; *) fail "premise: after the hint, a login bash has '$r'" ;; esac
   r=$(login_path /bin/bash .bash_profile); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) pass "premise: a login bash reads ~/.bash_profile" ;; *) fail "premise: a login bash did not read ~/.bash_profile (${r%|*})" ;; esac
+  # a terminal window on Linux: an interactive bash that is not a login shell reads ~/.bashrc (a
+  # login bash does not; the distributions' own ~/.profile reads it then)
+  r=$(rc_path /bin/bash .bashrc); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) pass "premise: an interactive non-login bash reads ~/.bashrc" ;; *) fail "premise: an interactive non-login bash did not read ~/.bashrc (${r%|*})" ;; esac
+  r=$(login_path /bin/bash .bashrc); h=${r##*|}; case ${r%|*} in *"$h/.local/bin"*) fail "premise: a login bash read ~/.bashrc" ;; *) pass "premise: a login bash does not read ~/.bashrc" ;; esac
 fi
 finish

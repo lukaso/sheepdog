@@ -122,14 +122,16 @@ else
   v=$("$bin/sheepdog" --version) || die "the installed sheepdog does not run"
 fi
 say "installed: $v"
-# the line that puts BIN on PATH in the startup file the user's login shell ($SHELL) reads: a login
-# zsh (macOS's default) reads ~/.zprofile and never ~/.profile; bash on macOS (Terminal opens login
-# shells) the first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists, and on Linux
-# ~/.bashrc; fish has its own command
+# the line that puts BIN on PATH in the startup file the user's shell ($SHELL) reads. macOS's
+# Terminal opens login shells: zsh (the default) reads ~/.zprofile and never ~/.profile; bash the
+# first of ~/.bash_profile, ~/.bash_login, ~/.profile that exists. A Linux terminal window opens a
+# non-login shell: zsh reads ~/.zshrc, bash ~/.bashrc (for a login bash the distributions' own
+# ~/.profile reads ~/.bashrc). fish has its own command.
 sd_path_hint() { # bin
   sh_=${SHELL:-}   # unset in some containers, and install.sh runs with set -u
   case ${sh_##*/} in
-    zsh) echo "  echo 'export PATH=\"$1:\$PATH\"' >> ~/.zprofile" ;;
+    zsh) f='~/.zshrc'; [ "$(uname -s)" = Darwin ] && f='~/.zprofile'
+         echo "  echo 'export PATH=\"$1:\$PATH\"' >> $f" ;;
     bash) # a login bash (macOS's Terminal) reads only the first of these that exists
           f='~/.bashrc'
           if [ "$(uname -s)" = Darwin ]; then
