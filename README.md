@@ -182,7 +182,7 @@ that is an absolute path, else in `~/.local/state/sheepdog`; delete that directo
   cap); 125 when sheepdog failed, for a usage error of `run`, or when a process was still alive at
   the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
   `--status-fd` says which, as one JSON line.
-- Stable interfaces: the subcommands and flags, the exit codes, the `--status-fd` and `--json`
+- Stable interfaces: the subcommands and the flags `sheepdog help` shows, the exit codes, the `--status-fd` and `--json`
   schemas (`"v": 1`), and the `sheepdog:` prefix on its stderr messages (a usage error says what
   was wrong on that line, then shows a `usage:` line). Every release has a
   [CHANGELOG](CHANGELOG.md) entry.

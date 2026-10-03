@@ -380,3 +380,17 @@ fn subcommand_usage_errors_name_the_word_and_its_rule() {
         assert!(o.err.contains(&format!("usage: sheepdog {sub}")), "{args:?}: no usage line:\n{}", o.err);
     }
 }
+
+/// `--mode` exists so the cells can compare tracking methods (one loses escapees): the help never
+/// shows it, so it is outside the stable flags (the README's "the flags `sheepdog help` shows"),
+/// and it still parses.
+#[test]
+fn the_test_only_mode_flag_is_not_in_the_help() {
+    let o = sd(&["help", "run"]);
+    assert_eq!(o.code, Some(0));
+    assert!(o.out.contains("--forward-int-to-root") && !o.out.contains("--mode"), "help run:\n{}", o.out);
+    let bad = sd(&["run", "--bogus", "--", "/usr/bin/true"]);
+    assert!(!bad.err.contains("--mode"), "a usage error shows --mode:\n{}", bad.err);
+    let m = sd(&["run", "--mode", "--", "/usr/bin/true"]);
+    assert!(m.err.contains("--mode needs a value"), "--mode no longer parses:\n{}", m.err);
+}

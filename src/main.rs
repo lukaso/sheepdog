@@ -3,7 +3,8 @@
 //! `sheepdog run [--mode M] -- cmd...` runs cmd, waits for it, then kills every member of its
 //! tree (PLAN.md §3.3: freeze, close, kill, repeat until the tree is empty, or the deadline).
 //!
-//! Modes (the non-default ones exist so tests can prove the default is what catches escapees):
+//! Modes (the non-default ones exist so tests can prove the default is what catches escapees;
+//! `--mode` is not in the help, so it is outside the stable flags):
 //!   macOS: `responsible` (default: the supervisor re-execs itself with disclaim and members
 //!          are processes whose responsible uniqueid is the supervisor's), `root-disclaim`
 //!          (the round-2 design: the root disclaims; loses escapees once the root exits)
@@ -101,7 +102,7 @@ including processes that escaped with setsid, double-forks or reparenting.
 To stop a running job, send TERM to sheepdog. Exit 124 means a limit fired.
 Commands: run, kill, strays, ps, sweep, doctor. `sheepdog help <command>` for details.";
 
-const USAGE_RUN: &str = "sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--inherit-terminal-permissions] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] [--mode M] -- command [args...]";
+const USAGE_RUN: &str = "sheepdog run [--timeout DURATION] [--max-mem SIZE] [--max-procs N] [--grace DURATION] [--kill-deadline DURATION] [--leave-strays] [--no-sweep] [--inherit-terminal-permissions] [--quiet] [--forward-int-to-root] [--owner NAME] [--status-fd N] -- command [args...]";
 
 /// `sheepdog help <command>`: that command's usage (one home: each module's own text).
 fn help(cmd: Option<&OsString>) -> i32 {
