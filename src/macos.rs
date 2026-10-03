@@ -314,7 +314,7 @@ fn tcc_probe(cmd: &[OsString]) -> Option<(String, String)> {
         let me = exe_path(unsafe { libc::getpid() }).unwrap_or_else(|| "sheepdog".into());
         let bundle = me.find(".app/").map_or(me.clone(), |i| me[..i + 4].to_string());
         let shown = homes.iter().find_map(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string());
-        return Some((format!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G to paste the path). Or run with --inherit-terminal-permissions (weaker tracking)."), root.display().to_string()));
+        return Some((format!("sheepdog: {shown} is privacy-protected and sheepdog may not read it, so this job cannot either. Give sheepdog Full Disk Access: System Settings > Privacy & Security > Full Disk Access, click +, and choose {bundle} (press Cmd-Shift-G, paste the path, press Return). Or run with --inherit-terminal-permissions (weaker tracking)."), root.display().to_string()));
     }
     None
 }

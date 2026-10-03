@@ -25,6 +25,9 @@ or with npm or pnpm (a global install; see [npm](#npm) below):
 npm i -g @lukaso/sheepdog
 ```
 
+The Homebrew cask needs Homebrew 5.1.11 or newer (from May 2026; `brew --version` shows yours). If
+yours is older, run `brew update` first.
+
 **Linux**, a static binary (`x86_64` and `aarch64`):
 
 ```sh
@@ -48,13 +51,11 @@ macOS then checks the signature and notarization when you first run it.
 
 ## Use
 
-```sh
-sheepdog run --timeout 5m -- npm test        # stop the whole tree after 5 minutes
-sheepdog run --max-mem 2G -- python3 job.py  # stop it if the tree uses more than 2 GB
-sheepdog strays                              # list leaked processes of yours, biggest first
-sheepdog kill 4242                           # kill 4242 and the processes it provably started
-                                             # (see first: sheepdog ps 4242)
-```
+- `sheepdog run --timeout 5m -- npm test` stops the whole tree after 5 minutes.
+- `sheepdog run --max-mem 2G -- python3 job.py` stops it if the tree uses more than 2 GB.
+- `sheepdog strays` lists leaked processes of yours, biggest first.
+- `sheepdog kill 4242` kills 4242 and the processes it provably started (see them first with
+  `sheepdog ps 4242`).
 
 To stop a running job, send TERM to sheepdog. Exit 124 means a limit fired. `sheepdog help
 <command>` shows each command's options.
@@ -97,19 +98,30 @@ is the portable floor, and on a Mac the only option.
 A job under sheepdog does not inherit your terminal's privacy permissions (Full Disk Access,
 Documents, Desktop and so on): sheepdog makes itself the job's responsible app, which is what lets
 it track the whole tree. If a job needs a protected folder, give Sheepdog Full Disk Access once:
-System Settings > Privacy & Security > Full Disk Access, click +, and choose `Sheepdog.app`
-(`~/Applications` for install.sh, `/Applications` for Homebrew). The grant survives upgrades.
+System Settings > Privacy & Security > Full Disk Access, click +, press Cmd-Shift-G, paste the path
+of `Sheepdog.app` and press Return. It is in `~/Applications` for install.sh and for Homebrew with
+`--appdir=~/Applications`, in `/Applications` for Homebrew otherwise, and inside the package for npm
+and pnpm, where these commands print it:
+
+- npm: `find "$(npm root -g)/@lukaso" -name Sheepdog.app -prune`
+- pnpm: `find "$(pnpm root -g)/../.pnpm" -name Sheepdog.app -prune`
+
+In a standard (not admin) account the row may not appear in the list after you add it; the grant
+still works. The grant survives upgrades.
 `sheepdog doctor --grants` checks whether Sheepdog can read `~/Documents` (this can show a macOS
 privacy prompt).
 
 Or run one job with `--inherit-terminal-permissions`: it keeps your terminal's permissions, and
 sheepdog falls back to a weaker way of tracking the tree.
 
-Uninstalling does not remove a grant. To remove it:
+Uninstalling does not remove a grant. Remove it before you uninstall (afterwards macOS may no longer
+find Sheepdog):
 
 ```sh
 tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
 ```
+
+In an admin account the row then stays in the list, switched off; remove it with − if you like.
 
 ## npm
 
@@ -124,11 +136,25 @@ tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
 
 ## Uninstall
 
+First, if you gave Sheepdog Full Disk Access, remove the grant while it is still installed:
+
 ```sh
-brew uninstall --cask sheepdog                          # Homebrew (--zap also removes ~/.local/state/sheepdog)
-rm -rf ~/Applications/Sheepdog.app ~/.local/bin/sheepdog  # install.sh on macOS
-rm ~/.local/bin/sheepdog                                # install.sh on Linux (as root: /usr/local/bin/sheepdog)
-npm rm -g @lukaso/sheepdog                              # npm (pnpm: pnpm rm -g @lukaso/sheepdog)
+tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
+```
+
+Then remove it the way you installed it:
+
+- Homebrew: `brew uninstall --cask sheepdog` (with `--zap`, it also removes
+  `~/.local/state/sheepdog`)
+- install.sh on macOS: `rm -rf ~/Applications/Sheepdog.app ~/.local/bin/sheepdog`
+- install.sh on Linux: `rm ~/.local/bin/sheepdog` (as root: `rm /usr/local/bin/sheepdog`)
+- npm: `npm rm -g @lukaso/sheepdog`
+- pnpm: `pnpm rm -g @lukaso/sheepdog`
+
+pnpm 10 keeps a copy of the app in its store after `pnpm rm -g`. To remove it:
+
+```sh
+find "$(pnpm root -g)/../.pnpm" -maxdepth 1 \( -name '@lukaso+sheepdog@*' -o -name '@lukaso+sheepdog-darwin-universal@*' \) -exec rm -rf {} +
 ```
 
 sheepdog keeps its job journals in `$SHEEPDOG_STATE` if set, else in `$XDG_STATE_HOME/sheepdog` if

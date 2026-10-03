@@ -11,11 +11,16 @@
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
+# the Ruby Homebrew itself loads casks with (its portable Ruby), else a ruby >= 3 on PATH: the stub
+# DSL below is Ruby 3, and the system's /usr/bin/ruby is 2.6
+RUBY=$( { command -v brew > /dev/null 2>&1 && p="$(brew --prefix)/Library/Homebrew/vendor/portable-ruby/current/bin/ruby" && [ -x "$p" ] && echo "$p"; } || command -v ruby)
+"$RUBY" -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.0") ? 0 : 1)' 2>/dev/null \
+  || { fail "no Ruby 3 to read the cask with (found: $("$RUBY" -v 2>&1 | head -1))"; finish; }
 R="$SD_ROOT/scripts/lib/render-cask.sh"
 H=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 V=0.1.0-rc.1
 sh "$R" "$V" "$H" "$FX/sheepdog.rb" && pass "rendered" || { fail "render failed"; finish; }
-ruby -c "$FX/sheepdog.rb" >/dev/null 2>&1 && pass "valid Ruby" || fail "not valid Ruby"
+"$RUBY" -c "$FX/sheepdog.rb" >/dev/null 2>&1 && pass "valid Ruby" || fail "not valid Ruby"
 
 # the stanzas, recorded by a stand-in DSL (appdir is the literal APPDIR)
 cat > "$FX/dsl.rb" <<'RB'
@@ -29,7 +34,8 @@ class Rec
   def desc(*) = nil
   def homepage(h) = $r["homepage"] = h
   # each call with its options, so a repeated stanza or a target: is seen
-  def depends_on(**h) = ($r["depends_on"] ||= []) << h.transform_keys(&:to_s)
+  # a Symbol value is recorded as ":name", so the symbol form is told from a string
+  def depends_on(**h) = ($r["depends_on"] ||= []) << h.to_h { |k, v| [k.to_s, v.is_a?(Symbol) ? ":#{v}" : v] }
   def app(a, **o) = ($r["app"] ||= []) << [a, o.transform_keys(&:to_s)]
   def binary(b, **o) = ($r["binary"] ||= []) << [b, o.transform_keys(&:to_s)]
   def appdir = "APPDIR"
@@ -42,7 +48,7 @@ def cask(n, &b) = ($r["token"] = n; Rec.new.instance_eval(&b))
 load ARGV[0]
 puts JSON.generate($r)
 RB
-ruby "$FX/dsl.rb" "$FX/sheepdog.rb" > "$FX/stanzas.json" 2>"$FX/dsl.err" || { fail "the cask did not evaluate: $(head -2 "$FX/dsl.err")"; finish; }
+"$RUBY" "$FX/dsl.rb" "$FX/sheepdog.rb" > "$FX/stanzas.json" 2>"$FX/dsl.err" || { fail "the cask did not evaluate: $(head -2 "$FX/dsl.err")"; finish; }
 
 # what the release makes: the archive (archive.sh, around a .dev bundle that is never run), the
 # bundle's minimum macOS, and the five files publish uploads
@@ -75,7 +81,7 @@ check(rel is not None and any(x.startswith("-rwx") and x.split()[-1] == rel for 
 check(len(b) == 1 and b[0][1].get("target", b[0][0].rsplit("/", 1)[-1]) == "sheepdog", "the command on PATH is named sheepdog (%s)" % b)
 check(r.get("zap") == [{"trash": "~/.local/state/sheepdog"}], "one zap, sheepdog's state dir only (%s)" % r.get("zap"))
 names = {"12": "monterey", "13": "ventura", "14": "sonoma", "15": "sequoia", "26": "tahoe"}
-check(r.get("depends_on") == [{"macos": ">= :%s" % names.get(mn.split(".")[0], "?")}],
+check(r.get("depends_on") == [{"macos": ":%s" % names.get(mn.split(".")[0], "?")}],
       "depends_on macos matches LSMinimumSystemVersion %s (%s)" % (mn, r.get("depends_on")))
 PY
 [ $? = 0 ] || fail "the stanza check did not run"

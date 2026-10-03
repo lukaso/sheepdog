@@ -7,7 +7,7 @@ cask "sheepdog" do
   desc "Run a command and kill every process it started, escapees included"
   homepage "https://github.com/lukaso/sheepdog"
 
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
 
   app "Sheepdog.app"
   binary "#{appdir}/Sheepdog.app/Contents/MacOS/sheepdog"
@@ -15,7 +15,8 @@ cask "sheepdog" do
   zap trash: "~/.local/state/sheepdog"
 
   caveats <<~EOS
-    Uninstalling does not remove Sheepdog's privacy grants. To remove its Full Disk Access:
+    Uninstalling does not remove Sheepdog's privacy grants. To remove its Full Disk Access, run this
+    before you uninstall (macOS may no longer find Sheepdog afterwards):
       tccutil reset SystemPolicyAllFiles com.lukaso.sheepdog
   EOS
 end
