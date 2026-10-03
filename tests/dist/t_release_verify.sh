@@ -24,6 +24,14 @@ v env PATH="$FX/liar:$PATH"; rc=$?
 [ $rc = 1 ] && grep -q 'codesign' "$FX/o" && pass "with lying codesign, xcrun and spctl on PATH: still refused, by codesign" || fail "liars: rc=$rc $(tail -1 "$FX/o")"
 v env DEVELOPER_DIR="$FX/liar-dev"; rc=$?
 [ $rc = 1 ] && pass "with a DEVELOPER_DIR set: still refused" || fail "DEVELOPER_DIR: rc=$rc"
+# the bundle verify judges is the archive's own: with a lying `tar` first on PATH that unpacks a
+# plain bundle, an archive holding a control build is still refused as one (the system's tar)
+mkdir -p "$FX/mk" "$FX/liar-tar" && cp -R "$app" "$FX/mk/" && /usr/bin/plutil -insert SheepdogControlBuild -bool true "$FX/mk/Sheepdog.app/Contents/Info.plist" || exit 3
+cp "$D/sheepdog-macos-universal.tar.gz" "$FX/plain.tar.gz" && "$SD_ROOT/scripts/lib/archive.sh" make "$FX/mk/Sheepdog.app" "$D/sheepdog-macos-universal.tar.gz" || exit 3
+printf '#!/bin/sh\nd=""; while [ $# -gt 0 ]; do [ "$1" = -C ] && d=$2; shift; done\nexec /usr/bin/tar -xzf "%s" -C "$d"\n' "$FX/plain.tar.gz" > "$FX/liar-tar/tar"; chmod 755 "$FX/liar-tar/tar"
+v env PATH="$FX/liar-tar:$PATH"; rc=$?
+[ $rc = 1 ] && grep -q 'a control build' "$FX/o" && pass "a lying tar on PATH: the archive's control build is still refused as one" || fail "lying tar: rc=$rc $(tail -1 "$FX/o")"
+cp "$FX/plain.tar.gz" "$D/sheepdog-macos-universal.tar.gz"
 # the staple check itself, with a lying `env` first on PATH (it would say yes to anything): the
 # real tool still answers (no staple ticket on a plain directory)
 mkdir -p "$FX/liar-env" "$FX/plain"; printf '#!/bin/sh\nexit 0\n' > "$FX/liar-env/env"; chmod 755 "$FX/liar-env/env"
