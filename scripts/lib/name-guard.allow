@@ -1,0 +1,3 @@
+# Words that contain the old two-letter prefix but are not ours (read by scripts/lib/name-guard.py).
+# spike/u2.c: a printf label for the BSD info call
+bsd_r
