@@ -43,7 +43,11 @@ integrity() { python3 -c 'import base64,hashlib,sys; print("sha512-" + base64.b6
 # `publish` records the sha256 of the file it was given, and runs $FX/onpublish.<package>. After a
 # publish, `view` shows that file's integrity once $FX/processing.<package> (a count of "not found"
 # answers, as npm answers while it processes a new package: measured 2026-10-04) has run down, or
-# another integrity if $FX/pubwrong.<package> exists.
+# another integrity if $FX/pubwrong.<package> exists; $FX/emptyafter.<package> gives that many empty
+# answers first, and $FX/viewfailafter.<package> makes every view after the publish fail (ETIMEDOUT).
+# $FX/pubexists.<package>: the publish is refused as npm refuses a version an earlier run published
+# (E403, "cannot publish over"), which then shows as that run's file; $FX/pubfail.<package>: E401.
+# `sleep` is a stand-in on PATH that records its seconds (the wait's real limit, without waiting).
 cat > "$FX/npm" <<EOF
 #!/bin/sh
 n=\$(ls "$FX" | grep -c '^env\\.npm\\.'); env > "$FX/env.npm.\$n"
@@ -54,6 +58,9 @@ case \$1 in
     if [ -f "$FX/viewempty.\$p" ]; then exit 0; fi
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
     if [ -f "$FX/pub.\$p" ]; then
+      if [ -f "$FX/viewfailafter.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
+      e=\$(cat "$FX/emptyafter.\$p" 2>/dev/null || echo 0)
+      if [ "\$e" -gt 0 ]; then echo \$((e - 1)) > "$FX/emptyafter.\$p"; exit 0; fi
       k=\$(cat "$FX/processing.\$p" 2>/dev/null || echo 0)
       if [ "\$k" -gt 0 ]; then echo \$((k - 1)) > "$FX/processing.\$p"; printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1; fi
       if [ -f "$FX/pubwrong.\$p" ]; then printf '"sha512-WRONG"\\n'; exit 0; fi
@@ -69,17 +76,20 @@ case \$1 in
   publish) for a; do last=\$a; done; p=\$(basename "\$last" | sed 's/^\\(.*\\)-[0-9][0-9.a-z-]*\\.tgz\$/\\1/')
     echo "\$p \$(shasum -a 256 "\$last" | cut -d' ' -f1) \$last" >> "$FX/pubsha"
     python3 -c 'import base64, hashlib, sys; print("sha512-" + base64.b64encode(hashlib.sha512(open(sys.argv[1], "rb").read()).digest()).decode())' "\$last" > "$FX/pub.\$p"
+    if [ -f "$FX/pubexists.\$p" ]; then echo "npm error code E403" >&2; echo "npm error 403 403 Forbidden - PUT https://registry.npmjs.org/\$p - You cannot publish over the previously published versions: 0.1.0." >&2; exit 1; fi
+    if [ -f "$FX/pubfail.\$p" ]; then echo "npm error code E401" >&2; echo "npm error 401 Unauthorized" >&2; exit 1; fi
     [ -f "$FX/onpublish.\$p" ] && sh "$FX/onpublish.\$p"; exit 0 ;;
 esac
 exit 1
 EOF
 chmod +x "$FX/npm"
+mkdir -p "$FX/bin"; printf '#!/bin/sh\necho "$1" >> "%s/sleeps"\n' "$FX" > "$FX/bin/sleep"; chmod +x "$FX/bin/sleep"
 echo lukasco > "$FX/whoami"
 pub() { # tag -> rc; output in $FX/o
-  rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha" "$FX"/pub.*
+  rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha" "$FX"/pub.* "$FX/sleeps"
   (cd "$REPO" && env HOME="$FX/ghome" NPM_TOKEN="$DECOY" NODE_AUTH_TOKEN="$DECOY" npm_config__authToken="$DECOY" GH_TOKEN="$DECOY" \
     HTTPS_PROXY=http://127.0.0.1:9 NPM_CONFIG_USERCONFIG="$FX/decoy-npmrc" \
-    SR_PUBLISH_DRY_NPM="$FX/npm" sh scripts/release.sh __publish-npm-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
+    PATH="$FX/bin:$PATH" SR_PUBLISH_DRY_NPM="$FX/npm" sh scripts/release.sh __publish-npm-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
 # "view NAME" or "publish NAME" per call (a name's parts start with a letter, a version with a digit)
 order() { sed -En 's/^npm (view|publish) (.* |.*\/)(sheepr(-[a-z][a-z0-9]*)*)[-@][0-9].*$/\1 \3/p' "$FX/calls" 2>/dev/null | tr '\n' ','; }
@@ -157,12 +167,37 @@ pub v0.1.0; r=$?; rm -f "$FX/onwhoami"; changed=$(grep -c '^SR_NPM_PKGS=.sheepr 
 mkout "$D" v0.1.0; echo 2 > "$FX/processing.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-linux-x64"
 [ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] \
   && pass "a package npm is still processing: waited for (three views), then the next" || fail "processing: rc=$r $(order)"
-mkout "$D" v0.1.0; echo 99 > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
+mkout "$D" v0.1.0; echo 100000 > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
 [ $r = 1 ] && ! grep -q '^npm publish .*/sheepr-0.1.0.tgz$' "$FX/calls" && grep -q 'not visible on npm' "$FX/o" \
   && pass "a package that never shows: refused, the main package not published" || fail "never visible: rc=$r $(order) $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; : > "$FX/pubwrong.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/pubwrong.sheepr-linux-arm64"
 [ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64," ] && grep -q 'than the one just published' "$FX/o" \
   && pass "npm showing another file than the one just published: refused there" || fail "wrong file shown: rc=$r $(order) $(tail -1 "$FX/o")"
+# the wait's limit, one definition for both entries: NPM_WAIT_MAX seconds, a view every NPM_WAIT_STEP
+# (npm documents its scan of each upload as about five minutes, up to 15 or more); at the limit the
+# run has made MAX/STEP + 1 views of that package and slept MAX seconds, and says what npm may have done
+wm=$(sed -n 's/^NPM_WAIT_MAX=\([0-9]*\).*/\1/p' "$REPO/scripts/release.sh"); ws=$(sed -n 's/^NPM_WAIT_MAX=[0-9]* NPM_WAIT_STEP=\([0-9]*\).*/\1/p' "$REPO/scripts/release.sh")
+if [ -n "$wm" ] && [ -n "$ws" ] && [ "$ws" -gt 0 ] && [ "$wm" -ge 1800 ]; then pass "the wait's limit is $wm s, a view every $ws s (at least 30 minutes)"
+else fail "the wait's limit: max '$wm' step '$ws'"; wm=1800 ws=10; fi   # the rows below still run, against the planned limit
+mkout "$D" v0.1.0; echo 100000 > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
+nv=$(grep -c '^npm view .* sheepr-darwin-universal@0.1.0 ' "$FX/calls"); sl=$(awk '{s += $1} END {print s + 0}' "$FX/sleeps" 2>/dev/null)
+[ $r = 1 ] && [ "$nv" = $((wm / ws + 2)) ] && [ "$sl" = "$wm" ] && grep -q 'held the version for review or blocked it' "$FX/o" && grep -q 'E404' "$FX/o" && ! grep -q '^npm publish .*/sheepr-0.1.0.tgz$' "$FX/calls" \
+  && pass "a package that never shows: $((wm / ws + 1)) views after its upload, $sl s of waits, refused naming review, blocking and the last error" || fail "the limit: rc=$r views=$nv (want $((wm / ws + 2)), with the one before the upload) sleeps=$sl (want $wm) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; echo $((wm / ws)) > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
+[ $r = 0 ] && pass "a package that shows at the last view: published" || fail "the last view: rc=$r $(tail -1 "$FX/o")"
+# a rerun: npm refuses a version an earlier run published (still being scanned); the run waits for
+# it and checks its file, and goes on; a publish refused for another reason stops at once
+mkout "$D" v0.1.0; : > "$FX/pubexists.sheepr-linux-x64"; echo 2 > "$FX/processing.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubexists.sheepr-linux-x64" "$FX/processing.sheepr-linux-x64"
+[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] && grep -q 'published already' "$FX/o" \
+  && pass "a rerun whose version npm still scans: waited for, its file checked, then on" || fail "rerun exists: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; : > "$FX/pubfail.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubfail.sheepr-linux-x64"
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] && grep -q 'E401' "$FX/o" \
+  && pass "a publish refused for another reason (E401): stopped at once, the reason shown" || fail "publish E401: rc=$r $(order) $(tail -1 "$FX/o")"
+# views after an upload that fail, or answer nothing, are waited through; the last error is named
+mkout "$D" v0.1.0; : > "$FX/viewfailafter.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/viewfailafter.sheepr-linux-arm64"
+[ $r = 1 ] && grep -q 'ETIMEDOUT' "$FX/o" && pass "views that keep failing after an upload: refused at the limit, ETIMEDOUT named" || fail "view errors: rc=$r $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; echo 2 > "$FX/emptyafter.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/emptyafter.sheepr-linux-arm64"
+[ $r = 0 ] && [ "$(grep -c '^npm view .* sheepr-linux-arm64@0.1.0 ' "$FX/calls")" = 4 ] && pass "two empty answers after an upload: two more views, then on" || fail "empty answers: rc=$r views=$(grep -c '^npm view .* sheepr-linux-arm64@0.1.0 ' "$FX/calls")"
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"

@@ -410,14 +410,18 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
 # login (`npm login`), never a token from the environment.
 NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's registry or scope registry never applies
-# npm_visible NAME VERSION INTEGRITY: wait until npm serves this version with this file. npm may
-# answer a publish of a new package with "Your package is being processed" and show the version
-# only minutes later (measured 2026-10-04: two of the four placeholders, about two minutes). The
-# main package's optional dependencies name the platform packages, so each upload waits until its
-# file is there before the next one: NPM_WAIT_TRIES views, NPM_WAIT_STEP seconds apart (set by the
-# entry, not the environment). Another file there is refused at once.
+# npm_visible NAME VERSION INTEGRITY: wait until npm serves this version with this file. npm scans
+# every upload before it shows it, and then publishes it, holds it for review or blocks it (npm,
+# 2026-07-28: typically about five minutes, up to 15 or more); measured 2026-10-04, two of the four
+# placeholders showed about two minutes after "Your package is being processed". The main package's
+# optional dependencies name the platform packages, so each upload waits until its file is there
+# before the next one. Another file there is refused at once. Installs read npm's abbreviated record,
+# which a cache may hold up to 300 s longer: an install in the first minutes may still miss a package.
+# One definition of the limit for the real and the dry run (the dry run's cell gives `sleep` a
+# stand-in); set here, so an exported NPM_WAIT_MAX cannot shorten it.
+NPM_WAIT_MAX=1800 NPM_WAIT_STEP=10
 npm_visible() {
-  i=0
+  w=0
   while :; do
     vout=$(tool "$NETC" "$NPM" view --json --prefer-online --registry="$NPMREG" "$1@$2" dist.integrity 2> "$pc/err"); r=$?
     got=$(printf '%s' "$vout" | tr -d ' "\n\r')
@@ -425,9 +429,8 @@ npm_visible() {
       [ "$got" = "$3" ] && return 0
       die "$1@$2 is on npm with another file ($got) than the one just published; nothing after it is published"
     fi
-    i=$((i + 1))
-    [ $i -lt "$NPM_WAIT_TRIES" ] || die "$1@$2 is not visible on npm after $NPM_WAIT_TRIES views, $NPM_WAIT_STEP s apart (npm may still be processing it): wait, then run publish-npm again (it skips a version already there with this file); nothing after it is published"
-    sleep "$NPM_WAIT_STEP"
+    [ "$w" -lt "$NPM_WAIT_MAX" ] || die "$1@$2 is not visible on npm after $NPM_WAIT_MAX s (the last view: $(sed -n 's/^npm error code \(.*\)$/\1/p' "$pc/err" | head -1 | grep . || echo "exit $r, an empty answer")). npm scans every upload before it shows it: it may still be scanning, or it held the version for review or blocked it. Look at https://www.npmjs.com/package/$1 and npm's email to ${SR_NPM_USER:-the owner}; once it shows, run publish-npm again (it skips a version already there with this file). A blocked version needs a new version number. Nothing after it is published"
+    sleep "$NPM_WAIT_STEP"; w=$((w + NPM_WAIT_STEP))
   done
 }
 # npm_list: release.conf's SR_NPM_PKGS must be the four packages, the main one last (npm-same.py
@@ -494,19 +497,28 @@ publish_npm_exec() { # dir
     elif ! { [ $r != 0 ] && printf '%s\n' "$vout" | cat - "$pc/err" | grep -q 'E404'; }; then
       die "cannot tell whether $p@$nv is on npm (npm view: exit $r, $(head -c 300 "$pc/err" | tr '\n' ' ')); nothing after it is published"
     fi
-    tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" "$@" "$pc/$f" \
-      || die "npm publish of $f failed; run publish-npm again to go on (a package already on npm is skipped; if npm says this version exists, it is still being processed: wait a few minutes first)"
+    # npm's messages pass through to the terminal (its login prompt among them) and are kept: a
+    # version an earlier run published, which npm still scans, is refused as one that exists
+    rm -f "$pc/fifo"; mkfifo "$pc/fifo" || die "no fifo"
+    tee "$pc/perr" < "$pc/fifo" >&2 & tp=$!
+    tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" "$@" "$pc/$f" 2> "$pc/fifo"; r=$?
+    wait $tp
+    if [ $r != 0 ]; then
+      grep -q -i -e 'cannot publish over' -e 'previously published' "$pc/perr" \
+        || die "npm publish of $f failed (above); run publish-npm again to go on (a package already on npm with this file is skipped)"
+      echo "release: npm says $p@$nv was published already (an earlier run): waiting until npm shows it, then checking its file"
+    fi
     npm_visible "$p" "$nv" "$want"
     echo "release: $p@$nv published, and npm shows this file"
   done
   echo "release: the four npm packages of $tag are on npm. Next: npm logout, and the token check (PHASE3.md §5)"
 }
-publish_npm() { NPM=npm NETC=npm NPM_WAIT_TRIES=90 NPM_WAIT_STEP=10 publish_npm_exec "$out/$tag"; }   # at most 15 minutes per package
+publish_npm() { NPM=npm NETC=npm publish_npm_exec "$out/$tag"; }
 publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the real one
   standins SR_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
   echo "release: __publish-npm-dry (a stand-in npm; a temp HOME)"
-  NPM=$SR_PUBLISH_DRY_NPM NETC=npmdry NPM_WAIT_TRIES=5 NPM_WAIT_STEP=0 publish_npm_exec "$out/$tag"
+  NPM=$SR_PUBLISH_DRY_NPM NETC=npmdry publish_npm_exec "$out/$tag"
   rm -rf "$DRYHOME"
 }
 
