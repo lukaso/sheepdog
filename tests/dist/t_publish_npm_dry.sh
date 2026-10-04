@@ -34,6 +34,9 @@ mkout() { # dir tag [control] [commit]: the four packages, the manifest naming e
   printf '%s %s\n' "$2" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)" > "$1/NPM-CHECKED"
 }
 integrity() { python3 -c 'import base64,hashlib,sys; print("sha512-" + base64.b64encode(hashlib.sha512(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+# `whoami` prints $FX/whoami (exit 1 with ENEEDAUTH if $FX/whoamifail exists); `owner ls NAME`
+# prints a `user <email>` line per line of $FX/owner.NAME (default: lukasco), or exits 1 with E404
+# ($FX/ownerfail.NAME) or another error ($FX/ownerbad.NAME), as npm 11.6.0 was measured to.
 # the stand-in answers `view --json` as npm 11.6.0 was measured to (absent: exit 1 and an E404 on
 # both streams; present: the integrity, quoted): from $FX/view.<package> (present), or
 # $FX/viewfail.<package> (another failure); it runs $FX/onview.<package> first if there is one.
@@ -49,6 +52,11 @@ case \$1 in
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
     if [ -f "$FX/view.\$p" ]; then printf '"%s"\\n' "\$(cat "$FX/view.\$p")"; exit 0; fi
     printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1 ;;
+  whoami) if [ -f "$FX/whoamifail" ]; then echo "npm error code ENEEDAUTH" >&2; exit 1; fi; cat "$FX/whoami"; exit 0 ;;
+  owner) p=\$3
+    if [ -f "$FX/ownerfail.\$p" ]; then echo "npm error owner ls Couldn't get owner data \$p" >&2; echo "npm error code E404" >&2; exit 1; fi
+    if [ -f "$FX/ownerbad.\$p" ]; then echo "npm error code ETIMEDOUT" >&2; exit 1; fi
+    if [ -f "$FX/owner.\$p" ]; then while read -r u; do echo "\$u <\$u@example.com>"; done < "$FX/owner.\$p"; else echo "lukasco <lukasco@example.com>"; fi; exit 0 ;;
   publish) for a; do last=\$a; done; p=\$(basename "\$last" | sed 's/^\\(.*\\)-[0-9][0-9.a-z-]*\\.tgz\$/\\1/')
     echo "\$p \$(shasum -a 256 "\$last" | cut -d' ' -f1) \$last" >> "$FX/pubsha"
     [ -f "$FX/onpublish.\$p" ] && sh "$FX/onpublish.\$p"; exit 0 ;;
@@ -56,6 +64,7 @@ esac
 exit 1
 EOF
 chmod +x "$FX/npm"
+echo lukasco > "$FX/whoami"
 pub() { # tag -> rc; output in $FX/o
   rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha"
   (cd "$REPO" && env HOME="$FX/ghome" NPM_TOKEN="$DECOY" NODE_AUTH_TOKEN="$DECOY" npm_config__authToken="$DECOY" GH_TOKEN="$DECOY" \
@@ -82,6 +91,8 @@ done
 [ -z "$bad" ] && pass "each publish: the registry pinned, no --tag (a final), a private copy holding the manifest's bytes" || fail "publish lines:$bad"
 [ "$(grep -c "^npm view --json --prefer-online $REG sheepr[a-z0-9-]*@0.1.0 dist.integrity\$" "$FX/calls")" = 4 ] \
   && pass "each view: --json, --prefer-online (not npm's cache), the registry pinned" || fail "view lines: $(grep '^npm view' "$FX/calls" | head -1)"
+[ "$(sed -n 1,5p "$FX/calls" | tr '\n' ',')" = "npm whoami $REG,npm owner ls sheepr-linux-arm64 $REG,npm owner ls sheepr-linux-x64 $REG,npm owner ls sheepr-darwin-universal $REG,npm owner ls sheepr $REG," ] \
+  && pass "before any view or upload: npm whoami, then the owners of all four names, the registry pinned" || fail "the first calls: $(sed -n 1,5p "$FX/calls" | tr '\n' ',')"
 grep -q 'unsigned' "$FX/calls" && fail "a call names the -unsigned sibling" || pass "the -unsigned sibling's packages are never named"
 pd=$(awk 'NR == 1 {print $3}' "$FX/pubsha"); pd=${pd%/*}
 case $pd in /private/tmp/sr-npmpub.*) [ ! -e "$pd" ] && pass "this run's private copy dir is gone" || fail "$pd is left" ;; *) fail "no private copy dir recorded: '$pd'" ;; esac
@@ -95,6 +106,21 @@ grep -q '^HTTPS_PROXY=http://127.0.0.1:9$' "$FX/env.npm.0" && pass "control: the
 grep -rl "$DECOY" "$FX"/env.npm.* "$FX/calls" "$FX/o" >/dev/null 2>&1 && fail "a decoy token reached npm or the output" || pass "no decoy token reached npm or the output"
 h=$(sed -n 's/^HOME=//p' "$FX/env.npm.0"); case $h in /private/tmp/sr-dryhome.*) pass "the dry npm's HOME is a fresh temp dir" ;; *) fail "the dry npm's HOME is '$h'" ;; esac
 
+# who may publish: npm's own answer, for all four names before any view or upload; the main
+# package is asked last, so a refusal there proves no platform package went out first
+nopub() { ! grep -q -e '^npm publish' -e '^npm view' "$FX/calls"; }
+mkout "$D" v0.1.0; : > "$FX/whoamifail"; pub v0.1.0; r=$?; rm -f "$FX/whoamifail"
+[ $r = 1 ] && nopub && grep -q 'npm whoami failed' "$FX/o" && pass "not logged in to npm: refused before any view or upload" || fail "whoami fails: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; : > "$FX/ownerfail.sheepr"; pub v0.1.0; r=$?; rm -f "$FX/ownerfail.sheepr"
+[ $r = 1 ] && nopub && grep -q 'sheepr is not on npm yet' "$FX/o" && pass "a name not on npm yet (the main one, asked last): refused before any upload" || fail "not on npm: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; echo stranger > "$FX/owner.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/owner.sheepr-linux-x64"
+[ $r = 1 ] && nopub && grep -q 'sheepr-linux-x64 on npm belongs to stranger, not to lukasco' "$FX/o" && pass "a name owned by someone else: refused before any upload, the owner named" || fail "other owner: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; echo lukascox > "$FX/owner.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/owner.sheepr-darwin-universal"
+[ $r = 1 ] && nopub && pass "an owner whose name only starts with the user's: refused" || fail "prefix owner: rc=$r $(order)"
+mkout "$D" v0.1.0; : > "$FX/ownerbad.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/ownerbad.sheepr-linux-arm64"
+[ $r = 1 ] && nopub && grep -q 'cannot read the owners of sheepr-linux-arm64' "$FX/o" && pass "owners that cannot be read (not E404): refused before any upload" || fail "owner error: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; printf 'stranger\nlukasco\n' > "$FX/owner.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/owner.sheepr-linux-arm64"
+[ $r = 0 ] && [ "$(grep -c '^npm publish' "$FX/calls")" = 4 ] && pass "control: the user is one of several owners: published" || fail "co-owner: rc=$r $(order) $(tail -1 "$FX/o")"
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"

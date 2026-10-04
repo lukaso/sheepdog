@@ -406,6 +406,7 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # npm is skipped when its integrity is this file's (a resumed run) and refused otherwise. An rc goes
 # under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
 # login (`npm login`), never a token from the environment.
+NPM_PKGS="sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr"   # platform packages first, the main one last
 NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's registry or scope registry never applies
 publish_npm_exec() { # dir
   d=$1 m=$1/MANIFEST.json nv=${tag#v}
@@ -420,8 +421,24 @@ publish_npm_exec() { # dir
   [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
   # every file npm-check checked, before the first npm call (each is checked again just before its upload)
   files_ok "$d" || die "a file npm-check checked has changed since (above); nothing is published. Run release.sh npm-check $tag again"
+  # who may publish, asked for all four names before any view or upload (measured, npm 11.6.0:
+  # `whoami` prints the user, or exits 1 with ENEEDAUTH; `owner ls NAME` prints `user <email>`
+  # lines, or exits 1 with E404 for a name not on npm). A name not on npm yet is refused: npm may
+  # reject it as too similar to another, or someone may take it first, after the platform
+  # packages are out; so each name is reserved first (a 0.0.0 placeholder).
+  me=$(tool "$NETC" "$NPM" whoami --registry="$NPMREG" 2> "$pc/err") && [ -n "$me" ] \
+    || die "npm whoami failed (not logged in to npm?): run npm login, then publish-npm again; nothing was published ($(head -c 200 "$pc/err" | tr '\n' ' '))"
+  for p in $NPM_PKGS; do
+    own=$(tool "$NETC" "$NPM" owner ls "$p" --registry="$NPMREG" 2> "$pc/err"); r=$?
+    if [ $r != 0 ]; then
+      grep -q 'E404' "$pc/err" && die "$p is not on npm yet: reserve the name first (publish a 0.0.0 placeholder as $me), then run publish-npm again; nothing was published"
+      die "cannot read the owners of $p on npm (npm owner ls: exit $r, $(head -c 200 "$pc/err" | tr '\n' ' ')); nothing was published"
+    fi
+    printf '%s\n' "$own" | awk -v me="$me" '$1 == me {f = 1} END {exit !f}' \
+      || die "$p on npm belongs to $(printf '%s\n' "$own" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//'), not to $me; nothing was published"
+  done
   case $tag in *-rc.*) set -- --tag next ;; *) set -- ;; esac
-  for p in sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr; do
+  for p in $NPM_PKGS; do
     f=$p-$nv.tgz
     # npm gets a private copy, hashed against the manifest: the bytes checked are the bytes sent
     cp "$d/$f" "$pc/$f" 2>/dev/null || die "no $f in $d; nothing after it is published"
