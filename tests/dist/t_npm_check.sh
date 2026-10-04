@@ -113,4 +113,24 @@ for t in "$MT" "$DT" sheepr-linux-arm64-$nv.tgz "$XT"; do
   j=$(tar -xzOf "$D/$t" package/package.json 2>/dev/null)
   case $j in *'"url": "git+https://github.com/lukaso/sheepr.git"'*'"homepage": "https://github.com/lukaso/sheepr#readme"'*) pass "$t links the repository and its home page" ;; *) fail "$t: no repository or homepage in package.json" ;; esac
 done
+# the names npm-check passes are the one list publish and publish-npm check npm's owners of
+# (release.conf's SR_NPM_PKGS): packages that are not that list are refused, the list named;
+# control: the same packages with the list as it is pass
+mk signed false; nc; r=$?; [ $r = 1 ] && grep -q 'codesign' "$FX/o" && ! grep -q 'SR_NPM_PKGS' "$FX/o" && pass "control: with the list as it is, the refusal is the .dev bundle's (codesign), not the list" || fail "control list: rc=$r $(tail -1 "$FX/o")"
+sed -i.bak 's/^SR_NPM_PKGS=.*/SR_NPM_PKGS=\x27sheepr-linux-arm64 sheepr-linux-x86 sheepr-darwin-universal sheepr\x27/' "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+grep -q '^SR_NPM_PKGS=.*sheepr-linux-x86 ' "$REPO/scripts/release.conf" || fail "could not change the fixture's list"
+mk signed false; nc; r=$?; g checkout -q scripts/release.conf
+[ $r = 1 ] && grep -q 'SR_NPM_PKGS' "$FX/o" && [ ! -e "$D/NPM-CHECKED" ] && pass "packages that are not release.conf's list: refused, the list named, no stamp" || fail "another list: rc=$r $(tail -1 "$FX/o")"
+# npm-same.py packages itself, against these packages and the tag's files: the list must be the
+# packages npm-pack.sh writes (a wrong name or a repeated one is refused), and each tarball's package
+# must be its file's (the x64 file holding the arm64 package is refused for that, before package.json)
+R=$FX/ref; mkdir -p "$R"; for x in LICENSE-MIT LICENSE-APACHE README.md; do g show "v0.1.0:$x" > "$R/$x"; done; g show v0.1.0:npm/sheepr/bin/sheepr > "$R/launcher"
+L="sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr"; NS=$SR_ROOT/scripts/lib/npm-same.py
+mk signed false; python3 "$NS" packages "$D" "$nv" "$R" "$L" > "$FX/o" 2>&1 && pass "control: npm-same.py passes these packages with the list" || fail "npm-same control: $(tail -1 "$FX/o")"
+python3 "$NS" packages "$D" "$nv" "$R" "sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr-cli" > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "npm-same.py: a list with another name is refused" || fail "npm-same other name: rc=$r $(tail -1 "$FX/o")"
+python3 "$NS" packages "$D" "$nv" "$R" "sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr" > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "npm-same.py: a list with a name twice is refused" || fail "npm-same repeated name: rc=$r $(tail -1 "$FX/o")"
+cp "$D/sheepr-linux-arm64-$nv.tgz" "$D/sheepr-linux-x64-$nv.tgz"; python3 "$NS" packages "$D" "$nv" "$R" "$L" > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && grep -q "sheepr-linux-x64-$nv.tgz: the package inside is 'sheepr-linux-arm64', not sheepr-linux-x64" "$FX/o" && pass "npm-same.py: a tarball holding another package than its file's is refused for that" || fail "npm-same swapped: rc=$r $(tail -1 "$FX/o")"
 finish

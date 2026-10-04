@@ -496,9 +496,9 @@ npm_check() { # dir
   [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
   [ "$mode" = signed ] || die "the manifest's mode is '$mode', not signed"
   [ "$ctl" = false ] || die "the manifest is a control build"
-  for f in sheepr-macos-universal.tar.gz sheepr-linux-aarch64 sheepr-linux-x86_64 sheepr-$nv.tgz sheepr-darwin-universal-$nv.tgz \
-           sheepr-linux-arm64-$nv.tgz sheepr-linux-x64-$nv.tgz; do
-    [ -f "$d/$f" ] || die "missing $f"
+  [ -n "${SR_NPM_PKGS:-}" ] || die "scripts/release.conf names no SR_NPM_PKGS"
+  for f in sheepr-macos-universal.tar.gz sheepr-linux-aarch64 sheepr-linux-x86_64 $(for p in $SR_NPM_PKGS; do printf '%s-%s.tgz\n' "$p" "$nv"; done); do
+    [ -f "$d/$f" ] || die "missing $f (a file of the build, or a package of release.conf's SR_NPM_PKGS)"
     h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
     grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
   done
@@ -512,7 +512,7 @@ npm_check() { # dir
   done
   mv "$nt/ref/sheepr" "$nt/ref/launcher"
   dt=$d/sheepr-darwin-universal-$nv.tgz
-  npy packages "$d" "$nv" "$nt/ref" || die "an npm package is refused (above)"
+  npy packages "$d" "$nv" "$nt/ref" "$SR_NPM_PKGS" || die "an npm package is refused (above)"
   /usr/bin/tar -xzf "$dt" -C "$nt/p" || die "cannot unpack the darwin package"   # the bundle the real tools judge
   b=$nt/p/package/Sheepr.app
   /usr/bin/plutil -extract SheeprControlBuild raw -o - "$b/Contents/Info.plist" >/dev/null 2>&1 && die "the darwin package holds a control build (SheeprControlBuild in its Info.plist)"

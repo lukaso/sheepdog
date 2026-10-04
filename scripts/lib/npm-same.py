@@ -12,7 +12,8 @@
 # headers must moreover be byte for byte the header npm pack writes for that name, mode and size:
 # node-tar throws on a field it cannot read, warns, and reads on a block later, so no header byte
 # may be free (tests/dist/t_tar_readers.sh lists whole packages with npm's own tar and compares). Run by release.sh npm-check as `python3 -I` with no DEVELOPER_DIR.
-#   npm-same.py packages DIR VERSION REF   the four .tgz files in DIR: that shape; exactly the files
+#   npm-same.py packages DIR VERSION REF NAMES   the four .tgz files in DIR (NAMES: release.conf's
+#     SR_NPM_PKGS, the names publish checks npm's owners of; each tarball's package name is its file's): that shape; exactly the files
 #       npm-pack.sh writes; the license texts and the main package's launcher equal the files in
 #       REF (a directory: the tag's LICENSE-MIT, LICENSE-APACHE and launcher); each Linux
 #       package's binary equals DIR's sheepr-linux-<arch>; modes exactly 0755 for the
@@ -120,8 +121,11 @@ def pkgjson(kind, nv):
                 "license": lic, **LINKS, "os": ["linux"], "cpu": [kind[len("linux-"):]], "files": ["bin"] + LIC}
     die("no package kind %s" % kind)
 
-def packages(d, nv, r):
+def packages(d, nv, r, names):
     lic = {n: ref(os.path.join(r, n)) for n in LIC}
+    made = ["sheepr" if k == "main" else "sheepr-darwin-universal" if k == "darwin" else "sheepr-" + k for k in ("main", "darwin", "linux-arm64", "linux-x64")]
+    if sorted(names.split()) != sorted(made):
+        die("release.conf's SR_NPM_PKGS (%s) are not the packages npm-pack.sh writes (%s)" % (names, " ".join(made)))
     for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
         pk = "sheepr" if kind == "main" else "sheepr-darwin-universal" if kind == "darwin" else "sheepr-" + kind
         fn = "%s-%s.tgz" % (pk, nv)
@@ -137,6 +141,7 @@ def packages(d, nv, r):
             die("%s: README.md differs from the repo's (at the tag)" % fn)
         try: pj = json.loads(f["package/package.json"][2])
         except ValueError: die("%s: package.json is not JSON" % fn)
+        if pj.get("name") != pk: die("%s: the package inside is %r, not %s" % (fn, pj.get("name"), pk))
         if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))
         # exact modes: 0755 for the executable, 0644 for everything else
         exe = "package/Sheepr.app/Contents/MacOS/sheepr" if kind == "darwin" else "package/bin/sheepr"
@@ -160,7 +165,7 @@ def same(tgz, arc):
         if p[n][1] != a[n][1]: die("the darwin package's bundle is not the release archive's bundle: %s differs in content" % n)
 
 if __name__ == "__main__":
-    if len(sys.argv) == 5 and sys.argv[1] == "packages": packages(*sys.argv[2:5])
+    if len(sys.argv) == 6 and sys.argv[1] == "packages": packages(*sys.argv[2:6])
     elif len(sys.argv) == 4 and sys.argv[1] == "pkgjson": print(json.dumps(pkgjson(sys.argv[2], sys.argv[3]), indent=2))
     elif len(sys.argv) == 4 and sys.argv[1] == "same": same(*sys.argv[2:4])
     # the integrity npm records for a published tarball (its `dist.integrity`)
@@ -168,4 +173,4 @@ if __name__ == "__main__":
         import base64
         print("sha512-" + base64.b64encode(hashlib.sha512(ref(sys.argv[2])).digest()).decode())
     else:
-        sys.stderr.write("usage: npm-same.py packages DIR VERSION REF | same TGZ ARCHIVE | pkgjson KIND VERSION | integrity TGZ\n"); sys.exit(2)
+        sys.stderr.write("usage: npm-same.py packages DIR VERSION REF NAMES | same TGZ ARCHIVE | pkgjson KIND VERSION | integrity TGZ\n"); sys.exit(2)
