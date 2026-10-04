@@ -331,6 +331,9 @@ publish_exec() { # dir
   done > "$pt/sums"
   cmp -s "$pt/sums" "$d/SHA256SUMS" || die "SHA256SUMS is not the one the build wrote (from MANIFEST.json's hashes)"
   sums_h=$(shasum -a 256 "$pt/sums" | cut -d' ' -f1)
+  # npm's owners of the four names, before any git or gh call: GitHub must not go public when npm
+  # would then refuse (the first v0.1.0 did exactly that)
+  npm_owners "$NPMC" "$NPM" "$pt"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepr/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
@@ -375,7 +378,7 @@ publish_exec() { # dir
 }
 publish() {
   verify "$out/$tag"
-  GH=gh GITCMD=git DRY=no NETC=net publish_exec "$out/$tag"
+  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net publish_exec "$out/$tag"
 }
 standins() { # VAR...: each names a stand-in for a dry run, or refuse
   # a stand-in is a script (not a symlink, not a binary), whose real directory is a fixture dir;
@@ -393,10 +396,10 @@ standins() { # VAR...: each names a stand-in for a dry run, or refuse
   done
 }
 publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
-  standins SR_PUBLISH_DRY_GH SR_PUBLISH_DRY_GIT
+  standins SR_PUBLISH_DRY_GH SR_PUBLISH_DRY_GIT SR_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
   echo "release: __publish-dry (stand-ins; verify not run; a temp HOME)"
-  GH=$SR_PUBLISH_DRY_GH GITCMD=$SR_PUBLISH_DRY_GIT DRY=yes NETC=dry publish_exec "$out/$tag"
+  GH=$SR_PUBLISH_DRY_GH GITCMD=$SR_PUBLISH_DRY_GIT NPM=$SR_PUBLISH_DRY_NPM NPMC=npmdry DRY=yes NETC=dry publish_exec "$out/$tag"
   rm -rf "$DRYHOME"
 }
 
@@ -406,8 +409,25 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # npm is skipped when its integrity is this file's (a resumed run) and refused otherwise. An rc goes
 # under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
 # login (`npm login`), never a token from the environment.
-NPM_PKGS="sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal sheepr"   # platform packages first, the main one last
 NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's registry or scope registry never applies
+# npm_owners CLASS NPM TMPDIR: npm's owners of each name in SR_NPM_PKGS must include SR_NPM_USER
+# (release.conf). Measured (npm 11.6.0): `owner ls NAME` needs no login and prints `user <email>`
+# lines, or exits 1 with E404 for a name not on npm. A name not on npm yet is refused: npm may
+# reject it as too similar to another, or someone may take it first; each name is reserved first
+# (a 0.0.0 placeholder). publish runs this before any GitHub call, publish-npm before any upload.
+npm_owners() {
+  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  [ -n "${SR_NPM_USER:-}" ] && [ -n "${SR_NPM_PKGS:-}" ] || die "scripts/release.conf names no SR_NPM_USER or SR_NPM_PKGS"
+  for p in $SR_NPM_PKGS; do
+    own=$(tool "$1" "$2" owner ls "$p" --registry="$NPMREG" 2> "$3/err"); r=$?
+    if [ $r != 0 ]; then
+      grep -q 'E404' "$3/err" && die "$p is not on npm yet: reserve the name first (publish a 0.0.0 placeholder as $SR_NPM_USER), then run this again; nothing was published"
+      die "cannot read the owners of $p on npm (npm owner ls: exit $r, $(head -c 200 "$3/err" | tr '\n' ' ')); nothing was published"
+    fi
+    printf '%s\n' "$own" | awk -v me="$SR_NPM_USER" '$1 == me {f = 1} END {exit !f}' \
+      || die "$p on npm belongs to $(printf '%s\n' "$own" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//'), not to $SR_NPM_USER; nothing was published"
+  done
+}
 publish_npm_exec() { # dir
   d=$1 m=$1/MANIFEST.json nv=${tag#v}
   pc=$(mktemp -d /private/tmp/sr-npmpub.XXXXXX) || die "no temp dir"   # the private copies npm gets
@@ -421,24 +441,15 @@ publish_npm_exec() { # dir
   [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
   # every file npm-check checked, before the first npm call (each is checked again just before its upload)
   files_ok "$d" || die "a file npm-check checked has changed since (above); nothing is published. Run release.sh npm-check $tag again"
-  # who may publish, asked for all four names before any view or upload (measured, npm 11.6.0:
-  # `whoami` prints the user, or exits 1 with ENEEDAUTH; `owner ls NAME` prints `user <email>`
-  # lines, or exits 1 with E404 for a name not on npm). A name not on npm yet is refused: npm may
-  # reject it as too similar to another, or someone may take it first, after the platform
-  # packages are out; so each name is reserved first (a 0.0.0 placeholder).
-  me=$(tool "$NETC" "$NPM" whoami --registry="$NPMREG" 2> "$pc/err") && [ -n "$me" ] \
-    || die "npm whoami failed (not logged in to npm?): run npm login, then publish-npm again; nothing was published ($(head -c 200 "$pc/err" | tr '\n' ' '))"
-  for p in $NPM_PKGS; do
-    own=$(tool "$NETC" "$NPM" owner ls "$p" --registry="$NPMREG" 2> "$pc/err"); r=$?
-    if [ $r != 0 ]; then
-      grep -q 'E404' "$pc/err" && die "$p is not on npm yet: reserve the name first (publish a 0.0.0 placeholder as $me), then run publish-npm again; nothing was published"
-      die "cannot read the owners of $p on npm (npm owner ls: exit $r, $(head -c 200 "$pc/err" | tr '\n' ' ')); nothing was published"
-    fi
-    printf '%s\n' "$own" | awk -v me="$me" '$1 == me {f = 1} END {exit !f}' \
-      || die "$p on npm belongs to $(printf '%s\n' "$own" | awk '{print $1}' | tr '\n' ' ' | sed 's/ $//'), not to $me; nothing was published"
-  done
+  # who may publish, before any view or upload: npm must say the user is release.conf's (measured,
+  # npm 11.6.0: `whoami` prints the user, or exits 1 with ENEEDAUTH), and that user must own every name
+  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  me=$(tool "$NETC" "$NPM" whoami --registry="$NPMREG" 2> "$pc/err") \
+    || die "npm whoami failed (not logged in to npm?): run npm login as ${SR_NPM_USER:-the owner}, then publish-npm again; nothing was published ($(head -c 200 "$pc/err" | tr '\n' ' '))"
+  [ "$me" = "${SR_NPM_USER:-}" ] || die "logged in to npm as $(printf '%s' "$me" | head -c 100 | tr '\n' ' '), but the packages belong to ${SR_NPM_USER:-nobody named in release.conf}: run npm login as that user, then publish-npm again; nothing was published"
+  npm_owners "$NETC" "$NPM" "$pc"
   case $tag in *-rc.*) set -- --tag next ;; *) set -- ;; esac
-  for p in $NPM_PKGS; do
+  for p in $SR_NPM_PKGS; do
     f=$p-$nv.tgz
     # npm gets a private copy, hashed against the manifest: the bytes checked are the bytes sent
     cp "$d/$f" "$pc/$f" 2>/dev/null || die "no $f in $d; nothing after it is published"

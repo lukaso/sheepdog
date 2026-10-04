@@ -58,16 +58,25 @@ n=\$(ls "$FX" | grep -c '^env\\.git\\.'); env > "$FX/env.git.\$n"
 echo "git \$*" >> "$FX/calls"
 if [ \$n -ge 1 ] && [ -e "$FX/moved" ]; then cat "$FX/moved"; else cat "$FX/remote"; fi
 EOF
-chmod +x "$FX/gh" "$FX/git"
+cat > "$FX/npm" <<EOF
+#!/bin/sh
+echo "npm \$*" >> "$FX/calls"
+case \$1 in owner) p=\$3
+  if [ -f "$FX/ownerfail.\$p" ]; then echo "npm error code E404" >&2; exit 1; fi
+  if [ -f "$FX/owner.\$p" ]; then echo "\$(cat "$FX/owner.\$p") <x@example.com>"; else echo "lukasco <x@example.com>"; fi; exit 0 ;;
+esac
+exit 1
+EOF
+chmod +x "$FX/gh" "$FX/git" "$FX/npm"
 printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
 pub() { # tag answers -> rc; output in $FX/o
   rm -rf "$FX/calls" "$FX"/env.* "$FX/up"; printf '%s\n' "$2" > "$FX/ask"
   (cd "$REPO" && env -u LC_ALL LANG=en_GB.UTF-8 LC_COLLATE=en_GB.UTF-8 HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" NPM_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" \
-    SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls" \
+    SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls" \
     sh scripts/release.sh __publish-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
-seq() { sed -e 's/^gh api -X POST repos.*/POST/; s/^gh api -X POST -H .*/UPLOAD/; s/^gh api repos\/lukaso\/sheepr\/releases --paginate.*/LIST/' \
+seq() { sed -e '/^npm /d' -e 's/^gh api -X POST repos.*/POST/; s/^gh api -X POST -H .*/UPLOAD/; s/^gh api repos\/lukaso\/sheepr\/releases --paginate.*/LIST/' \
   -e 's/^gh api repos\/lukaso\/sheepr\/releases\/4242 .*/READ/; s/^gh api -H .*assets.*/DL/; s/^gh api -X PATCH.*/PATCH/' \
   -e 's/^git ls-remote .*/LSREMOTE/; s/^ask .*/ASK/' "$FX/calls" | tr '\n' ' '; }
 
@@ -76,6 +85,11 @@ pub v0.1.0 v0.1.0; r=$?
 [ $r = 0 ] && pass "a dry publish in the operator's locale: done" || fail "dry publish: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
 [ "$(seq)" = "LSREMOTE LIST POST UPLOAD UPLOAD UPLOAD UPLOAD UPLOAD READ DL DL DL DL DL LSREMOTE ASK PATCH " ] \
   && pass "the order: tag, list, draft, 5 uploads, read, 5 downloads, tag again, confirm, publish" || fail "the order: $(seq)"
+# the npm names are checked before anything else: GitHub must not go public when npm would then
+# refuse (the first v0.1.0 did exactly that). `npm owner ls` needs no login; the owner is release.conf's
+REG="--registry=https://registry.npmjs.org/"
+[ "$(sed -n 1,4p "$FX/calls" | tr '\n' ',')" = "npm owner ls sheepr-linux-arm64 $REG,npm owner ls sheepr-linux-x64 $REG,npm owner ls sheepr-darwin-universal $REG,npm owner ls sheepr $REG," ] \
+  && pass "before any git or gh call: the npm owners of all four names" || fail "the first calls: $(sed -n 1,4p "$FX/calls" | tr '\n' ',')"
 [ "$(grep -c '^git ls-remote https://github.com/lukaso/sheepr refs/tags/v0.1.0\*$' "$FX/calls")" = 2 ] \
   && pass "the tag is read from github.com/lukaso/sheepr itself (twice)" || fail "ls-remote: $(grep ls-remote "$FX/calls" | head -1)"
 bad=""; for f in "$FX"/env.*; do for k in $(sed 's/=.*//' "$f"); do
@@ -177,6 +191,12 @@ else pass "a wrapper reaching an outside gh: not reached"; fi
 pub v0.1.1-rc.1 v0.1.1-rc.1
 h=$(sed -n 's/^HOME=//p' "$FX/env.gh.0"); case $h in /private/tmp/sr-*) pass "the dry gh's HOME is a fresh temp dir ($h)" ;; *) fail "the dry gh's HOME is '$h'" ;; esac
 grep -q -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' "$FX"/env.gh.* "$FX"/env.git.* && fail "the dry gh or git got GH_CONFIG_DIR or SSH_AUTH_SOCK" || pass "the dry gh and git get no GH_CONFIG_DIR or SSH_AUTH_SOCK"
+# an npm name that is not the owner's, or not on npm yet: refused before any git or gh call
+nogh() { ! grep -q -e '^gh ' -e '^git ' "$FX/calls"; }
+echo stranger > "$FX/owner.sheepr"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/owner.sheepr"
+[ $r = 1 ] && nogh && grep -q 'sheepr on npm belongs to stranger, not to lukasco' "$FX/o" && pass "an npm name owned by someone else: refused before any git or gh call" || fail "npm owner: rc=$r $(seq) $(tail -1 "$FX/o")"
+: > "$FX/ownerfail.sheepr-linux-arm64"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/ownerfail.sheepr-linux-arm64"
+[ $r = 1 ] && nogh && grep -q 'sheepr-linux-arm64 is not on npm yet' "$FX/o" && pass "an npm name not on npm yet: refused before any git or gh call" || fail "npm absent: rc=$r $(seq) $(tail -1 "$FX/o")"
 n=$(ls -d /private/tmp/sr-dryhome.* 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" = 0 ] && pass "no dry HOME is left, after the refused runs too" || fail "$n dry HOME dirs left"
 finish
