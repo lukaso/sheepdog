@@ -17,7 +17,7 @@ line() { # PREFIX: the one README line that starts with it (exactly one, or the 
   grep -F -- "$1" "$RM"
 }
 for c in "npm i -g $main" "npm rm -g $main" "pnpm rm -g $main"; do
-  grep -q -F -- "$c" "$RM" && pass "the README says: $c" || fail "the README does not say: $c"
+  grep -q -E -- "(^|[ \`])$c([ \`]|\$)" "$RM" && pass "the README says: $c (the whole name)" || fail "the README does not say: $c"
 done
 
 # the stand-ins: `npm root -g` and `pnpm root -g` print directories of this fixture dir
