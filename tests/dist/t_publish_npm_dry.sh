@@ -139,7 +139,8 @@ mkout "$D" v0.1.0; printf 'sed -i.bak "s/^SR_NPM_PKGS=.*/SR_NPM_PKGS=\x27sheepr 
 pub v0.1.0; r=$?; rm -f "$FX/onwhoami"; changed=$(grep -c '^SR_NPM_PKGS=.sheepr sheepr-linux' "$REPO/scripts/release.conf"); g checkout -q scripts/release.conf
 [ "$changed" = 1 ] || fail "the whoami hook did not change the list (the row would prove nothing)"
 [ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr,publish sheepr," ] \
-  && pass "a list changed after its check: the checked order is the one used" || fail "list changed mid-run: rc=$r $(order)"
+  && [ "$(sed -n 1,5p "$FX/calls" | tr '\n' ',')" = "npm whoami $REG,npm owner ls sheepr-linux-arm64 $REG,npm owner ls sheepr-linux-x64 $REG,npm owner ls sheepr-darwin-universal $REG,npm owner ls sheepr $REG," ] \
+  && pass "a list changed after its check: the checked list is the one the owner check and the uploads use" || fail "list changed mid-run: rc=$r $(order) | $(sed -n 1,5p "$FX/calls" | tr '\n' ',')"
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"
