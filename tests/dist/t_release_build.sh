@@ -68,6 +68,12 @@ n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = 4 ] && pass "SHA256SUMS has exactly 4 l
 pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SR_ROOT/rust-toolchain.toml")
 rs=$(sed -n 's/.*"rustc": *"\([^"]*\)".*/\1/p' "$D/MANIFEST.json" | sort -u)
 [ -n "$rs" ] && [ "$(printf '%s\n' "$rs" | grep -vc "^rustc $pin ")" = 0 ] && pass "every recorded rustc is $pin" || fail "recorded rustc: $rs"
+# the rustc is recorded for exactly the compiled files (the macOS archive, the two Linux binaries),
+# never for a package, install.sh or SHA256SUMS; and the build log has no `cat:` line (a name
+# pattern that also matched the Linux npm packages read rustc files that do not exist)
+with=$(python3 -c 'import json, sys; m = json.load(open(sys.argv[1])); print(" ".join(sorted(f["name"] for f in m["files"] if "rustc" in f)))' "$D/MANIFEST.json")
+[ "$with" = "sheepr-linux-aarch64 sheepr-linux-x86_64 sheepr-macos-universal.tar.gz" ] && pass "the rustc is recorded for exactly the three compiled files" || fail "the files with a rustc: $with"
+grep -q '^cat:' "$FX/log" && fail "the build log has a cat: line: $(grep '^cat:' "$FX/log" | head -2 | tr '\n' ' ')" || pass "the build log has no cat: line"
 grep -q "\"commit\": *\"$(g rev-parse v0.1.0-rc.1^{commit})\"" "$D/MANIFEST.json" && pass "the manifest names the commit" || fail "the manifest's commit"
 grep -q '"control": *false' "$D/MANIFEST.json" && pass "the manifest is not a control" || fail "the manifest's control flag"
 # the npm packages (PHASE3.md S5): four tarballs, the main one's launcher executable and its

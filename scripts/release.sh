@@ -274,7 +274,7 @@ build_release() { # mode: unsigned | signed | control
       h=$(shasum -a 256 "$dest/$f" | cut -d' ' -f1)
       case $f in
         sheepr-macos-*) r=$rustc_mac ;;
-        sheepr-linux-*) r=$(cat "$scratch/target-${f#sheepr-linux-}/rustc") ;;
+        sheepr-linux-aarch64|sheepr-linux-x86_64) r=$(cat "$scratch/target-${f#sheepr-linux-}/rustc") ;;   # the binaries by name: the npm packages also start sheepr-linux-
         *) r="" ;;
       esac
       printf '%s    {"name": "%s", "sha256": "%s"%s}' "$sep" "$f" "$h" "${r:+, \"rustc\": \"$r\"}"
