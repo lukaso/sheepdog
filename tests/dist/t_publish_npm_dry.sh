@@ -52,7 +52,7 @@ case \$1 in
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
     if [ -f "$FX/view.\$p" ]; then printf '"%s"\\n' "\$(cat "$FX/view.\$p")"; exit 0; fi
     printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1 ;;
-  whoami) if [ -f "$FX/whoamifail" ]; then echo "npm error code ENEEDAUTH" >&2; exit 1; fi; cat "$FX/whoami"; exit 0 ;;
+  whoami) [ -f "$FX/onwhoami" ] && sh "$FX/onwhoami"; if [ -f "$FX/whoamifail" ]; then echo "npm error code ENEEDAUTH" >&2; exit 1; fi; cat "$FX/whoami"; exit 0 ;;
   owner) p=\$3
     if [ -f "$FX/ownerfail.\$p" ]; then echo "npm error owner ls Couldn't get owner data \$p" >&2; echo "npm error code E404" >&2; exit 1; fi
     if [ -f "$FX/ownerbad.\$p" ]; then echo "npm error code ETIMEDOUT" >&2; exit 1; fi
@@ -99,7 +99,8 @@ case $pd in /private/tmp/sr-npmpub.*) [ ! -e "$pd" ] && pass "this run's private
 # npm's environment class (npm_env, the real run's too): only the named variables; a proxy reaches
 # it (the control), a token or an npmrc of the caller's never does in the dry run
 bad=""; for f in "$FX"/env.npm.*; do for k in $(sed 's/=.*//' "$f"); do
-  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD|HTTPS_PROXY) ;; *) bad="$bad $k" ;; esac
+  # npm_env's named set (a caller's proxy and CA settings pass by design) and what sh adds
+  case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD|HTTPS_PROXY|https_proxy|HTTP_PROXY|http_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS) ;; *) bad="$bad $k" ;; esac
 done; done
 [ -z "$bad" ] && pass "npm got only the named environment" || fail "extra environment:$(printf '%s\n' $bad | sort -u | tr '\n' ' ')"
 grep -q '^HTTPS_PROXY=http://127.0.0.1:9$' "$FX/env.npm.0" && pass "control: the proxy reaches npm" || fail "control: no HTTPS_PROXY for npm"
@@ -132,6 +133,13 @@ for bad in "sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal" 
   mkout "$D" v0.1.0; pub v0.1.0; r=$?; g checkout -q scripts/release.conf
   [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "a list of '$bad': refused before any call" || fail "list '$bad': rc=$r calls=$(head -1 "$FX/calls" 2>/dev/null) $(tail -1 "$FX/o")"
 done
+# the list is read once: one changed after its check (here by the whoami call) is not the one used;
+# the uploads keep the checked order, the platform packages first
+mkout "$D" v0.1.0; printf 'sed -i.bak "s/^SR_NPM_PKGS=.*/SR_NPM_PKGS=\x27sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal\x27/" "%s" && rm -f "%s.bak"\n' "$REPO/scripts/release.conf" "$REPO/scripts/release.conf" > "$FX/onwhoami"
+pub v0.1.0; r=$?; rm -f "$FX/onwhoami"; changed=$(grep -c '^SR_NPM_PKGS=.sheepr sheepr-linux' "$REPO/scripts/release.conf"); g checkout -q scripts/release.conf
+[ "$changed" = 1 ] || fail "the whoami hook did not change the list (the row would prove nothing)"
+[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr,publish sheepr," ] \
+  && pass "a list changed after its check: the checked order is the one used" || fail "list changed mid-run: rc=$r $(order)"
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"

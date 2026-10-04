@@ -92,7 +92,7 @@ printf '# a note: \304\205 %sHIDDEN\n' "$p1" > "$r/scripts/lib/name-guard.allow"
 [ "$(od -An -tx1 "$r/scripts/lib/name-guard.allow" | tr -d ' \n' | grep -c c485)" = 1 ] || fail "the fixture comment does not hold the bytes c4 85"
 row "a word only in a comment line holding the bytes c4 85 is not allowed" 1 "a.c:1: ${p1}HIDDEN" "$r"
 r=$(repo a.txt clean); echo other > "$r/b.txt"; git -C "$r" update-index --add --info-only b.txt
-row "an index entry whose object is not in the store is exit 2" 2 "not in the object store" "$r"
+row "an index entry whose object is not in the store is exit 2, the path named" 2 "the staged b.txt is not in the object store" "$r"
 mkdir -p "$FX/plain" && echo x > "$FX/plain/a"
 row "outside a repo is exit 2" 2 "git ls-files failed" "$FX/plain"
 if [ "$(id -u)" != 0 ]; then

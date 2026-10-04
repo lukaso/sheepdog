@@ -422,9 +422,8 @@ npm_list() {
 # lines, or exits 1 with E404 for a name not on npm. A name not on npm yet is refused: npm may
 # reject it as too similar to another, or someone may take it first; each name is reserved first
 # (a 0.0.0 placeholder). publish runs this before any GitHub call, publish-npm before any upload.
-npm_owners() {
-  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
-  [ -n "${SR_NPM_USER:-}" ] && [ -n "${SR_NPM_PKGS:-}" ] || die "scripts/release.conf names no SR_NPM_USER or SR_NPM_PKGS"
+npm_owners() { # after npm_list, which read release.conf: the list checked is the list used (one read)
+  [ -n "${SR_NPM_USER:-}" ] && [ -n "${SR_NPM_PKGS:-}" ] || die "scripts/release.conf names no SR_NPM_USER or SR_NPM_PKGS (npm_list runs first)"
   for p in $SR_NPM_PKGS; do
     own=$(tool "$1" "$2" owner ls "$p" --registry="$NPMREG" 2> "$3/err"); r=$?
     if [ $r != 0 ]; then
