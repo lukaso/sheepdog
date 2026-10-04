@@ -398,7 +398,7 @@ standins() { # VAR...: each names a stand-in for a dry run, or refuse
 publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; verify is not run
   standins SR_PUBLISH_DRY_GH SR_PUBLISH_DRY_GIT SR_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
-  trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM   # from its first moment: a death before the run's own trap leaves no temp HOME
+  trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM   # right after mktemp: a death before the run's own trap leaves no temp HOME (a signal in between still can)
   echo "release: __publish-dry (stand-ins; verify not run; a temp HOME)"
   GH=$SR_PUBLISH_DRY_GH GITCMD=$SR_PUBLISH_DRY_GIT NPM=$SR_PUBLISH_DRY_NPM NPMC=npmdry DRY=yes NETC=dry publish_exec "$out/$tag"
   rm -rf "$DRYHOME"
@@ -513,7 +513,7 @@ publish_npm() { NPM=npm NETC=npm publish_npm_exec "$out/$tag"; }
 publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the real one
   standins SR_PUBLISH_DRY_NPM
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
-  trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM   # from its first moment: a death before the run's own trap leaves no temp HOME
+  trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM   # right after mktemp: a death before the run's own trap leaves no temp HOME (a signal in between still can)
   echo "release: __publish-npm-dry (a stand-in npm; a temp HOME)"
   NPM=$SR_PUBLISH_DRY_NPM NETC=npmdry publish_npm_exec "$out/$tag"
   rm -rf "$DRYHOME"
