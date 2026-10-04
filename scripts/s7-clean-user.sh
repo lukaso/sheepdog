@@ -266,7 +266,7 @@ tag = os.path.basename(d)
 if m.get("mode") != "signed" or m.get("control") is not False: sys.exit("the manifest is not a signed release's (mode %r, control %r)" % (m.get("mode"), m.get("control")))
 if m.get("tag") != tag: sys.exit("the manifest's tag %r is not the directory's name %r" % (m.get("tag"), tag))
 v = m["tag"][1:]; files = {f["name"]: f["sha256"] for f in m["files"]}
-need = ["sheepr-macos-universal.tar.gz", "install.sh"] + ["lukaso-%s-%s.tgz" % (p, v) for p in ("sheepr", "sheepr-darwin-universal", "sheepr-linux-arm64", "sheepr-linux-x64")]
+need = ["sheepr-macos-universal.tar.gz", "install.sh"] + ["%s-%s.tgz" % (p, v) for p in ("sheepr", "sheepr-darwin-universal", "sheepr-linux-arm64", "sheepr-linux-x64")]
 for n in need:
     if n not in files: sys.exit("the manifest does not list %s" % n)
     if hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest() != files[n]: sys.exit("%s is not the manifest's" % n)

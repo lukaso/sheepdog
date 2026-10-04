@@ -49,7 +49,7 @@ case \$1 in
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
     if [ -f "$FX/view.\$p" ]; then printf '"%s"\\n' "\$(cat "$FX/view.\$p")"; exit 0; fi
     printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1 ;;
-  publish) for a; do last=\$a; done; p=\$(basename "\$last" | sed 's/^lukaso-\\(.*\\)-[0-9][0-9.a-z-]*\\.tgz\$/\\1/')
+  publish) for a; do last=\$a; done; p=\$(basename "\$last" | sed 's/^\\(.*\\)-[0-9][0-9.a-z-]*\\.tgz\$/\\1/')
     echo "\$p \$(shasum -a 256 "\$last" | cut -d' ' -f1) \$last" >> "$FX/pubsha"
     [ -f "$FX/onpublish.\$p" ] && sh "$FX/onpublish.\$p"; exit 0 ;;
 esac
@@ -63,7 +63,7 @@ pub() { # tag -> rc; output in $FX/o
     SR_PUBLISH_DRY_NPM="$FX/npm" sh scripts/release.sh __publish-npm-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
 # "view NAME" or "publish NAME" per call (a name's parts start with a letter, a version with a digit)
-order() { sed -En 's/^npm (view|publish) .*lukaso[-\/](sheepr(-[a-z][a-z0-9]*)*)[-@][0-9].*$/\1 \2/p' "$FX/calls" 2>/dev/null | tr '\n' ','; }
+order() { sed -En 's/^npm (view|publish) (.* |.*\/)(sheepr(-[a-z][a-z0-9]*)*)[-@][0-9].*$/\1 \3/p' "$FX/calls" 2>/dev/null | tr '\n' ','; }
 D=$FX/out/v0.1.0
 mkout "$D" v0.1.0
 mkout "$FX/out/v0.1.0-unsigned" v0.1.0

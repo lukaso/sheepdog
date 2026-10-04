@@ -124,7 +124,7 @@ def packages(d, nv, r):
     lic = {n: ref(os.path.join(r, n)) for n in LIC}
     for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
         pk = "sheepr" if kind == "main" else "sheepr-darwin-universal" if kind == "darwin" else "sheepr-" + kind
-        fn = "lukaso-%s-%s.tgz" % (pk, nv)
+        fn = "%s-%s.tgz" % (pk, nv)
         f = plain(os.path.join(d, fn), fn, False, canonical=True)
         for n in f:
             if not n.startswith("package/"): die("%s: an entry outside package/: %s" % (fn, n))

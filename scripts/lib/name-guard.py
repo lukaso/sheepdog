@@ -7,7 +7,9 @@ Reads every tracked path and every tracked file itself (`git ls-files -z`; not `
 exit 128 could be read as clean, and whose -w never matches a prefix followed by a letter) and
 fails on substrings, in file contents and in path names alike:
   - the old name of the tool, in any case;
-  - the old npm scope (its pnpm store form included) and the old tarball prefix, in any case;
+  - the old npm scope, in any case, and the owner's name followed by - + [ % _ or * (the old
+    tarball prefix, a pnpm store name, an encoded scope, a regex over them); its URLs, the
+    bundle ID, an email address and a home folder (followed by / \\ . @ or a letter) pass;
   - the old two-letter prefix (the letters S and D, then `_`; or s and d, then `-` or `_`),
     except in a word listed exactly in REPO/scripts/lib/name-guard.allow (one word per line; a
     line that starts with # is a comment). A listed word that occurs nowhere is a failure too,
@@ -26,7 +28,8 @@ import subprocess
 import sys
 
 OLD = ("sheep" + "dog",)                          # any case
-SCOPE = ("@" + "lukaso", "lukaso" + "-sheep")     # any case
+SCOPE = ("@" + "lukaso",)                         # any case
+OWNER = re.compile("lukas" + "o" + r"([-+\[%_*])")  # any case: the old scope and tarball shapes
 PREFIX = ("S" + "D_", "s" + "d-", "s" + "d_")     # exact case
 ALLOW = "scripts/lib/name-guard.allow"
 WORD = re.compile(r"[A-Za-z0-9_.\-]")
@@ -47,6 +50,8 @@ def scan(label, text, allow, seen, hits, counts=True):
         for pat in OLD + SCOPE:
             if pat.lower() in lline:
                 hits.append(f"{label}:{ln}: {pat}")
+        for m in OWNER.finditer(lline):
+            hits.append(f"{label}:{ln}: {m.group(0)}")
         for pat in PREFIX:
             i = line.find(pat)
             while i >= 0:
