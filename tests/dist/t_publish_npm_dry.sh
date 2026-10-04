@@ -45,8 +45,9 @@ integrity() { python3 -c 'import base64,hashlib,sys; print("sha512-" + base64.b6
 # answers, as npm answers while it processes a new package: measured 2026-10-04) has run down, or
 # another integrity if $FX/pubwrong.<package> exists; $FX/emptyafter.<package> gives that many empty
 # answers first, and $FX/viewfailafter.<package> makes every view after the publish fail (ETIMEDOUT).
-# $FX/pubexists.<package>: the publish is refused as npm refuses a version an earlier run published
-# (E403, "cannot publish over"), which then shows as that run's file; $FX/pubfail.<package>: E401.
+# $FX/pubexists.<package>: the publish is refused with one possible answer to a version an earlier run
+# published (E403, "cannot publish over"; npm's answer during its scan is not measured), and the version
+# then shows as that run's file; $FX/pubfail.<package>: E401.
 # `sleep` is a stand-in on PATH that records its seconds (the wait's real limit, without waiting).
 cat > "$FX/npm" <<EOF
 #!/bin/sh
