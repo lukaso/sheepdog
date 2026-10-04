@@ -333,7 +333,7 @@ publish_exec() { # dir
   sums_h=$(shasum -a 256 "$pt/sums" | cut -d' ' -f1)
   # npm's owners of the four names, before any git or gh call: GitHub must not go public when npm
   # would then refuse (the first v0.1.0 did exactly that)
-  npm_owners "$NPMC" "$NPM" "$pt"
+  npm_list; npm_owners "$NPMC" "$NPM" "$pt"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepr/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
   (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
@@ -410,6 +410,13 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # under the `next` dist-tag: npm makes a version without a tag `latest`. npm uses the operator's own
 # login (`npm login`), never a token from the environment.
 NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's registry or scope registry never applies
+# npm_list: release.conf's SR_NPM_PKGS must be the four packages, the main one last (npm-same.py
+# list: the check npm-check makes). publish and publish-npm read the list again, and npm-check's
+# stamp does not bind it, so each checks it before any npm call.
+npm_list() {
+  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  npy list "${SR_NPM_PKGS:-}" || die "scripts/release.conf's SR_NPM_PKGS is refused (above); nothing was published"
+}
 # npm_owners CLASS NPM TMPDIR: npm's owners of each name in SR_NPM_PKGS must include SR_NPM_USER
 # (release.conf). Measured (npm 11.6.0): `owner ls NAME` needs no login and prints `user <email>`
 # lines, or exits 1 with E404 for a name not on npm. A name not on npm yet is refused: npm may
@@ -443,7 +450,7 @@ publish_npm_exec() { # dir
   files_ok "$d" || die "a file npm-check checked has changed since (above); nothing is published. Run release.sh npm-check $tag again"
   # who may publish, before any view or upload: npm must say the user is release.conf's (measured,
   # npm 11.6.0: `whoami` prints the user, or exits 1 with ENEEDAUTH), and that user must own every name
-  . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
+  npm_list
   me=$(tool "$NETC" "$NPM" whoami --registry="$NPMREG" 2> "$pc/err") \
     || die "npm whoami failed (not logged in to npm?): run npm login as ${SR_NPM_USER:-the owner}, then publish-npm again; nothing was published ($(head -c 200 "$pc/err" | tr '\n' ' '))"
   [ "$me" = "${SR_NPM_USER:-}" ] || die "logged in to npm as $(printf '%s' "$me" | head -c 100 | tr '\n' ' '), but the packages belong to ${SR_NPM_USER:-nobody named in release.conf}: run npm login as that user, then publish-npm again; nothing was published"

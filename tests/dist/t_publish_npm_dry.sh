@@ -125,6 +125,13 @@ mkout "$D" v0.1.0; : > "$FX/ownerbad.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -
 [ $r = 1 ] && nopub && grep -q 'cannot read the owners of sheepr-linux-arm64' "$FX/o" && pass "owners that cannot be read (not E404): refused before any upload" || fail "owner error: rc=$r $(order) $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; printf 'stranger\nlukasco\n' > "$FX/owner.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/owner.sheepr-linux-arm64"
 [ $r = 0 ] && [ "$(grep -c '^npm publish' "$FX/calls")" = 4 ] && pass "control: the user is one of several owners: published" || fail "co-owner: rc=$r $(order) $(tail -1 "$FX/o")"
+# the list publishing reads again (the stamp does not bind it): the main package last, and all
+# four names; a changed list is refused before any call at all
+for bad in "sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal" "sheepr-linux-arm64 sheepr-linux-x64 sheepr"; do
+  sed -i.bak "s/^SR_NPM_PKGS=.*/SR_NPM_PKGS='$bad'/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+  mkout "$D" v0.1.0; pub v0.1.0; r=$?; g checkout -q scripts/release.conf
+  [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "a list of '$bad': refused before any call" || fail "list '$bad': rc=$r calls=$(head -1 "$FX/calls" 2>/dev/null) $(tail -1 "$FX/o")"
+done
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"

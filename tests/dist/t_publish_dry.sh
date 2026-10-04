@@ -199,6 +199,13 @@ done
 pub v0.1.1-rc.1 v0.1.1-rc.1
 h=$(sed -n 's/^HOME=//p' "$FX/env.gh.0"); case $h in /private/tmp/sr-*) pass "the dry gh's HOME is a fresh temp dir ($h)" ;; *) fail "the dry gh's HOME is '$h'" ;; esac
 grep -q -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' "$FX"/env.gh.* "$FX"/env.git.* && fail "the dry gh or git got GH_CONFIG_DIR or SSH_AUTH_SOCK" || pass "the dry gh and git get no GH_CONFIG_DIR or SSH_AUTH_SOCK"
+# the list publishing reads again (the stamp does not bind it): the main package last, and all
+# four names; a changed list is refused before any call at all
+for bad in "sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal" "sheepr-linux-arm64 sheepr-linux-x64 sheepr"; do
+  sed -i.bak "s/^SR_NPM_PKGS=.*/SR_NPM_PKGS='$bad'/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+  pub v0.1.0 v0.1.0; r=$?; g checkout -q scripts/release.conf
+  [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "a list of '$bad': refused before any call" || fail "list '$bad': rc=$r calls=$(head -1 "$FX/calls" 2>/dev/null) $(tail -1 "$FX/o")"
+done
 # an npm name that is not the owner's, or not on npm yet: refused before any git or gh call
 nogh() { ! grep -q -e '^gh ' -e '^git ' "$FX/calls"; }
 pub v0.1.0 v0.1.0 >/dev/null; h=$(sed -n 's/^HOME=//p' "$FX/env.npm.0" 2>/dev/null)
