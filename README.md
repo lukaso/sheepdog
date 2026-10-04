@@ -23,12 +23,6 @@ is not on your PATH):
 curl -fsSL https://github.com/lukaso/sheepdog/releases/latest/download/install.sh | sh
 ```
 
-With npm or pnpm (a global install; see [npm](#npm) below):
-
-```sh
-npm i -g @lukaso/sheepdog
-```
-
 Tested on macOS 27 on Apple silicon. Intel Macs and macOS 12 to 26 are supported but not tested yet.
 
 **Linux**, a static binary (`x86_64` and `aarch64`):
@@ -116,11 +110,7 @@ a project kept in one of them is protected too. If a job reads a protected folde
 Disk Access once:
 System Settings > Privacy & Security > Full Disk Access, click +, press Cmd-Shift-G, paste the path
 of `Sheepdog.app` and press Return. It is in `~/Applications` for install.sh and for Homebrew with
-`--appdir=~/Applications`, in `/Applications` for Homebrew otherwise, and inside the package for npm
-and pnpm, where these commands print it:
-
-- npm: `find "$(npm root -g)/@lukaso" -name Sheepdog.app -prune`
-- pnpm: `find "$(pnpm root -g)/../.pnpm" -name Sheepdog.app -prune`
+`--appdir=~/Applications`, and in `/Applications` for Homebrew otherwise.
 
 In a standard (not admin) account the row may not appear in the list after you add it; the grant
 still works. An upgrade with install.sh keeps the grant. After another kind of upgrade, run
@@ -145,14 +135,7 @@ In an admin account the row then stays in the list, switched off; remove it with
 
 ## npm
 
-- Install globally (`npm i -g`, `pnpm add -g`). The `sheepdog` on your PATH then *is* sheepdog (a
-  small `sh` launcher replaces itself with it), so it keeps your process id, signal settings and
-  environment, and TERM to it reaches the job.
-- Do not run it through `npx`, `pnpm dlx` or `bunx`: they start it as a child of their own, so TERM
-  to the process you hold does not reach sheepdog.
-- pnpm's own launcher adds a `NODE_PATH` to the job's environment, as it does for every global bin.
-- If you use bun, check the installed files' permissions: a bun install has been measured to make
-  them world-writable. Do not install with bun as root or into a shared prefix.
+The npm packages are not published yet; they come in a later release. Do not install `@lukaso/sheepdog` from npm: that name is not ours.
 
 ## Uninstall
 
@@ -168,14 +151,6 @@ Then remove it the way you installed it:
   `~/.local/state/sheepdog`)
 - install.sh on macOS: `rm -rf ~/Applications/Sheepdog.app ~/.local/bin/sheepdog`
 - install.sh on Linux: `rm ~/.local/bin/sheepdog` (as root: `rm /usr/local/bin/sheepdog`)
-- npm: `npm rm -g @lukaso/sheepdog`
-- pnpm: `pnpm rm -g @lukaso/sheepdog`
-
-pnpm 10 keeps a copy of the app in its store after `pnpm rm -g`. To remove it:
-
-```sh
-find "$(pnpm root -g)/../.pnpm" -maxdepth 1 \( -name '@lukaso+sheepdog@*' -o -name '@lukaso+sheepdog-darwin-universal@*' \) -exec rm -rf {} +
-```
 
 sheepdog keeps its job journals in `$SHEEPDOG_STATE` if set, else in `$XDG_STATE_HOME/sheepdog` if
 that is an absolute path, else in `~/.local/state/sheepdog`; delete that directory to remove them. The privacy grant stays until you reset it (see
