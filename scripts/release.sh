@@ -418,8 +418,10 @@ NPMREG=https://registry.npmjs.org/   # pinned on the command line: an npmrc's re
 # before the next one. Another file there is refused at once. Installs read npm's abbreviated record,
 # which a cache may hold up to 300 s longer: an install in the first minutes may still miss a package.
 # One definition of the limit for the real and the dry run (the dry run's cell gives `sleep` a
-# stand-in); set here, so an exported NPM_WAIT_MAX cannot shorten it.
+# stand-in); set here, so an exported NPM_WAIT_MAX cannot shorten it. It counts the waits between
+# views (NPM_WAIT_MAX seconds of them); each view's own time comes on top.
 NPM_WAIT_MAX=1800 NPM_WAIT_STEP=10
+readonly NPM_WAIT_MAX NPM_WAIT_STEP   # a second assignment (an entry, a caller) fails loudly
 npm_visible() {
   w=0
   while :; do
@@ -429,7 +431,7 @@ npm_visible() {
       [ "$got" = "$3" ] && return 0
       die "$1@$2 is on npm with another file ($got) than the one just published; nothing after it is published"
     fi
-    [ "$w" -lt "$NPM_WAIT_MAX" ] || die "$1@$2 is not visible on npm after $NPM_WAIT_MAX s (the last view: $(sed -n 's/^npm error code \(.*\)$/\1/p' "$pc/err" | head -1 | grep . || echo "exit $r, an empty answer")). npm scans every upload before it shows it: it may still be scanning, or it held the version for review or blocked it. Look at https://www.npmjs.com/package/$1 and npm's email to ${SR_NPM_USER:-the owner}; once it shows, run publish-npm again (it skips a version already there with this file). A blocked version needs a new version number. Nothing after it is published"
+    [ "$w" -lt "$NPM_WAIT_MAX" ] || die "$1@$2 is not visible on npm after $((NPM_WAIT_MAX / NPM_WAIT_STEP)) waits of $NPM_WAIT_STEP s, $NPM_WAIT_MAX s in all, each view's own time on top (the last view: $(sed -n 's/^npm error code \(.*\)$/\1/p' "$pc/err" | head -1 | grep . || echo "exit $r, an empty answer")). npm scans every upload before it shows it: it may still be scanning, or it held the version for review or blocked it. Look at https://www.npmjs.com/package/$1 and npm's email to ${SR_NPM_USER:-the owner}; once it shows, run publish-npm again (it skips a version already there with this file). A blocked version needs a new version number. Nothing after it is published"
     sleep "$NPM_WAIT_STEP"; w=$((w + NPM_WAIT_STEP))
   done
 }
@@ -497,17 +499,10 @@ publish_npm_exec() { # dir
     elif ! { [ $r != 0 ] && printf '%s\n' "$vout" | cat - "$pc/err" | grep -q 'E404'; }; then
       die "cannot tell whether $p@$nv is on npm (npm view: exit $r, $(head -c 300 "$pc/err" | tr '\n' ' ')); nothing after it is published"
     fi
-    # npm's messages pass through to the terminal (its login prompt among them) and are kept: a
-    # version an earlier run published, which npm still scans, is refused as one that exists
-    rm -f "$pc/fifo"; mkfifo "$pc/fifo" || die "no fifo"
-    tee "$pc/perr" < "$pc/fifo" >&2 & tp=$!
-    tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" "$@" "$pc/$f" 2> "$pc/fifo"; r=$?
-    wait $tp
-    if [ $r != 0 ]; then
-      grep -q -i -e 'cannot publish over' -e 'previously published' "$pc/perr" \
-        || die "npm publish of $f failed (above); run publish-npm again to go on (a package already on npm with this file is skipped)"
-      echo "release: npm says $p@$nv was published already (an earlier run): waiting until npm shows it, then checking its file"
-    fi
+    # a refused upload stops at once, whatever npm says: its answer to a second upload while it still
+    # scans the first one is not measured, so the run does not guess which refusal is which
+    tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" "$@" "$pc/$f" \
+      || die "npm refused the upload of $f (above). If an earlier run uploaded $p@$nv, npm may still be scanning it (about five minutes, up to 15 or more), or it held it for review or blocked it: look at https://www.npmjs.com/package/$p and npm's email to ${SR_NPM_USER:-the owner}, wait, then run publish-npm again (it skips a version already there with this file). A blocked version needs a new version number. Nothing after it is published"
     npm_visible "$p" "$nv" "$want"
     echo "release: $p@$nv published, and npm shows this file"
   done

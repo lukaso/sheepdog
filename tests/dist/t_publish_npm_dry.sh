@@ -185,17 +185,21 @@ nv=$(grep -c '^npm view .* sheepr-darwin-universal@0.1.0 ' "$FX/calls"); sl=$(aw
   && pass "a package that never shows: $((wm / ws + 1)) views after its upload, $sl s of waits, refused naming review, blocking and the last error" || fail "the limit: rc=$r views=$nv (want $((wm / ws + 2)), with the one before the upload) sleeps=$sl (want $wm) $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; echo $((wm / ws)) > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
 [ $r = 0 ] && pass "a package that shows at the last view: published" || fail "the last view: rc=$r $(tail -1 "$FX/o")"
-# a rerun: npm refuses a version an earlier run published (still being scanned); the run waits for
-# it and checks its file, and goes on; a publish refused for another reason stops at once
-mkout "$D" v0.1.0; : > "$FX/pubexists.sheepr-linux-x64"; echo 2 > "$FX/processing.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubexists.sheepr-linux-x64" "$FX/processing.sheepr-linux-x64"
-[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] && grep -q 'published already' "$FX/o" \
-  && pass "a rerun whose version npm still scans: waited for, its file checked, then on" || fail "rerun exists: rc=$r $(order) $(tail -1 "$FX/o")"
+# a refused upload stops at once, whatever npm's text: what npm answers to a second upload while it
+# still scans the first is not measured, so the run does not guess. Its message covers the cases: an
+# earlier run's upload still scanned, held for review or blocked; a rerun skips a version already there
+mkout "$D" v0.1.0; : > "$FX/pubexists.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubexists.sheepr-linux-x64"
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] \
+  && grep -q 'may still be scanning it' "$FX/o" && grep -q 'skips a version already there with this file' "$FX/o" && grep -q 'blocked version needs a new version number' "$FX/o" \
+  && pass "a refused upload (an earlier run's version): stopped at once, no view after it, the cases named" || fail "rerun exists: rc=$r $(order) $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; : > "$FX/pubfail.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubfail.sheepr-linux-x64"
 [ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] && grep -q 'E401' "$FX/o" \
   && pass "a publish refused for another reason (E401): stopped at once, the reason shown" || fail "publish E401: rc=$r $(order) $(tail -1 "$FX/o")"
 # views after an upload that fail, or answer nothing, are waited through; the last error is named
 mkout "$D" v0.1.0; : > "$FX/viewfailafter.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/viewfailafter.sheepr-linux-arm64"
-[ $r = 1 ] && grep -q 'ETIMEDOUT' "$FX/o" && pass "views that keep failing after an upload: refused at the limit, ETIMEDOUT named" || fail "view errors: rc=$r $(tail -1 "$FX/o")"
+nva=$(grep -c '^npm view .* sheepr-linux-arm64@0.1.0 ' "$FX/calls"); sl=$(awk '{s += $1} END {print s + 0}' "$FX/sleeps" 2>/dev/null)
+[ $r = 1 ] && [ "$nva" = $((wm / ws + 2)) ] && [ "$sl" = "$wm" ] && grep -q 'not visible on npm after' "$FX/o" && grep -q 'ETIMEDOUT' "$FX/o" \
+  && pass "views that keep failing after an upload: waited through to the limit, then refused naming ETIMEDOUT" || fail "view errors: rc=$r views=$nva sleeps=$sl $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; echo 2 > "$FX/emptyafter.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/emptyafter.sheepr-linux-arm64"
 [ $r = 0 ] && [ "$(grep -c '^npm view .* sheepr-linux-arm64@0.1.0 ' "$FX/calls")" = 4 ] && pass "two empty answers after an upload: two more views, then on" || fail "empty answers: rc=$r views=$(grep -c '^npm view .* sheepr-linux-arm64@0.1.0 ' "$FX/calls")"
 # every package is checked before the first npm call: one changed before the run means none is published
