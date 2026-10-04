@@ -32,7 +32,9 @@ import sys
 
 OLD = ("sheep" + "dog",)                          # any case
 SCOPE = ("@" + "lukaso",)                         # any case, after AT_FORMS turn every spelling of @ into @
-# the @ as an HTML entity, percent-encoded, or as a backslash-u or backslash-x escape
+# six spellings of the @ besides @ itself: &commat;, &#64; and &#x40; (any leading zeros, with the ;),
+# %40, and the backslash-u and backslash-x escapes. Not every spelling: \u{40}, an entity without
+# its ;, %2540, octal and the full-width @ pass (the guard catches mistakes, not disguises)
 AT_FORMS = re.compile("&commat;|&#0*64;|&#x0*40;|%40|" + re.escape(chr(92)) + "[ux]0*40", re.I)
 OWNER = re.compile("lukas" + "o" + r"([-+\[%_*])")  # any case: the old scope and tarball shapes
 PREFIX = ("s" + "d_", "s" + "d-")                 # any case
@@ -104,7 +106,12 @@ def main():
         buf, i = cat.stdout, 0
         for sha in shas:
             head_end = buf.index(b"\n", i)
-            size = int(buf[i:head_end].split()[2])
+            head = buf[i:head_end].split()
+            if len(head) != 3:                     # `<sha> missing`: an index entry with no object
+                miss = [p for p, x, _ in entries if x == sha]
+                print(f"name-guard: the staged {miss[0] if miss else sha} is not in the object store", file=sys.stderr)
+                return 2
+            size = int(head[2])
             staged[sha] = buf[head_end + 1:head_end + 1 + size].decode("latin-1")
             i = head_end + 1 + size + 1
     allow = set()
@@ -115,7 +122,7 @@ def main():
         if mode == "120000":
             print(f"name-guard: {ALLOW} is a symlink (the list must be a file of its own)", file=sys.stderr)
             return 2
-        allow = {l.strip() for l in staged.get(sha, "").splitlines() if l.strip() and not l.startswith("#")}
+        allow = {l.strip() for l in staged.get(sha, "").split("\n") if l.strip() and not l.startswith("#")}   # "\n" only, as scan(): splitlines() also breaks at 0x85, inside UTF-8 letters
     elif os.path.lexists(os.path.join(repo, ALLOW)):
         print(f"name-guard: {ALLOW} is not tracked (an untracked list would open holes no one reviews)", file=sys.stderr)
         return 2
