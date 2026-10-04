@@ -133,4 +133,12 @@ python3 "$NS" packages "$D" "$nv" "$R" "sheepr sheepr-linux-arm64 sheepr-linux-x
 [ $r != 0 ] && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "npm-same.py: a list with a name twice is refused" || fail "npm-same repeated name: rc=$r $(tail -1 "$FX/o")"
 cp "$D/sheepr-linux-arm64-$nv.tgz" "$D/sheepr-linux-x64-$nv.tgz"; python3 "$NS" packages "$D" "$nv" "$R" "$L" > "$FX/o" 2>&1; r=$?
 [ $r != 0 ] && grep -q "sheepr-linux-x64-$nv.tgz: the package inside is 'sheepr-linux-arm64', not sheepr-linux-x64" "$FX/o" && pass "npm-same.py: a tarball holding another package than its file's is refused for that" || fail "npm-same swapped: rc=$r $(tail -1 "$FX/o")"
+# the list's order is the upload order: the main package must come last (its optional dependencies
+# name the others); and its optional dependencies are exactly the list's other names (a name there
+# that is not in the list would never have its npm owner checked)
+mk signed false; python3 "$NS" packages "$D" "$nv" "$R" "sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal" > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && grep -q 'last' "$FX/o" && pass "npm-same.py: a list with the main package first is refused" || fail "npm-same main first: rc=$r $(tail -1 "$FX/o")"
+python3 "$E" "$D/sheepr-$nv.tgz" "$FX/e.tgz" json-set package/package.json "optionalDependencies={\"sheepr-linux-arm64\": \"$nv\", \"sheepr-linux-x64\": \"$nv\", \"sheepr-darwin-universal\": \"$nv\", \"sheepr-extra\": \"$nv\"}" && mv "$FX/e.tgz" "$D/sheepr-$nv.tgz" || fail "could not make the optionalDependencies variant"
+python3 "$NS" packages "$D" "$nv" "$R" "$L" > "$FX/o" 2>&1; r=$?
+[ $r != 0 ] && grep -q 'optionalDependencies' "$FX/o" && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "npm-same.py: optional dependencies that are not the list's other names are refused, the list named" || fail "npm-same optionalDependencies: rc=$r $(tail -1 "$FX/o")"
 finish

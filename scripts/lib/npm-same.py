@@ -124,8 +124,11 @@ def pkgjson(kind, nv):
 def packages(d, nv, r, names):
     lic = {n: ref(os.path.join(r, n)) for n in LIC}
     made = ["sheepr" if k == "main" else "sheepr-darwin-universal" if k == "darwin" else "sheepr-" + k for k in ("main", "darwin", "linux-arm64", "linux-x64")]
-    if sorted(names.split()) != sorted(made):
+    order = names.split()
+    if sorted(order) != sorted(made):
         die("release.conf's SR_NPM_PKGS (%s) are not the packages npm-pack.sh writes (%s)" % (names, " ".join(made)))
+    if order[-1] != made[0]:
+        die("release.conf's SR_NPM_PKGS must name the main package (%s) last: publish-npm uploads in that order, and the main one's optional dependencies name the others" % made[0])
     for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
         pk = "sheepr" if kind == "main" else "sheepr-darwin-universal" if kind == "darwin" else "sheepr-" + kind
         fn = "%s-%s.tgz" % (pk, nv)
@@ -142,6 +145,8 @@ def packages(d, nv, r, names):
         try: pj = json.loads(f["package/package.json"][2])
         except ValueError: die("%s: package.json is not JSON" % fn)
         if pj.get("name") != pk: die("%s: the package inside is %r, not %s" % (fn, pj.get("name"), pk))
+        if kind == "main" and sorted(pj.get("optionalDependencies") or {}) != sorted(order[:-1]):
+            die("%s: optionalDependencies name %s, not release.conf's SR_NPM_PKGS other than %s (%s)" % (fn, sorted(pj.get("optionalDependencies") or {}), pk, " ".join(order[:-1])))
         if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))
         # exact modes: 0755 for the executable, 0644 for everything else
         exe = "package/Sheepr.app/Contents/MacOS/sheepr" if kind == "darwin" else "package/bin/sheepr"
