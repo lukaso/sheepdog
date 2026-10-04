@@ -93,7 +93,7 @@ REG="--registry=https://registry.npmjs.org/"
   && pass "before any git or gh call: the npm owners of all four names" || fail "the first calls: $(sed -n 1,4p "$FX/calls" | tr '\n' ',')"
 [ "$(grep -c '^git ls-remote https://github.com/lukaso/sheepr refs/tags/v0.1.0\*$' "$FX/calls")" = 2 ] \
   && pass "the tag is read from github.com/lukaso/sheepr itself (twice)" || fail "ls-remote: $(grep ls-remote "$FX/calls" | head -1)"
-bad=""; for f in "$FX"/env.*; do for k in $(sed 's/=.*//' "$f"); do
+bad=""; for f in "$FX"/env.gh.* "$FX"/env.git.*; do for k in $(sed 's/=.*//' "$f"); do   # npm has its own class and row
   case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac
 done; done
 [ -z "$bad" ] && pass "gh and git got only the named environment" || fail "extra environment:$(printf '%s\n' $bad | sort -u | tr '\n' ' ')"
