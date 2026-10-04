@@ -101,7 +101,8 @@ checks() {
   done
   if [ -n "$prev" ]; then
     pc=$(counter_at "$prev")
-    [ -z "$pc" ] || [ "$c" -gt "$pc" ] || die "the build counter $c is not above $prev's ($pc)"
+    [ -n "$pc" ] || die "the previous tag $prev has no readable SR_BUILD_COUNTER in scripts/release.conf (a tag from before a rename keeps it under another name): delete that tag, or tag a commit whose counter can be read"
+    [ "$c" -gt "$pc" ] || die "the build counter $c is not above $prev's ($pc)"
   fi
   echo "release: $tag checks passed (commit $commit, build $c${prev:+, previous $prev})"
 }

@@ -55,6 +55,15 @@ done
 sed -i.bak '/^## 0\.1\.0 /d' "$REPO/CHANGELOG.md" && rm -f "$REPO/CHANGELOG.md.bak" && printf '\n## 0.1.0 (not yet released)\n' >> "$REPO/CHANGELOG.md"
 fx_release 0.1.0 3 v0.1.0
 chk ok "the final above the last rc's counter, its CHANGELOG entry dated" v0.1.0
+# a previous tag whose release.conf has no readable counter (a tag from before a rename keeps it
+# under another name) is refused, not passed over; control: a readable counter of 0 below passes
+fx_release 0.2.0 1 v0.2.0-rc.1; g tag -d v0.2.0-rc.1 >/dev/null
+sed -i.bak 's/^SR_BUILD_COUNTER=/XX_BUILD_COUNTER=/' "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+g commit -q -am "a counter under another name" && g tag -a v0.2.0-rc.1 -m v0.2.0-rc.1
+[ -z "$(g show v0.2.0-rc.1:scripts/release.conf | grep '^SR_BUILD_COUNTER=')" ] || fail "the fixture's previous tag still has a readable counter"
+fx_release 0.2.0 1 v0.2.0-rc.2; chk no "a previous tag with no readable build counter" v0.2.0-rc.2
+grep -qF "the previous tag v0.2.0-rc.1 has no readable" "$FX/o" && pass "  that refusal names the previous tag" || fail "  the refusal: $(tail -1 "$FX/o")"
+fx_release 0.3.0 0 v0.3.0-rc.1; fx_release 0.3.0 1 v0.3.0-rc.2; chk ok "control: a previous tag's readable counter of 0, and 1 above it" v0.3.0-rc.2
 
 # the signing and publishing entries refuse before anything runs
 fx_shims "$FX/sh" codesign xcrun security gh docker cargo npm ditto lipo spctl
