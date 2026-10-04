@@ -40,7 +40,10 @@ integrity() { python3 -c 'import base64,hashlib,sys; print("sha512-" + base64.b6
 # the stand-in answers `view --json` as npm 11.6.0 was measured to (absent: exit 1 and an E404 on
 # both streams; present: the integrity, quoted): from $FX/view.<package> (present), or
 # $FX/viewfail.<package> (another failure); it runs $FX/onview.<package> first if there is one.
-# `publish` records the sha256 of the file it was given, and runs $FX/onpublish.<package>.
+# `publish` records the sha256 of the file it was given, and runs $FX/onpublish.<package>. After a
+# publish, `view` shows that file's integrity once $FX/processing.<package> (a count of "not found"
+# answers, as npm answers while it processes a new package: measured 2026-10-04) has run down, or
+# another integrity if $FX/pubwrong.<package> exists.
 cat > "$FX/npm" <<EOF
 #!/bin/sh
 n=\$(ls "$FX" | grep -c '^env\\.npm\\.'); env > "$FX/env.npm.\$n"
@@ -50,6 +53,12 @@ case \$1 in
     [ -f "$FX/onview.\$p" ] && sh "$FX/onview.\$p"
     if [ -f "$FX/viewempty.\$p" ]; then exit 0; fi
     if [ -f "$FX/viewfail.\$p" ]; then printf '{\\n  "error": {\\n    "code": "ETIMEDOUT"\\n  }\\n}\\n'; echo "npm error code ETIMEDOUT" >&2; exit 1; fi
+    if [ -f "$FX/pub.\$p" ]; then
+      k=\$(cat "$FX/processing.\$p" 2>/dev/null || echo 0)
+      if [ "\$k" -gt 0 ]; then echo \$((k - 1)) > "$FX/processing.\$p"; printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1; fi
+      if [ -f "$FX/pubwrong.\$p" ]; then printf '"sha512-WRONG"\\n'; exit 0; fi
+      printf '"%s"\\n' "\$(cat "$FX/pub.\$p")"; exit 0
+    fi
     if [ -f "$FX/view.\$p" ]; then printf '"%s"\\n' "\$(cat "$FX/view.\$p")"; exit 0; fi
     printf '{\\n  "error": {\\n    "code": "E404"\\n  }\\n}\\n'; echo "npm error code E404" >&2; exit 1 ;;
   whoami) [ -f "$FX/onwhoami" ] && sh "$FX/onwhoami"; if [ -f "$FX/whoamifail" ]; then echo "npm error code ENEEDAUTH" >&2; exit 1; fi; cat "$FX/whoami"; exit 0 ;;
@@ -59,6 +68,7 @@ case \$1 in
     if [ -f "$FX/owner.\$p" ]; then while read -r u; do echo "\$u <\$u@example.com>"; done < "$FX/owner.\$p"; else echo "lukasco <lukasco@example.com>"; fi; exit 0 ;;
   publish) for a; do last=\$a; done; p=\$(basename "\$last" | sed 's/^\\(.*\\)-[0-9][0-9.a-z-]*\\.tgz\$/\\1/')
     echo "\$p \$(shasum -a 256 "\$last" | cut -d' ' -f1) \$last" >> "$FX/pubsha"
+    python3 -c 'import base64, hashlib, sys; print("sha512-" + base64.b64encode(hashlib.sha512(open(sys.argv[1], "rb").read()).digest()).decode())' "\$last" > "$FX/pub.\$p"
     [ -f "$FX/onpublish.\$p" ] && sh "$FX/onpublish.\$p"; exit 0 ;;
 esac
 exit 1
@@ -66,7 +76,7 @@ EOF
 chmod +x "$FX/npm"
 echo lukasco > "$FX/whoami"
 pub() { # tag -> rc; output in $FX/o
-  rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha"
+  rm -f "$FX/calls" "$FX"/env.npm.* "$FX/pubsha" "$FX"/pub.*
   (cd "$REPO" && env HOME="$FX/ghome" NPM_TOKEN="$DECOY" NODE_AUTH_TOKEN="$DECOY" npm_config__authToken="$DECOY" GH_TOKEN="$DECOY" \
     HTTPS_PROXY=http://127.0.0.1:9 NPM_CONFIG_USERCONFIG="$FX/decoy-npmrc" \
     SR_PUBLISH_DRY_NPM="$FX/npm" sh scripts/release.sh __publish-npm-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
@@ -78,7 +88,7 @@ mkout "$D" v0.1.0
 mkout "$FX/out/v0.1.0-unsigned" v0.1.0
 pub v0.1.0; r=$?
 [ $r = 0 ] && pass "a dry publish-npm: done" || fail "dry publish-npm: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
-[ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr,publish sheepr," ] \
+[ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] \
   && pass "the order: each package asked for, then published; platform packages first, the main one last" || fail "the order: $(order)"
 # each publish: the registry pinned, no --tag (a final), and a private copy of <out>/v0.1.0's file
 # whose bytes, when npm got it, were the manifest's
@@ -89,8 +99,8 @@ bad=""; for p in $PK; do
   [ "$(awk -v p="$p" '$1 == p {print $2}' "$FX/pubsha")" = "$(shasum -a 256 "$D/$p-0.1.0.tgz" | cut -d' ' -f1)" ] || bad="$bad [$p: not the manifest's bytes]"
 done
 [ -z "$bad" ] && pass "each publish: the registry pinned, no --tag (a final), a private copy holding the manifest's bytes" || fail "publish lines:$bad"
-[ "$(grep -c "^npm view --json --prefer-online $REG sheepr[a-z0-9-]*@0.1.0 dist.integrity\$" "$FX/calls")" = 4 ] \
-  && pass "each view: --json, --prefer-online (not npm's cache), the registry pinned" || fail "view lines: $(grep '^npm view' "$FX/calls" | head -1)"
+[ "$(grep -c "^npm view --json --prefer-online $REG sheepr[a-z0-9-]*@0.1.0 dist.integrity\$" "$FX/calls")" = 8 ] \
+  && pass "each view (4 before the uploads, 4 after them): --json, --prefer-online (not npm's cache), the registry pinned" || fail "view lines: $(grep '^npm view' "$FX/calls" | head -1)"
 [ "$(sed -n 1,5p "$FX/calls" | tr '\n' ',')" = "npm whoami $REG,npm owner ls sheepr-linux-arm64 $REG,npm owner ls sheepr-linux-x64 $REG,npm owner ls sheepr-darwin-universal $REG,npm owner ls sheepr $REG," ] \
   && pass "before any view or upload: npm whoami, then the owners of all four names, the registry pinned" || fail "the first calls: $(sed -n 1,5p "$FX/calls" | tr '\n' ',')"
 grep -q 'unsigned' "$FX/calls" && fail "a call names the -unsigned sibling" || pass "the -unsigned sibling's packages are never named"
@@ -138,9 +148,21 @@ done
 mkout "$D" v0.1.0; printf 'sed -i.bak "s/^SR_NPM_PKGS=.*/SR_NPM_PKGS=\x27sheepr sheepr-linux-arm64 sheepr-linux-x64 sheepr-darwin-universal\x27/" "%s" && rm -f "%s.bak"\n' "$REPO/scripts/release.conf" "$REPO/scripts/release.conf" > "$FX/onwhoami"
 pub v0.1.0; r=$?; rm -f "$FX/onwhoami"; changed=$(grep -c '^SR_NPM_PKGS=.sheepr sheepr-linux' "$REPO/scripts/release.conf"); g checkout -q scripts/release.conf
 [ "$changed" = 1 ] || fail "the whoami hook did not change the list (the row would prove nothing)"
-[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr,publish sheepr," ] \
+[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] \
   && [ "$(sed -n 1,5p "$FX/calls" | tr '\n' ',')" = "npm whoami $REG,npm owner ls sheepr-linux-arm64 $REG,npm owner ls sheepr-linux-x64 $REG,npm owner ls sheepr-darwin-universal $REG,npm owner ls sheepr $REG," ] \
   && pass "a list changed after its check: the checked list is the one the owner check and the uploads use" || fail "list changed mid-run: rc=$r $(order) | $(sed -n 1,5p "$FX/calls" | tr '\n' ',')"
+# after each upload, publishing waits until npm shows that file (npm may process a new package for
+# minutes before it shows: measured 2026-10-04), so the main package goes up only when the platform
+# packages its optional dependencies name are there
+mkout "$D" v0.1.0; echo 2 > "$FX/processing.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-linux-x64"
+[ $r = 0 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal,publish sheepr-darwin-universal,view sheepr-darwin-universal,view sheepr,publish sheepr,view sheepr," ] \
+  && pass "a package npm is still processing: waited for (three views), then the next" || fail "processing: rc=$r $(order)"
+mkout "$D" v0.1.0; echo 99 > "$FX/processing.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/processing.sheepr-darwin-universal"
+[ $r = 1 ] && ! grep -q '^npm publish .*/sheepr-0.1.0.tgz$' "$FX/calls" && grep -q 'not visible on npm' "$FX/o" \
+  && pass "a package that never shows: refused, the main package not published" || fail "never visible: rc=$r $(order) $(tail -1 "$FX/o")"
+mkout "$D" v0.1.0; : > "$FX/pubwrong.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/pubwrong.sheepr-linux-arm64"
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64," ] && grep -q 'than the one just published' "$FX/o" \
+  && pass "npm showing another file than the one just published: refused there" || fail "wrong file shown: rc=$r $(order) $(tail -1 "$FX/o")"
 # every package is checked before the first npm call: one changed before the run means none is published
 mkout "$D" v0.1.0; echo x >> "$D/sheepr-0.1.0.tgz"; pub v0.1.0; r=$?
 [ $r = 1 ] && [ ! -e "$FX/calls" ] && pass "a package changed after npm-check, before the run: refused, npm never called" || fail "changed before the run: rc=$r $(order)"
@@ -180,13 +202,13 @@ pub v0.1.0; r=$?; rm -f "$FX/onview.sheepr-darwin-universal"
   && pass "a source changed between its check and its upload: npm got the checked bytes" || fail "changed after the check: rc=$r $(cat "$FX/pubsha" 2>/dev/null | tr '\n' ' ')"
 # a view that fails for another reason than E404 cannot say the version is absent: refused there
 mkout "$D" v0.1.0; : > "$FX/viewfail.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/viewfail.sheepr-darwin-universal"
-[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-darwin-universal," ] && grep -q 'cannot tell' "$FX/o" \
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal," ] && grep -q 'cannot tell' "$FX/o" \
   && pass "a view that fails (not E404): refused there, nothing after it published" || fail "view failure: rc=$r $(order) $(tail -1 "$FX/o")"
 
 # a package changed during the run (by the first upload, as anything else could): refused at it
 mkout "$D" v0.1.0; echo "echo x >> '$D/sheepr-darwin-universal-0.1.0.tgz'" > "$FX/onpublish.sheepr-linux-arm64"
 pub v0.1.0; r=$?; rm -f "$FX/onpublish.sheepr-linux-arm64"
-[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] \
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64," ] \
   && grep -q 'sheepr-darwin-universal-0.1.0.tgz does not match its manifest hash' "$FX/o" \
   && pass "a package changed during the run: refused just before its upload, nothing after it published" || fail "changed mid-run: rc=$r $(order) $(tail -1 "$FX/o")"
 
