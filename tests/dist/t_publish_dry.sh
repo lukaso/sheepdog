@@ -60,6 +60,7 @@ if [ \$n -ge 1 ] && [ -e "$FX/moved" ]; then cat "$FX/moved"; else cat "$FX/remo
 EOF
 cat > "$FX/npm" <<EOF
 #!/bin/sh
+n=\$(ls "$FX" | grep -c '^env\\.npm\\.'); env > "$FX/env.npm.\$n"
 echo "npm \$*" >> "$FX/calls"
 case \$1 in owner) p=\$3
   if [ -f "$FX/ownerfail.\$p" ]; then echo "npm error code E404" >&2; exit 1; fi
@@ -162,30 +163,37 @@ ln -s "$OUT/gh" "$FX/gh-link"
 printf '#!/bin/sh\nexec "%s" "$@"\n' "$OUT/gh" > "$FX/gh-wrap"; chmod +x "$FX/gh-wrap"
 for spec in "outside:$OUT/gh" "symlink:$FX/gh-link" "dotdot:$FX/../$(basename "$OUT")/gh"; do
   l=${spec%%:*} p=${spec#*:}; rm -f "$OUT/called"
-  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$p" SR_PUBLISH_DRY_GIT="$FX/git" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$p" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
     sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
-  [ $r != 0 ] && [ ! -e "$OUT/called" ] && pass "__publish-dry, a $l gh: refused, the outside gh never called" || fail "__publish-dry, $l: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
+  [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_GH' "$FX/o" && pass "__publish-dry, a $l gh: refused for the gh stand-in, the outside gh never called" || fail "__publish-dry, $l: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 done
 # a stand-in whose name ends in a newline, next to a symlink without it: refused, the symlink's
 # target never called (the checked name and the run name must be one string)
 nl='
 '
 cp "$FX/gh" "$FX/ghn$nl"; ln -s "$OUT/gh" "$FX/ghn"; rm -f "$OUT/called"
-(cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/ghn$nl" SR_PUBLISH_DRY_GIT="$FX/git" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+(cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/ghn$nl" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
   sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
-[ $r != 0 ] && [ ! -e "$OUT/called" ] && pass "a stand-in name ending in a newline: refused, the symlink's target never called" || fail "newline name: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
+[ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_GH' "$FX/o" && pass "a stand-in name ending in a newline: refused for the gh stand-in, the symlink's target never called" || fail "newline name: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 # a wrapper inside the fixtures that execs a gh outside them cannot be seen before it runs: what
 # it reaches runs with a fresh temp HOME and no token or transport variable, so a real gh would
 # have no login and could not write
 rm -f "$OUT/called" "$OUT/env"
 (cd "$REPO" && env HOME="$FX/ghome" GH_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" SR_PUBLISH_DRY_GH="$FX/gh-wrap" \
-  SR_PUBLISH_DRY_GIT="$FX/git" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1
+  SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1
 if [ -e "$OUT/env" ]; then
   h=$(sed -n 's/^HOME=//p' "$OUT/env")
   case $h in /private/tmp/sr-*) ! grep -q -e '^GH_TOKEN=' -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' -e '^GITHUB_TOKEN=' "$OUT/env" \
       && pass "a wrapper reaching an outside gh: that gh ran with a temp HOME and no token or transport" || fail "wrapper: the outside gh got a token or transport" ;;
     *) fail "wrapper: the outside gh's HOME is '$h'" ;; esac
-else pass "a wrapper reaching an outside gh: not reached"; fi
+else fail "a wrapper reaching an outside gh: not reached, so its environment is not checked ($(tail -1 "$FX/o"))"; fi
+printf '#!/bin/sh\necho "OUTSIDE npm $*" >> "%s/called"\nexit 0\n' "$OUT" > "$OUT/npm"; chmod +x "$OUT/npm"; ln -s "$OUT/npm" "$FX/npm-link"
+for spec in "outside:$OUT/npm" "symlink:$FX/npm-link"; do
+  l=${spec%%:*} p=${spec#*:}; rm -f "$OUT/called"
+  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$p" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+    sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
+  [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_NPM' "$FX/o" && pass "__publish-dry, a $l npm: refused for the npm stand-in, the outside npm never called" || fail "__publish-dry, $l npm: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1) $(tail -1 "$FX/o")"
+done
 # the dry run's gh and git get a fresh temp HOME, and no GH_CONFIG_DIR or SSH_AUTH_SOCK: even a
 # real gh that got this far would have no login
 pub v0.1.1-rc.1 v0.1.1-rc.1
@@ -193,6 +201,8 @@ h=$(sed -n 's/^HOME=//p' "$FX/env.gh.0"); case $h in /private/tmp/sr-*) pass "th
 grep -q -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' "$FX"/env.gh.* "$FX"/env.git.* && fail "the dry gh or git got GH_CONFIG_DIR or SSH_AUTH_SOCK" || pass "the dry gh and git get no GH_CONFIG_DIR or SSH_AUTH_SOCK"
 # an npm name that is not the owner's, or not on npm yet: refused before any git or gh call
 nogh() { ! grep -q -e '^gh ' -e '^git ' "$FX/calls"; }
+pub v0.1.0 v0.1.0 >/dev/null; h=$(sed -n 's/^HOME=//p' "$FX/env.npm.0" 2>/dev/null)
+case $h in /private/tmp/sr-dryhome.*) ! grep -l "$DECOY" "$FX"/env.npm.* >/dev/null 2>&1 && pass "the dry run's npm: a temp HOME, no decoy token" || fail "the dry run's npm got a decoy token" ;; *) fail "the dry run's npm HOME is '$h'" ;; esac
 echo stranger > "$FX/owner.sheepr"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/owner.sheepr"
 [ $r = 1 ] && nogh && grep -q 'sheepr on npm belongs to stranger, not to lukasco' "$FX/o" && pass "an npm name owned by someone else: refused before any git or gh call" || fail "npm owner: rc=$r $(seq) $(tail -1 "$FX/o")"
 : > "$FX/ownerfail.sheepr-linux-arm64"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/ownerfail.sheepr-linux-arm64"
