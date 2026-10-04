@@ -23,7 +23,7 @@ set -- "$(
       exe=bin/sheepr ;;
     (*) echo "sheepr: no npm package for $(uname -s)" >&2; exit 1 ;;
   esac
-  # nested under this package, or hoisted beside it (npm's flat layout; pnpm: a sibling link)
+  # nested under this package, or hoisted beside it (the flat layout of npm; pnpm: a sibling link)
   for dir in "$pkg/node_modules/sheepr-$plat" "$pkg/../sheepr-$plat"; do
     if [ -x "$dir/$exe" ]; then printf '%s' "$dir/$exe"; exit 0; fi
   done
