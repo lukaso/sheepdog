@@ -71,6 +71,20 @@ r=$(repo a.txt "the $o app"); printf 'clean\n' > "$r/a.txt"
 row "an old name staged while the file on disk is clean is a hit" 1 "a.txt:1: $o" "$r"
 r=$(repo a.c "$b=%d"); mkdir -p "$r/scripts/lib"; printf '%s\n' "$b" > "$r/scripts/lib/name-guard.allow"
 row "an allow-list that is not tracked is exit 2" 2 "is not tracked" "$r"
+# round 2: rows for properties built before, and the allow-list read from the index
+row "the old scope with &#x40; is a hit" 1 "a.html:1:" "$(repo a.html "<p>&#x40;$u/x</p>")"
+r=$(repo a.txt clean); printf 'the %s app\n' "$o" > "$r/a.txt"
+row "an old name on disk over a clean index is a hit" 1 "a.txt:1: $o" "$r"
+r=$(repo a.txt clean); ln -s /x/clean "$r/lnk" && git -C "$r" add lnk && rm "$r/lnk" && ln -s "/x/$o/y" "$r/lnk"
+row "a symlink re-pointed on disk after staging, to the old name, is a hit" 1 "lnk:1: $o" "$r"
+r=$(repo a.c "$b=%d ${p1}NEW" scripts/lib/name-guard.allow "$b"); printf '%sNEW\n' "$p1" >> "$r/scripts/lib/name-guard.allow"
+row "a word added to the allow-list but not staged is not allowed" 1 "a.c:1: ${p1}NEW" "$r"
+r=$(repo a.c "$b=%d"); mkdir -p "$r/scripts/lib"; printf '%s\n' "$b" > "$r/elsewhere"; ln -s ../../elsewhere "$r/scripts/lib/name-guard.allow" && git -C "$r" add scripts/lib/name-guard.allow
+row "an allow-list that is a symlink is exit 2" 2 "is a symlink" "$r"
+# the @ spelled as an HTML entity, percent-encoded, or as a \u or \x escape (forms 1-6, in this order)
+i=0; for f in '&commat;' '&#064;' '&#x0040;' '%40' '\u0040' '\x40'; do
+  i=$((i + 1)); row "the old scope with an encoded @ (form $i of 6) is a hit" 1 "a.txt:1:" "$(repo a.txt "see ${f}$u/x")"
+done
 mkdir -p "$FX/plain" && echo x > "$FX/plain/a"
 row "outside a repo is exit 2" 2 "git ls-files failed" "$FX/plain"
 if [ "$(id -u)" != 0 ]; then

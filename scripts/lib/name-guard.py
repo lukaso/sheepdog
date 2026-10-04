@@ -14,7 +14,7 @@ fails on substrings, in file contents and in path names alike:
     except in a word listed exactly in REPO/scripts/lib/name-guard.allow (one word per line; a
     line that starts with # is a comment). A listed word that occurs nowhere is a failure too,
     so the list cannot keep a hole open after its word is gone (the list's own lines do not
-    count as occurrences).
+    count as occurrences). The list is read as staged, and must not be a symlink.
 Both the file on disk and its staged content are read (a staged old name over a clean file is a
 hit); an allow-list that exists but is not tracked is exit 2. A submodule is not scanned, nor
 content that is not ASCII-compatible (UTF-16, compressed). A word is the run of [A-Za-z0-9_.-]
@@ -31,7 +31,9 @@ import subprocess
 import sys
 
 OLD = ("sheep" + "dog",)                          # any case
-SCOPE = ("@" + "lukaso", "&#64;" + "lukaso", "&#x40;" + "lukaso")   # any case (the @, as typed or as an HTML entity)
+SCOPE = ("@" + "lukaso",)                         # any case, after AT_FORMS turn every spelling of @ into @
+# the @ as an HTML entity, percent-encoded, or as a backslash-u or backslash-x escape
+AT_FORMS = re.compile("&commat;|&#0*64;|&#x0*40;|%40|" + re.escape(chr(92)) + "[ux]0*40", re.I)
 OWNER = re.compile("lukas" + "o" + r"([-+\[%_*])")  # any case: the old scope and tarball shapes
 PREFIX = ("s" + "d_", "s" + "d-")                 # any case
 ALLOW = "scripts/lib/name-guard.allow"
@@ -50,8 +52,12 @@ def word_at(text, i, n):
 def scan(label, text, allow, seen, hits, counts=True):
     low = text.lower()
     for ln, (line, lline) in enumerate(zip(text.split("\n"), low.split("\n")), 1):
-        for pat in OLD + SCOPE:
+        aline = AT_FORMS.sub("@", lline)
+        for pat in OLD:
             if pat.lower() in lline:
+                hits.append(f"{label}:{ln}: {pat}")
+        for pat in SCOPE:
+            if pat.lower() in aline:
                 hits.append(f"{label}:{ln}: {pat}")
         for m in OWNER.finditer(lline):
             hits.append(f"{label}:{ln}: {m.group(0)}")
@@ -85,11 +91,11 @@ def main():
             continue
         meta, _, path = e.partition(b"\t")
         mode, sha = meta.split()[:2]
-        entries.append((path.decode("utf-8", "surrogateescape"), None if mode == b"160000" else sha.decode()))
-    paths = [p for p, _ in entries]
+        entries.append((path.decode("utf-8", "surrogateescape"), None if mode == b"160000" else sha.decode(), mode.decode()))
+    paths = [p for p, _, _ in entries]
     # the index's content too: an old name staged over a clean file on disk is a hit
     staged = {}
-    shas = [sha for _, sha in entries if sha]
+    shas = [sha for _, sha, _ in entries if sha]
     if shas:
         cat = git("cat-file", "--batch", data="".join(x + "\n" for x in shas).encode())
         if cat.returncode != 0:
@@ -102,14 +108,19 @@ def main():
             staged[sha] = buf[head_end + 1:head_end + 1 + size].decode("latin-1")
             i = head_end + 1 + size + 1
     allow = set()
-    if os.path.exists(os.path.join(repo, ALLOW)):
-        if ALLOW not in paths:
-            print(f"name-guard: {ALLOW} is not tracked (an untracked list would open holes no one reviews)", file=sys.stderr)
+    # the list as staged (an unstaged word is not part of what is committed); not a symlink
+    listed = [(sha, mode) for p, sha, mode in entries if p == ALLOW]
+    if listed:
+        sha, mode = listed[0]
+        if mode == "120000":
+            print(f"name-guard: {ALLOW} is a symlink (the list must be a file of its own)", file=sys.stderr)
             return 2
-        with open(os.path.join(repo, ALLOW), encoding="utf-8") as f:
-            allow = {l.strip() for l in f if l.strip() and not l.startswith("#")}
+        allow = {l.strip() for l in staged.get(sha, "").splitlines() if l.strip() and not l.startswith("#")}
+    elif os.path.lexists(os.path.join(repo, ALLOW)):
+        print(f"name-guard: {ALLOW} is not tracked (an untracked list would open holes no one reviews)", file=sys.stderr)
+        return 2
     seen, hits = set(), []
-    for p, sha in entries:
+    for p, sha, _ in entries:
         scan(f"(path) {p}", p, allow, seen, hits)
         full = os.path.join(repo, p)
         try:
