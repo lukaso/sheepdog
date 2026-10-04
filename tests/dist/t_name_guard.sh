@@ -12,7 +12,7 @@ set -u
 fx_dir
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 GIT_CEILING_DIRECTORIES=$FX; export GIT_CEILING_DIRECTORIES
-G="$SD_ROOT/scripts/lib/name-guard.py"
+G="$SR_ROOT/scripts/lib/name-guard.py"
 o=sheep; o="${o}dog"; O=$(printf %s "$o" | tr a-z A-Z); Oc="S${o#s}"
 p1=S; p1="${p1}D_"; p2=s; p2="${p2}d-"; p3=s; p3="${p3}d_"
 b=bs; b="${b}d_r"; sc=@; sc="${sc}lukaso"; tp=lukaso; tp="${tp}-sheep"
@@ -55,9 +55,9 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 # the real tree
-out=$(python3 "$G" "$SD_ROOT" 2>&1); rc=$?
-k=$(git -C "$SD_ROOT" ls-files | wc -l | tr -d ' ')
-if git -C "$SD_ROOT" ls-files --error-unmatch scripts/lib/name-guard.py >/dev/null 2>&1 \
+out=$(python3 "$G" "$SR_ROOT" 2>&1); rc=$?
+k=$(git -C "$SR_ROOT" ls-files | wc -l | tr -d ' ')
+if git -C "$SR_ROOT" ls-files --error-unmatch scripts/lib/name-guard.py >/dev/null 2>&1 \
    && printf '%s\n' "$out" | tail -1 | grep -F "scanned $k tracked paths" >/dev/null; then
   pass "the guard scanned every tracked path ($k), its own file included"
 else fail "the guard did not scan every tracked path (want $k, its own file tracked): $(printf '%s' "$out" | tail -1)"; fi

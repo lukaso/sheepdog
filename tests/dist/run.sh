@@ -6,7 +6,7 @@
 # runner stops the running cell (by the pid recorded here) and prints what it wrote so far.
 set -u
 cd "$(dirname "$0")" || exit 3
-logdir=$(mktemp -d "${TMPDIR:-/tmp}/sd-dist.XXXXXX") || exit 3
+logdir=$(mktemp -d "${TMPDIR:-/tmp}/sr-dist.XXXXXX") || exit 3
 cp="" gp="" cur=""
 # stop the running cell: TERM to its `timeout`, then, after at most 5 s, KILL its whole process
 # group (GNU timeout leads a group of its own; this runner started it and confirmed the group id

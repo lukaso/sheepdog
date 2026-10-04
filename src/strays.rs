@@ -1,6 +1,6 @@
-//! `sheepdog strays` (PLAN.md §3.0, PHASE2.md D8): list this user's orphans, biggest memory
+//! `sheepr strays` (PLAN.md §3.0, PHASE2.md D8): list this user's orphans, biggest memory
 //! first, with the best-known origin of each; `--kill` kills the listed rows that match a filter,
-//! each as `sheepdog kill PID:ID` with the identity read at the listing.
+//! each as `sheepr kill PID:ID` with the identity read at the listing.
 //!
 //! What counts as an orphan: macOS: parent launchd, `puniq` not 1 (it was reparented), and not a
 //! helper of a live app (its responsible process is alive, is not itself, and the stray's
@@ -17,7 +17,7 @@ use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
 use crate::{parse_long_duration, say, shown, RULE_AGE, RULE_SIZE};
-use sheepdog::ident::same;
+use sheepr::ident::same;
 use std::collections::HashMap;
 use std::ffi::{CString, OsString};
 use std::io::Write;
@@ -79,11 +79,11 @@ struct Args {
     yes: bool,
 }
 
-pub(crate) const USAGE: &str = "sheepdog strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]";
+pub(crate) const USAGE: &str = "sheepr strays [--min-mem SIZE] [--older-than DURATION] [--cmd REGEX] [--pid PID:ID]... [--json] [--kill [--yes]]";
 
 /// A usage error: what was wrong, then the usage.
 fn usage_because(why: String) -> i32 {
-    crate::fail!("sheepdog: strays: {why}");
+    crate::fail!("sheepr: strays: {why}");
     say!("usage: {USAGE}");
     2
 }
@@ -91,7 +91,7 @@ fn usage_because(why: String) -> i32 {
 /// The arguments, or what was wrong with them (said in the usage error).
 fn parse(args: &[OsString]) -> Result<Args, String> {
     let mut a = Args { min_mem: 0, older_than: Duration::ZERO, cmd: None, pids: Vec::new(), json: false, kill: false, yes: false };
-    const PID_ID: &str = "PID:ID, a process and its id as `sheepdog strays --json` lists them";
+    const PID_ID: &str = "PID:ID, a process and its id as `sheepr strays --json` lists them";
     let mut i = 0;
     while i < args.len() {
         let flag = shown(&args[i]);
@@ -165,7 +165,7 @@ struct Row {
     tree: usize,
     /// named with --pid (read before the debug seam changes identities)
     named: bool,
-    /// the running job it belongs to ("j-..." or "sheepdog PID")
+    /// the running job it belongs to ("j-..." or "sheepr PID")
     job: Option<String>,
     pid1_child: bool,
     /// Linux: in a desktop app's scope (skipped unless named)
@@ -254,21 +254,21 @@ fn scan() -> Vec<Row> {
         // its proved tree: what `kill PID:ID` would take with it
         let mut t = crate::kill::Proved { known: HashMap::from([(p.pid, p.id)]), ever: std::collections::HashSet::from([p.id]), protected: protected.clone() };
         let tree_set = t.scan();
-        let sup_in_tree = tree_set.iter().find(|&&(q, _)| q != p.pid && crate::kill::is_sheepdog(q)).map(|&(q, _)| q);
+        let sup_in_tree = tree_set.iter().find(|&&(q, _)| q != p.pid && crate::kill::is_sheepr(q)).map(|&(q, _)| q);
         // a row that is itself a live supervisor, a member of a running job, or holds a live
         // supervisor in its tree: skipped by `--kill` unless named
         let job = jobs
             .get(&(p.pid, p.id))
             .cloned()
             .or_else(|| {
-                crate::kill::is_sheepdog(p.pid).then(|| match os::cmdline(p.pid).get(1).map(String::as_str) {
-                    Some("run") => format!("sheepdog {}, a supervisor", p.pid),
-                    Some(sub) => format!("sheepdog {} ({})", p.pid, crate::kill::clean(sub)),
-                    None => format!("sheepdog {}", p.pid),
+                crate::kill::is_sheepr(p.pid).then(|| match os::cmdline(p.pid).get(1).map(String::as_str) {
+                    Some("run") => format!("sheepr {}, a supervisor", p.pid),
+                    Some(sub) => format!("sheepr {} ({})", p.pid, crate::kill::clean(sub)),
+                    None => format!("sheepr {}", p.pid),
                 })
             })
-            .or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepdog {s}")))
-            .or_else(|| sup_in_tree.map(|s| format!("sheepdog {s} in its tree")));
+            .or_else(|| crate::kill::job_of(p.pid).map(|s| format!("sheepr {s}")))
+            .or_else(|| sup_in_tree.map(|s| format!("sheepr {s} in its tree")));
         let full = os::cmdline(p.pid).join(" ");
         rows.push(Row {
             pid: p.pid,
@@ -316,10 +316,10 @@ pub fn main(args: &[OsString]) -> i32 {
     };
     let filtered = a.min_mem > 0 || !a.older_than.is_zero() || re.is_some() || !a.pids.is_empty();
     if a.kill && !filtered {
-        return usage_because("--kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepdog strays first to see them.".to_string());
+        return usage_because("--kill needs a filter (--min-mem, --older-than, --cmd or --pid), so that it never kills every stray at once. Run sheepr strays first to see them.".to_string());
     }
     // a phase-2 source: disabled outright under the phase-1 opt-out
-    if crate::seam_flag("SHEEPDOG_TEST_PHASE1") {
+    if crate::seam_flag("SHEEPR_TEST_PHASE1") {
         crate::note("source disabled".into());
         return 0;
     }
@@ -334,7 +334,7 @@ pub fn main(args: &[OsString]) -> i32 {
     for r in &mut rows {
         r.named = a.pids.contains(&(r.pid, r.id));
     }
-    if crate::seam_flag("SHEEPDOG_TEST_STRAYS_WRONG_ID") {
+    if crate::seam_flag("SHEEPR_TEST_STRAYS_WRONG_ID") {
         for r in &mut rows {
             r.id = r.id.wrapping_add(1 << 40);
         }
@@ -344,19 +344,19 @@ pub fn main(args: &[OsString]) -> i32 {
         return 0;
     }
     if rows.is_empty() {
-        say!("sheepdog: no stray matches; nothing to kill.");
+        say!("sheepr: no stray matches; nothing to kill.");
         return 0;
     }
     if !a.yes {
         if unsafe { libc::isatty(0) } != 1 {
-            crate::fail!("sheepdog: --kill without --yes asks first, and stdin is not a terminal. Add --yes to kill these {} process(es). Nothing was signalled.", rows.len());
+            crate::fail!("sheepr: --kill without --yes asks first, and stdin is not a terminal. Add --yes to kill these {} process(es). Nothing was signalled.", rows.len());
             return 1;
         }
-        say!("sheepdog: kill these {} process(es)? [y/N] ", rows.len());
+        say!("sheepr: kill these {} process(es)? [y/N] ", rows.len());
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
         if !matches!(line.trim(), "y" | "Y" | "yes") {
-            crate::fail!("sheepdog: nothing was signalled.");
+            crate::fail!("sheepr: nothing was signalled.");
             return 1;
         }
     }
@@ -365,19 +365,19 @@ pub fn main(args: &[OsString]) -> i32 {
         let named = r.named;
         if let Some(j) = &r.job {
             if !named {
-                say!("sheepdog: skipping pid {}: it belongs to a running job ({j}); name it with --pid {}:{} to kill it anyway.", r.pid, r.pid, r.id);
+                say!("sheepr: skipping pid {}: it belongs to a running job ({j}); name it with --pid {}:{} to kill it anyway.", r.pid, r.pid, r.id);
                 continue;
             }
         }
         if r.app_scope && !named {
-            say!("sheepdog: skipping pid {}: it runs in a desktop app's scope (a launched app); name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
+            say!("sheepr: skipping pid {}: it runs in a desktop app's scope (a launched app); name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
             continue;
         }
         if r.pid1_child && !named {
-            say!("sheepdog: skipping pid {}: its parent is an init that runs a program of its own (or PID 1, which is not an OS init here), so it may be that program; name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
+            say!("sheepr: skipping pid {}: its parent is an init that runs a program of its own (or PID 1, which is not an OS init here), so it may be that program; name it with --pid {}:{} to kill it.", r.pid, r.pid, r.id);
             continue;
         }
-        // as `sheepdog kill PID:ID`: the identity read at the listing, and kill's target checks
+        // as `sheepr kill PID:ID`: the identity read at the listing, and kill's target checks
         let code = crate::kill::main(&[OsString::from(format!("{}:{}", r.pid, r.id))]);
         worst = worst.max(code);
     }
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn only_an_os_init_as_pid1_makes_its_children_strays() {
         assert!(pid1_is_os_init("systemd") && pid1_is_os_init("init"));
-        for n in ["docker-init", "tini", "dumb-init", "catatonit", "sh", "sheepdog", ""] {
+        for n in ["docker-init", "tini", "dumb-init", "catatonit", "sh", "sheepr", ""] {
             assert!(!pid1_is_os_init(n), "{n}");
         }
     }

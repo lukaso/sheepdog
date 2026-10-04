@@ -13,32 +13,32 @@ use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn state(pid: i32) -> Option<char> {
     let out = Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().ok()?;
     String::from_utf8_lossy(&out.stdout).trim().chars().next()
 }
-/// The debug signal log (SHEEPDOG_TEST_SIGNAL_LOG): one line per signal decision,
+/// The debug signal log (SHEEPR_TEST_SIGNAL_LOG): one line per signal decision,
 /// `pidfd <pid> <sig>`, `kill <pid> <sig>` (the fallback or macOS), `rollback <pid>`.
 fn signal_log(path: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(path).map(|s| s.lines().map(String::from).collect()).unwrap_or_default()
 }
 fn log_path(tag: &str) -> std::path::PathBuf {
     let n = SEQ.fetch_add(1, Ordering::SeqCst);
-    let p = std::env::temp_dir().join(format!("sd-s3-siglog-{}-{tag}-{n}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("sr-s3-siglog-{}-{tag}-{n}", std::process::id()));
     let _ = std::fs::remove_file(&p);
     p
 }
 /// Does `pidfd_open` work here? Not on macOS, and not in ./test-all's enosys leg (a seccomp
-/// profile makes it fail with ENOSYS): there sheepdog takes the kill fallback on every leg.
+/// profile makes it fail with ENOSYS): there sheepr takes the kill fallback on every leg.
 fn pidfd_works() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -71,7 +71,7 @@ struct Decoy {
 impl Decoy {
     fn start(tag: &str) -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let file = std::env::temp_dir().join(format!("sd-s3-decoy-{}-{tag}-{n}", std::process::id()));
+        let file = std::env::temp_dir().join(format!("sr-s3-decoy-{}-{tag}-{n}", std::process::id()));
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_file(file.with_extension("log"));
         let child = Command::new(fixture()).arg("decoy").arg(&file).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
@@ -83,7 +83,7 @@ impl Decoy {
             assert!(t.elapsed() < Duration::from_secs(10), "the decoy never started");
             std::thread::sleep(Duration::from_millis(5));
         };
-        let id = sheepdog::ident::identity(pid).expect("the decoy's identity");
+        let id = sheepr::ident::identity(pid).expect("the decoy's identity");
         Decoy { pid, id, file, child }
     }
     fn log_path(&self) -> std::path::PathBuf {
@@ -119,7 +119,7 @@ impl Job {
     fn new() -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let marker = format!("21.{}{:06}", std::process::id(), 500 + n);
-        let rec = std::env::temp_dir().join(format!("sd-s3-{marker}"));
+        let rec = std::env::temp_dir().join(format!("sr-s3-{marker}"));
         let _ = std::fs::remove_file(&rec);
         Job { marker, rec }
     }
@@ -144,10 +144,10 @@ impl Drop for Job {
 }
 
 /// PLAN.md §3.3: every signal goes to the process the member was, never to one that has its pid
-/// now. Debug seam SHEEPDOG_TEST_REUSE_PID sends each signal to the decoy's pid instead (the
+/// now. Debug seam SHEEPR_TEST_REUSE_PID sends each signal to the decoy's pid instead (the
 /// member's pid "reused" by the decoy), keeping the member's identity: the decoy must get
 /// nothing (no TERM or CONT in its log, not stopped, not killed). On Linux also through the
-/// fallback path (debug seam SHEEPDOG_TEST_PIDFD_ENOSYS: pidfd_open reports ENOSYS).
+/// fallback path (debug seam SHEEPR_TEST_PIDFD_ENOSYS: pidfd_open reports ENOSYS).
 #[test]
 fn s3_a_reused_pid_gets_no_signal() {
     for &enosys in enosys_legs() {
@@ -158,23 +158,23 @@ fn s3_a_reused_pid_gets_no_signal() {
         // pid within one tick cannot happen, so the decoy starts a few ticks earlier (control below).
         std::thread::sleep(Duration::from_millis(40));
         let j = Job::new();
-        let mut c = Command::new(sheepdog());
+        let mut c = Command::new(sheepr());
         c.args(["run", "--grace", "100ms", "--", fixture(), "escape", &j.marker])
             .arg(&j.rec)
-            .env("SHEEPDOG_TEST_REUSE_PID", decoy.pid.to_string())
-            .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+            .env("SHEEPR_TEST_REUSE_PID", decoy.pid.to_string())
+            .env("SHEEPR_TEST_DEADLINE_MS", "300")
+            .env("SHEEPR_TEST_SIGNAL_LOG", &siglog)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if enosys {
-            c.env("SHEEPDOG_TEST_PIDFD_ENOSYS", "1");
+            c.env("SHEEPR_TEST_PIDFD_ENOSYS", "1");
         }
         let st = c.status().unwrap();
         std::thread::sleep(Duration::from_millis(100));
         let rec = j.recorded();
         assert_eq!(rec.len(), 1, "enosys={enosys}: the escapee was not created");
         assert_ne!(
-            sheepdog::ident::identity(decoy.pid),
+            sheepr::ident::identity(decoy.pid),
             Some(rec[0].1),
             "enosys={enosys}: control: the decoy has the member's identity, so the check cannot tell them apart"
         );
@@ -194,7 +194,7 @@ fn s3_a_reused_pid_gets_no_signal() {
 }
 
 /// PLAN.md §3.3 step 4: the process a STOP landed on by mistake (a pid reused between the check
-/// and the kill; debug seam SHEEPDOG_TEST_WRONG_FREEZE) is resumed, whether or not it was
+/// and the kill; debug seam SHEEPR_TEST_WRONG_FREEZE) is resumed, whether or not it was
 /// stopped before: its prior state cannot be known, and leaving it stopped for good is the
 /// worse error. A running decoy and a pre-stopped one both end running.
 #[test]
@@ -211,11 +211,11 @@ fn s3_a_wrong_freeze_is_rolled_back() {
             }
         }
         let j = Job::new();
-        let st = Command::new(sheepdog())
+        let st = Command::new(sheepr())
             .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
             .arg(&j.rec)
-            .env("SHEEPDOG_TEST_WRONG_FREEZE", decoy.pid.to_string())
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+            .env("SHEEPR_TEST_WRONG_FREEZE", decoy.pid.to_string())
+            .env("SHEEPR_TEST_SIGNAL_LOG", &siglog)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -245,7 +245,7 @@ fn s3_a_wrong_freeze_is_rolled_back() {
 /// PLAN.md §3.3 step 4: the rollback resumes only the very process our STOP landed on (its
 /// identity is read right after the STOP). A process that took the pid later cannot have got
 /// it: the member got the STOP, died, and its pid went to a stranger that someone else
-/// stopped. Debug seam SHEEPDOG_TEST_FREEZE_PID_REUSED records the wrong freeze's STOP as
+/// stopped. Debug seam SHEEPR_TEST_FREEZE_PID_REUSED records the wrong freeze's STOP as
 /// landing on another process than the decoy (the seam's own STOP stands in for the other
 /// actor's): the decoy must stay stopped.
 #[test]
@@ -253,12 +253,12 @@ fn s3_a_process_started_after_our_stop_is_not_rolled_back() {
     let mut decoy = Decoy::start("late");
     let siglog = log_path("late");
     let j = Job::new();
-    let st = Command::new(sheepdog())
+    let st = Command::new(sheepr())
         .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
         .arg(&j.rec)
-        .env("SHEEPDOG_TEST_WRONG_FREEZE", decoy.pid.to_string())
-        .env("SHEEPDOG_TEST_FREEZE_PID_REUSED", "1")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+        .env("SHEEPR_TEST_WRONG_FREEZE", decoy.pid.to_string())
+        .env("SHEEPR_TEST_FREEZE_PID_REUSED", "1")
+        .env("SHEEPR_TEST_SIGNAL_LOG", &siglog)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -276,23 +276,23 @@ fn s3_a_process_started_after_our_stop_is_not_rolled_back() {
 }
 
 /// PLAN.md §3.3 step 4: the rollback resumes only a process that fails the identity check; a
-/// job member sheepdog froze stays frozen until its KILL (a resumed member could fork). With
-/// `--grace 0` sheepdog sends a member no CONT at all. The rollback considers only STOPs sent by
-/// `kill` (macOS; Linux's fallback, forced here by SHEEPDOG_TEST_PIDFD_ENOSYS); on Linux's pidfd
+/// job member sheepr froze stays frozen until its KILL (a resumed member could fork). With
+/// `--grace 0` sheepr sends a member no CONT at all. The rollback considers only STOPs sent by
+/// `kill` (macOS; Linux's fallback, forced here by SHEEPR_TEST_PIDFD_ENOSYS); on Linux's pidfd
 /// path the leg checks only that a pinned STOP is never recorded.
 #[test]
 fn s3_frozen_members_are_not_rolled_back() {
     for &enosys in enosys_legs() {
         let j = Job::new();
         let siglog = log_path("members");
-        let mut c = Command::new(sheepdog());
+        let mut c = Command::new(sheepr());
         c.args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
             .arg(&j.rec)
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+            .env("SHEEPR_TEST_SIGNAL_LOG", &siglog)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if enosys {
-            c.env("SHEEPDOG_TEST_PIDFD_ENOSYS", "1");
+            c.env("SHEEPR_TEST_PIDFD_ENOSYS", "1");
         }
         let st = c.status().unwrap();
         let log = signal_log(&siglog);
@@ -313,7 +313,7 @@ fn s3_frozen_members_are_not_rolled_back() {
 }
 
 /// Linux: pidfd_open works but pidfd_send_signal fails (a seccomp filter; debug seam
-/// SHEEPDOG_TEST_PIDFD_SEND_ENOSYS): the signal falls back to the check and kill, so the job
+/// SHEEPR_TEST_PIDFD_SEND_ENOSYS): the signal falls back to the check and kill, so the job
 /// still ends clean and the escapee is dead.
 #[cfg(target_os = "linux")]
 #[test]
@@ -325,11 +325,11 @@ fn s3_a_failed_pidfd_send_falls_back() {
     let j = Job::new();
     let siglog = log_path("send");
     // --grace 0: a TERM in the grace would end the escapee before any STOP or KILL is needed
-    let st = Command::new(sheepdog())
+    let st = Command::new(sheepr())
         .args(["run", "--grace", "0", "--", fixture(), "escape", &j.marker])
         .arg(&j.rec)
-        .env("SHEEPDOG_TEST_PIDFD_SEND_ENOSYS", "1")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", &siglog)
+        .env("SHEEPR_TEST_PIDFD_SEND_ENOSYS", "1")
+        .env("SHEEPR_TEST_SIGNAL_LOG", &siglog)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -342,7 +342,7 @@ fn s3_a_failed_pidfd_send_falls_back() {
     let fallback_kill = format!("kill {} {}", rec[0].0, libc::SIGKILL);
     assert!(log.iter().any(|l| l == &fallback_kill), "the escapee's KILL did not go through the fallback: {log:?}");
     assert_eq!(st.code(), Some(0), "the kill did not end clean after a failed pidfd send: {log:?}");
-    assert!(!sheepdog::ident::same(rec[0].0, rec[0].1), "the escapee survived");
+    assert!(!sheepr::ident::same(rec[0].0, rec[0].1), "the escapee survived");
 }
 
 /// The test door (`common::send`) signals only the recorded process: a live pid whose identity
@@ -350,7 +350,7 @@ fn s3_a_failed_pidfd_send_falls_back() {
 #[test]
 fn s3_the_test_door_refuses_a_stale_identity() {
     let me = unsafe { libc::getpid() };
-    let id = sheepdog::ident::identity(me).expect("own identity");
+    let id = sheepr::ident::identity(me).expect("own identity");
     assert!(send(me, id, 0), "control: the recorded identity is accepted");
     assert!(!send(me, id.wrapping_add(1), 0), "a live pid with another identity was signalled");
     assert!(std::panic::catch_unwind(|| send(1, id, 0)).is_err(), "pid 1 was not refused");
@@ -364,7 +364,7 @@ fn s3_the_group_and_child_doors_refuse_stale_targets() {
     use std::os::unix::process::CommandExt;
     let mut c = Command::new("/bin/sleep").arg("29.4242").process_group(0).spawn().unwrap();
     let pg = c.id() as i32;
-    let id = sheepdog::ident::identity(pg).expect("the leader's identity");
+    let id = sheepr::ident::identity(pg).expect("the leader's identity");
     let right = common::send_group(pg, id, 0);
     let wrong = common::send_group(pg, id.wrapping_add(1), 0);
     let live = common::send_child(&mut c, 0);

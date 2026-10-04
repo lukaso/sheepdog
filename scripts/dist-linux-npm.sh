@@ -4,7 +4,7 @@
 # scripts/lib/npm-pack.sh packed around this tree's Linux builds (reg: the main package and the
 # Linux ones; reg-noplat: the main one only), bin-<platform>: the binary in that platform's
 # package, and launcher: the main package's launcher. Node and npm come from the image's package
-# manager. A plain user installs @lukaso/sheepdog globally into a temp prefix from 127.0.0.1.
+# manager. A plain user installs sheepr globally into a temp prefix from 127.0.0.1.
 # Cells:
 #   - the platform package's tarball came from this registry; the PATH entry is a link to the
 #     main package's launcher, byte for byte the package's; the installed binary is this platform's
@@ -28,7 +28,7 @@ else (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -q
 command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || { echo "FAIL: node and npm could not be added"; exit 1; }
 echo "node $(node --version), npm $(npm --version), /bin/sh is $(readlink -f /bin/sh), $plat"
 
-# the registry: a file under ROOT by its decoded path (npm asks for /@lukaso%2fsheepdog), nothing
+# the registry: a file under ROOT by its decoded path (npm asks for /sheepr), nothing
 # outside ROOT; every request logged
 cat > /tmp/serve.js <<'JS'
 const http = require("http"), fs = require("fs"), path = require("path");
@@ -55,18 +55,18 @@ UH=$(eval echo ~sduser)
 asu() { su -s /bin/sh sduser -c "$1"; }
 npmi() { # prefix port -> rc; output in /tmp/ni
   asu "env HOME='$UH' npm_config_cache='$UH/.npm-cache' npm_config_update_notifier=false npm_config_audit=false npm_config_fund=false \
-    npm i -g --prefix '$1' --registry http://127.0.0.1:$2/ @lukaso/sheepdog" > /tmp/ni 2>&1
+    npm i -g --prefix '$1' --registry http://127.0.0.1:$2/ sheepr" > /tmp/ni 2>&1
 }
 
-P=$UH/npm-global E=$UH/npm-global/bin/sheepdog
+P=$UH/npm-global E=$UH/npm-global/bin/sheepr
 npmi "$P" 4873; r=$?
-[ $r = 0 ] && ok "npm i -g @lukaso/sheepdog from the static registry" || bad "npm i -g: rc=$r $(tail -3 /tmp/ni | tr '\n' ' ')"
-grep -q "^GET /t/lukaso-sheepdog-$plat-" /tmp/reg.4873.log && ok "the $plat tarball came from this registry" || bad "no GET of the $plat tarball: $(tr '\n' ' ' < /tmp/reg.4873.log)"
-L=$P/lib/node_modules/@lukaso/sheepdog/bin/sheepdog
+[ $r = 0 ] && ok "npm i -g sheepr from the static registry" || bad "npm i -g: rc=$r $(tail -3 /tmp/ni | tr '\n' ' ')"
+grep -q "^GET /t/sheepr-$plat-" /tmp/reg.4873.log && ok "the $plat tarball came from this registry" || bad "no GET of the $plat tarball: $(tr '\n' ' ' < /tmp/reg.4873.log)"
+L=$P/lib/node_modules/sheepr/bin/sheepr
 [ -L "$E" ] && [ "$(readlink -f "$E")" = "$(readlink -f "$L")" ] && cmp -s "$L" /pk/launcher \
   && ok "the PATH entry links to the main package's launcher, byte for byte" || bad "the PATH entry: $(ls -l "$E" 2>&1)"
-B=$(find "$P/lib/node_modules" -path "*/@lukaso/sheepdog-$plat/bin/sheepdog" -type f | head -1)
-n=$(find "$P/lib/node_modules" -path '*/@lukaso/sheepdog-*/bin/sheepdog' | wc -l | tr -d ' ')
+B=$(find "$P/lib/node_modules" -path "*/sheepr-$plat/bin/sheepr" -type f | head -1)
+n=$(find "$P/lib/node_modules" -path '*/sheepr-*/bin/sheepr' | wc -l | tr -d ' ')
 [ -n "$B" ] && [ "$n" = 1 ] && cmp -s "$B" "/pk/bin-$plat" && ok "the installed binary is the $plat package's, byte for byte, the only one" || bad "the installed binary: '$B', $n found"
 # write bits stay within the user's umask (npm applies it to every file and directory: Debian's su
 # gives 002, so group-writable there, measured; bun was measured to make files world-writable)
@@ -78,9 +78,9 @@ cd0=$(mktemp -d); for b in 600 602 620; do : > "$cd0/f$b"; chmod $b "$cd0/f$b"; 
 cw=""; [ -n "$wb" ] && cw=$(find "$cd0" -type f \( $wb \) | sort | tr '\n' ' '); rm -rf "$cd0"
 cwant=""; [ $((m & 2)) != 0 ] && cwant="$cd0/f602 "; [ $((m & 16)) != 0 ] && cwant="$cwant$cd0/f620 "
 [ "$cw" = "$cwant" ] && ok "control: that find lists exactly the files with a write bit the umask masks ($cw)" || bad "control: the umask find gave '$cw', want '$cwant'"
-[ -d "$P/lib/node_modules/@lukaso/sheepdog" ] && [ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
+[ -d "$P/lib/node_modules/sheepr" ] && [ -n "$wb" ] && [ -z "$w" ] && ok "every installed file's write bits are within the user's umask ($um)" || bad "umask $um, write bits beyond it: $w"
 
-v=$(asu "'$E' --version" 2>&1); case $v in "sheepdog "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
+v=$(asu "'$E' --version" 2>&1); case $v in "sheepr "*", linux)") ok "--version through the PATH entry: $v" ;; *) bad "--version: $v" ;; esac
 asu "'$E' run -- sh -c 'exit 7'" >/dev/null 2>&1; r=$?
 [ $r = 7 ] && ok "a job through the PATH entry: exit 7 passed through" || bad "a job's exit code: $r"
 # the same signal state as a direct run of the binary
@@ -124,9 +124,9 @@ i=0; while kill -0 "$esc" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1
 # control: the platform package missing from the registry
 P2=$UH/npm-noplat
 npmi "$P2" 4874; r=$?
-[ $r = 0 ] && [ -z "$(find "$P2/lib/node_modules" -path '*/@lukaso/sheepdog-*' 2>/dev/null)" ] && ok "control: without the platform package, the install succeeds and holds no binary" || bad "control install: rc=$r $(tail -2 /tmp/ni | tr '\n' ' ')"
-o=$(asu "'$P2/bin/sheepdog' --version" 2>&1); r=$?
-[ $r = 1 ] && case $o in *"@lukaso/sheepdog-$plat"*) true ;; *) false ;; esac && ok "control: the launcher exits 1 naming @lukaso/sheepdog-$plat" || bad "control launcher: rc=$r $o"
+[ $r = 0 ] && [ -z "$(find "$P2/lib/node_modules" -path '*/sheepr-*' 2>/dev/null)" ] && ok "control: without the platform package, the install succeeds and holds no binary" || bad "control install: rc=$r $(tail -2 /tmp/ni | tr '\n' ' ')"
+o=$(asu "'$P2/bin/sheepr' --version" 2>&1); r=$?
+[ $r = 1 ] && case $o in *"sheepr-$plat"*) true ;; *) false ;; esac && ok "control: the launcher exits 1 naming sheepr-$plat" || bad "control launcher: rc=$r $o"
 
 for s in $SPS; do kill "$s" 2>/dev/null; done
 [ -n "$esc" ] && kill -KILL "$esc" 2>/dev/null

@@ -1,4 +1,4 @@
-//! Phase-2 P7: `sheepdog strays` and `strays --kill` (PLAN.md §3.0, PHASE2.md D8).
+//! Phase-2 P7: `sheepr strays` and `strays --kill` (PLAN.md §3.0, PHASE2.md D8).
 //!
 //! `strays` reads every process of this user, so every cell filters with `--cmd <word>`, a word
 //! unique to the cell that is in the scratch path of every process it built; `--kill` then
@@ -26,13 +26,13 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     L.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 /// A cell's scratch directory; its name is the cell's filter word. Its reapers (Linux) and every
@@ -143,9 +143,9 @@ struct Out {
     err: String,
 }
 
-/// `sheepdog strays ARGS` (stdin not a tty), 60 s bound by the kill deadline.
+/// `sheepr strays ARGS` (stdin not a tty), 60 s bound by the kill deadline.
 fn strays(args: &[&str], env: &[(&str, &str)]) -> Out {
-    let mut c = Command::new(sheepdog());
+    let mut c = Command::new(sheepr());
     c.arg("strays").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         c.env(k, v);
@@ -221,7 +221,7 @@ fn strays_kill_needs_a_filter_and_a_yes() {
     a.make(&["stray", "{}", "s"], &["s"]);
     b.make(&["stray", "{}", "s"], &["s"]);
     // the refusals run inert: if one broke, its kill would log and send nothing
-    let inert = [("SHEEPDOG_TEST_INERT", "1")];
+    let inert = [("SHEEPR_TEST_INERT", "1")];
     let none = strays(&["--kill"], &inert);
     let empty = strays(&["--kill", "--yes", "--cmd", ""], &inert);
     assert_eq!(empty.code, Some(2), "an empty --cmd is no filter: {}", empty.err);
@@ -251,7 +251,7 @@ fn strays_kill_skips_a_running_jobs_escapee() {
     c.recs.push(c.path("esc"));
     c.recs.push(c.path("root"));
     let d = c.dir.to_str().unwrap().to_string();
-    let mut sup = Command::new(sheepdog())
+    let mut sup = Command::new(sheepr())
         .args(["run", "--", "/bin/sh", "-c", r#""$0" stray "$1" esc && exec "$0" sigcount "$1/root""#, fixture(), &d])
         .stdin(Stdio::null())
         .spawn()
@@ -319,7 +319,7 @@ fn strays_skips_a_live_apps_helper() {
 fn strays_kill_refuses_the_callers_ancestor() {
     let _s = serial();
     let mut c = Cell::new();
-    let sd = sheepdog().to_string();
+    let sd = sheepr().to_string();
     let w = c.word.clone();
     c.make(&["stray-run", "{}", "daemon", &sd, "strays", "--kill", "--yes", "--cmd", &w], &["daemon.d"]);
     c.recs.push(c.path("daemon")); // written when its strays has ended
@@ -341,7 +341,7 @@ fn strays_kill_checks_the_identity_it_listed() {
     let named = named_if_pid1_child(&c.word);
     let mut args = vec!["--kill", "--yes", "--cmd", &c.word];
     args.extend(named.iter().map(String::as_str));
-    let o = strays(&args, &[("SHEEPDOG_TEST_STRAYS_WRONG_ID", "1")]);
+    let o = strays(&args, &[("SHEEPR_TEST_STRAYS_WRONG_ID", "1")]);
     assert!(c.untouched("s"), "a row whose identity changed was killed: {}", o.err);
     assert_eq!(o.code, Some(1), "{}", o.err);
 }
@@ -357,8 +357,8 @@ fn strays_kill_turns_the_latch_on() {
     let named = named_if_pid1_child(&c.word);
     let mut args = vec!["--kill", "--yes", "--cmd", &c.word];
     args.extend(named.iter().map(String::as_str));
-    let mut k = Command::new(sheepdog());
-    k.arg("strays").args(&args).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut k = Command::new(sheepr());
+    k.arg("strays").args(&args).env("SHEEPR_TEST_DEADLINE_MS", "500").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     common::cell_sink(&mut k, &sink);
     let out = k.output().unwrap();
     let s = c.rec("s").unwrap();
@@ -370,13 +370,13 @@ fn strays_kill_turns_the_latch_on() {
 }
 
 /// A stray's row shows how many processes its kill would take (its proved tree); a stray whose
-/// tree holds a live `sheepdog run` supervisor is skipped by `--kill` unless named, and named, it
+/// tree holds a live `sheepr run` supervisor is skipped by `--kill` unless named, and named, it
 /// is killed with its tree.
 #[test]
 fn strays_kill_skips_a_tree_that_holds_a_supervisor() {
     let _s = serial();
     let mut c = Cell::new();
-    let sd = sheepdog().to_string();
+    let sd = sheepr().to_string();
     let fx = fixture().to_string();
     let inner = c.path("inner").to_str().unwrap().to_string();
     c.make(&["stray-run", "{}", "daemon", &sd, "run", "--", &fx, "sigcount", &inner], &["daemon.d", "inner"]);
@@ -396,14 +396,14 @@ fn strays_kill_skips_a_tree_that_holds_a_supervisor() {
     assert!(gone, "control: named, the stray and its tree survived ({:?}): {}", named.code, named.err);
 }
 
-/// A `sheepdog run` supervisor that is itself a stray (its caller exited: `nohup sheepdog run ...
+/// A `sheepr run` supervisor that is itself a stray (its caller exited: `nohup sheepr run ...
 /// &` and a closed terminal) is listed as its job's and skipped by `--kill` unless named; named,
 /// it is killed (its job ends with it).
 #[test]
 fn strays_kill_skips_an_orphaned_supervisor() {
     let _s = serial();
     let mut c = Cell::new();
-    let sd = sheepdog().to_string();
+    let sd = sheepr().to_string();
     let fx = fixture().to_string();
     let script = format!(r#""{sd}" run -- "{fx}" sigcount "{{}}/inner" & sleep 1"#);
     c.spawn("/bin/sh", &["-c", &script], &["inner"]);
@@ -474,12 +474,12 @@ fn strays_kill_skips_a_program_inits_child() {
     assert!(gone, "control: named, it survived ({:?}): {}", named.code, named.err);
 }
 
-/// On a terminal, `--kill` without `--yes` asks first, and the question starts with `sheepdog:`
-/// as every message sheepdog writes does; "n" reaches no kill and says so, "y" reaches the kill
+/// On a terminal, `--kill` without `--yes` asks first, and the question starts with `sheepr:`
+/// as every message sheepr writes does; "n" reaches no kill and says so, "y" reaches the kill
 /// (inert: it logs the signal it would send). (macOS: `script` gives it the terminal.)
 #[cfg(target_os = "macos")]
 #[test]
-fn strays_kill_asks_with_the_sheepdog_prefix() {
+fn strays_kill_asks_with_the_sheepr_prefix() {
     use std::io::{Read, Write};
     let _s = serial();
     let mut a = Cell::new();
@@ -491,7 +491,7 @@ fn strays_kill_asks_with_the_sheepdog_prefix() {
     let ask = |answer: &[u8]| {
         let _ = std::fs::remove_file(&log);
         let mut c = Command::new("/usr/bin/script");
-        c.args(["-q", "/dev/null", sheepdog(), "strays", "--kill", "--cmd", &a.word]).env("SHEEPDOG_TEST_INERT", "1").env("SHEEPDOG_TEST_SIGNAL_LOG", &log);
+        c.args(["-q", "/dev/null", sheepr(), "strays", "--kill", "--cmd", &a.word]).env("SHEEPR_TEST_INERT", "1").env("SHEEPR_TEST_SIGNAL_LOG", &log);
         c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut ch = c.spawn().unwrap();
         let (mut input, mut out) = (ch.stdin.take().unwrap(), ch.stdout.take().unwrap());
@@ -533,8 +533,8 @@ fn strays_kill_asks_with_the_sheepdog_prefix() {
         (all, sent)
     };
     let (no, no_sent) = ask(b"n\n");
-    assert!(no.contains("sheepdog: kill these 1 process(es)? [y/N]"), "the question: {no:?}");
-    assert!(no.contains("sheepdog: nothing was signalled.") && no_sent == 0, "a 'no' went on: {no:?} ({no_sent} logged)");
+    assert!(no.contains("sheepr: kill these 1 process(es)? [y/N]"), "the question: {no:?}");
+    assert!(no.contains("sheepr: nothing was signalled.") && no_sent == 0, "a 'no' went on: {no:?} ({no_sent} logged)");
     let (yes, yes_sent) = ask(b"y\n");
     assert!(yes_sent > 0 && !yes.contains("nothing was signalled"), "control: a 'yes' did not reach the kill: {yes:?} ({yes_sent} logged)");
     assert!(a.untouched("s"), "the inert kill signalled the stray");

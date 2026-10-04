@@ -1,5 +1,5 @@
 #!/bin/sh
-# install.sh's PATH hint (sd_path_hint, read from the rendered install.sh): the line it prints puts
+# install.sh's PATH hint (sr_path_hint, read from the rendered install.sh): the line it prints puts
 # ~/.local/bin on PATH in the startup file the user's shell ($SHELL) really reads. On macOS
 # (Terminal opens login shells): zsh ~/.zprofile; bash the first of ~/.bash_profile,
 # ~/.bash_login, ~/.profile that exists (else ~/.bash_profile). On Linux (a terminal window opens a
@@ -8,19 +8,19 @@
 # real shells and a temp HOME: a login zsh reads ~/.zprofile and not ~/.profile (the old hint's
 # file); a login bash reads ~/.bash_profile and not ~/.bashrc, and after the printed line is
 # applied where only ~/.profile exists it keeps that file's settings; an interactive non-login zsh
-# reads ~/.zshrc and not ~/.zprofile, and bash ~/.bashrc. Nothing is installed and no sheepdog runs.
+# reads ~/.zshrc and not ~/.zprofile, and bash ~/.bashrc. Nothing is installed and no sheepr runs.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
 I=$FX/install.sh
-sh "$SD_ROOT/scripts/lib/render-install.sh" "$SD_ROOT/scripts/install.sh" 0.1.0 "$I" || { fail "render"; finish; }
-sed -n '/^sd_path_hint() {/,/^}/p' "$I" > "$FX/hint.sh"
-[ -s "$FX/hint.sh" ] || { fail "no sd_path_hint in install.sh"; finish; }
+sh "$SR_ROOT/scripts/lib/render-install.sh" "$SR_ROOT/scripts/install.sh" 0.1.0 "$I" || { fail "render"; finish; }
+sed -n '/^sr_path_hint() {/,/^}/p' "$I" > "$FX/hint.sh"
+[ -s "$FX/hint.sh" ] || { fail "no sr_path_hint in install.sh"; finish; }
 mkdir -p "$FX/lx"; printf '#!/bin/sh\necho Linux\n' > "$FX/lx/uname"; chmod 755 "$FX/lx/uname"
 hint() { # SHELL [linux|HOME-with-files] -> the printed hint (HOME: a fresh empty dir unless given)
   if [ "${2:-}" = linux ]; then p=$FX/lx:/usr/bin:/bin; else p=/usr/bin:/bin; fi
   case ${2:-} in /*) hh=$2 ;; *) hh=$(mktemp -d "$FX/hh.XXXXXX") ;; esac
-  env -i PATH="$p" HOME="$hh" SHELL="$1" sh -c '. "$1"; sd_path_hint "$2"' sh "$FX/hint.sh" '$HOME/.local/bin'
+  env -i PATH="$p" HOME="$hh" SHELL="$1" sh -c '. "$1"; sr_path_hint "$2"' sh "$FX/hint.sh" '$HOME/.local/bin'
 }
 row() { # what got want-substring
   case $2 in *"$3"*) pass "the hint for $1 uses $3" ;; *) fail "the hint for $1: '$2' (wanted $3)" ;; esac
@@ -40,7 +40,7 @@ row "bash on Linux" "$(hint /bin/bash linux)" '>> ~/.bashrc'
 row fish "$(hint /opt/homebrew/bin/fish)" 'fish_add_path'
 # a bin path with a space: the printed fish line, pasted, passes exactly one argument equal to it
 # (read here with sh's quoting, which agrees with fish's for a space)
-f=$(env -i PATH=/usr/bin:/bin HOME=/x SHELL=/opt/homebrew/bin/fish sh -c '. "$1"; sd_path_hint "/s p/.local/bin"' sh "$FX/hint.sh" | sed 's/^  //')
+f=$(env -i PATH=/usr/bin:/bin HOME=/x SHELL=/opt/homebrew/bin/fish sh -c '. "$1"; sr_path_hint "/s p/.local/bin"' sh "$FX/hint.sh" | sed 's/^  //')
 a1=$(sh -c 'fish_add_path() { printf "%s|%s" "$#" "$1"; }; eval "$1"' sh "$f")
 [ "$a1" = "1|/s p/.local/bin" ] && pass "the fish line for a path with a space is one argument" || fail "the fish line for a path with a space: '$f' gives '$a1'"
 row "sh" "$(hint /bin/sh)" '>> ~/.profile'
@@ -49,7 +49,7 @@ row "no SHELL" "$(hint '')" '>> ~/.profile'
 # install.sh's set -u: the hint must still print, not abort the install's last line
 # (/bin/dash, as a container's /bin/sh), and the script goes on after it
 if [ -x /bin/dash ]; then
-  u=$(env -i PATH=/usr/bin:/bin /bin/dash -c 'set -u; [ -z "${SHELL+x}" ] || exit 9; . "$1"; sd_path_hint /x/bin; echo after' dash "$FX/hint.sh" 2>&1); r=$?
+  u=$(env -i PATH=/usr/bin:/bin /bin/dash -c 'set -u; [ -z "${SHELL+x}" ] || exit 9; . "$1"; sr_path_hint /x/bin; echo after' dash "$FX/hint.sh" 2>&1); r=$?
   [ $r = 0 ] && case $u in *'>> ~/.profile'*after) true ;; *) false ;; esac && pass "the hint with SHELL unset under set -u (dash): ~/.profile, and the script goes on" || fail "the hint with SHELL unset under set -u (dash): rc=$r '$u'"
 else fail "no /bin/dash: the SHELL-unset row did not run (macOS ships it; on Linux dist-linux.sh covers SHELL unset)"
 fi

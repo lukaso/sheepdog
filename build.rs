@@ -1,4 +1,4 @@
-// The commit `sheepdog --version` names (PLAN.md §10.5): `git rev-parse --short HEAD` at build
+// The commit `sheepr --version` names (PLAN.md §10.5): `git rev-parse --short HEAD` at build
 // time, or "unknown" outside a git checkout of this crate (a crate tarball, or a crate vendored
 // inside another repository, whose HEAD is not this crate's). The watched files come from git
 // itself: in a worktree `.git` is a file, and HEAD and the refs live elsewhere. Only this
@@ -25,19 +25,19 @@ fn main() {
     // The release build passes the commit in (PHASE3.md D7): in its container the worktree's .git
     // names a host path. Hex only, 7 to 40 digits; anything else fails the build. Empty counts as
     // unset (a caller that exports it empty must not break every build).
-    println!("cargo:rerun-if-env-changed=SHEEPDOG_COMMIT_OVERRIDE");
-    if let Some(c) = std::env::var_os("SHEEPDOG_COMMIT_OVERRIDE").filter(|c| !c.is_empty()) {
+    println!("cargo:rerun-if-env-changed=SHEEPR_COMMIT_OVERRIDE");
+    if let Some(c) = std::env::var_os("SHEEPR_COMMIT_OVERRIDE").filter(|c| !c.is_empty()) {
         let c = c.to_string_lossy().into_owned();
         let hex = (7..=40).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_hexdigit());
-        assert!(hex, "SHEEPDOG_COMMIT_OVERRIDE must be 7 to 40 hex digits, got {c:?}");
-        println!("cargo:rustc-env=SHEEPDOG_COMMIT={c}");
+        assert!(hex, "SHEEPR_COMMIT_OVERRIDE must be 7 to 40 hex digits, got {c:?}");
+        println!("cargo:rustc-env=SHEEPR_COMMIT={c}");
         println!("cargo:rerun-if-changed=build.rs");
         return;
     }
     let here = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default());
     let ours = git(&["rev-parse", "--show-toplevel"]).and_then(|t| Path::new(&t).canonicalize().ok()) == here.canonicalize().ok();
     let sha = if ours { git(&["rev-parse", "--short", "HEAD"]) } else { None };
-    println!("cargo:rustc-env=SHEEPDOG_COMMIT={}", sha.as_deref().unwrap_or("unknown"));
+    println!("cargo:rustc-env=SHEEPR_COMMIT={}", sha.as_deref().unwrap_or("unknown"));
     println!("cargo:rerun-if-changed=build.rs");
     if !ours {
         return;

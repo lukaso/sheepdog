@@ -24,9 +24,9 @@ pub enum TagVerdict {
     Gone,
 }
 
-/// The whole entry `SHEEPDOG_TEST_TAG=<tag>` must be present; a substring never matches.
+/// The whole entry `SHEEPR_TEST_TAG=<tag>` must be present; a substring never matches.
 pub fn has_tag(entries: &[Vec<u8>], tag: &str) -> bool {
-    let want = format!("SHEEPDOG_TEST_TAG={tag}");
+    let want = format!("SHEEPR_TEST_TAG={tag}");
     entries.iter().any(|e| e.as_slice() == want.as_bytes())
 }
 
@@ -143,17 +143,17 @@ mod tests {
     #[test]
     fn the_tag_matches_the_whole_entry_only() {
         let t = "abcd1234abcd1234";
-        assert!(has_tag(&[e("A=1"), e("SHEEPDOG_TEST_TAG=abcd1234abcd1234")], t));
-        assert!(!has_tag(&[e("SHEEPDOG_TEST_TAG=abcd1234abcd12345")], t), "a longer value");
-        assert!(!has_tag(&[e("XSHEEPDOG_TEST_TAG=abcd1234abcd1234")], t), "a longer name");
-        assert!(!has_tag(&[e("SHEEPDOG_TEST_TAG=abcd1234")], t), "a prefix of the tag");
+        assert!(has_tag(&[e("A=1"), e("SHEEPR_TEST_TAG=abcd1234abcd1234")], t));
+        assert!(!has_tag(&[e("SHEEPR_TEST_TAG=abcd1234abcd12345")], t), "a longer value");
+        assert!(!has_tag(&[e("XSHEEPR_TEST_TAG=abcd1234abcd1234")], t), "a longer name");
+        assert!(!has_tag(&[e("SHEEPR_TEST_TAG=abcd1234")], t), "a prefix of the tag");
         assert!(!has_tag(&[], t));
     }
 
     #[test]
     fn an_exiting_process_without_the_tag_is_gone_not_withheld() {
         let t = "abcd1234abcd1234";
-        let tagged = EnvRead::Block(vec![e("SHEEPDOG_TEST_TAG=abcd1234abcd1234")]);
+        let tagged = EnvRead::Block(vec![e("SHEEPR_TEST_TAG=abcd1234abcd1234")]);
         let empty = EnvRead::Block(Vec::new());
         assert_eq!(verdict(&tagged, t, false), TagVerdict::Tagged);
         assert_eq!(verdict(&tagged, t, true), TagVerdict::Tagged);
@@ -170,7 +170,7 @@ mod tests {
     fn a_spawned_child_carries_a_variable_and_an_exited_child_is_exiting() {
         let mut c = std::process::Command::new("/bin/sh")
             .args(["-c", "exec cat"])
-            .env("SD_ENVTAG_PROBE", "on")
+            .env("SR_ENVTAG_PROBE", "on")
             .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
@@ -179,7 +179,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if cfg!(target_os = "linux") {
             match read_env(pid) {
-                EnvRead::Block(b) => assert!(b.iter().any(|x| x.as_slice() == b"SD_ENVTAG_PROBE=on")),
+                EnvRead::Block(b) => assert!(b.iter().any(|x| x.as_slice() == b"SR_ENVTAG_PROBE=on")),
                 other => panic!("{other:?}"),
             }
         }

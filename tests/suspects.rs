@@ -1,4 +1,4 @@
-//! Phase-2 P6: suspects in `sheepdog kill <pid>` and `sheepdog ps` (PLAN.md §3.0, PHASE2.md D7).
+//! Phase-2 P6: suspects in `sheepr kill <pid>` and `sheepr ps` (PLAN.md §3.0, PHASE2.md D7).
 //!
 //! Every tree is built by the fixture in a session and group the test made (`new-session`), so a
 //! suspect rule that widens reaches only this cell's processes, never the test runner's session.
@@ -26,19 +26,19 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     L.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 const NAMES: [&str; 8] = ["early", "t", "g", "gc", "g2", "g3", "n", "leader"];
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-sus-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-sus-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -75,12 +75,12 @@ impl Tree {
     fn build(d: &Path, untagged: bool) -> Tree {
         Tree::build_with(d, untagged, false)
     }
-    /// `sup`: the suspect's child is a `sheepdog run` supervisor (its job's root is `gc`).
+    /// `sup`: the suspect's child is a `sheepr run` supervisor (its job's root is `gc`).
     fn build_with(d: &Path, untagged: bool, sup: bool) -> Tree {
         let mut c = Command::new(fixture());
         c.args(["new-session", fixture(), "suspect-tree", d.to_str().unwrap()]).stdin(Stdio::null());
         if sup {
-            c.env("SD_SUP", sheepdog());
+            c.env("SR_SUP", sheepr());
         }
         if untagged {
             c.arg("untagged");
@@ -122,11 +122,11 @@ struct Out {
     log: String,
 }
 
-/// `sheepdog ARGS` with the signal log, 60 s bound.
+/// `sheepr ARGS` with the signal log, 60 s bound.
 fn sd(d: &Path, args: &[&str], env: &[(&str, &str)]) -> Out {
     let log = d.join(format!("log-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-    let mut c = Command::new(sheepdog());
-    c.args(args).env("SHEEPDOG_TEST_SIGNAL_LOG", &log).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut c = Command::new(sheepr());
+    c.args(args).env("SHEEPR_TEST_SIGNAL_LOG", &log).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     for (k, v) in env {
         c.env(k, v);
     }
@@ -211,7 +211,7 @@ fn include_suspects_kills_them_and_nothing_else() {
     let d = scratch("include");
     let t = Tree::build(&d, false);
     let listed = rows(&sd(&d, &["ps", "--json", &t.p("t").0.to_string()], &[]).out);
-    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
+    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPR_TEST_DEADLINE_MS", "2000")]);
     let gone = vec!["t", "g", "gc"];
     // what the kill signalled (of this tree) is what `ps` listed before it
     let signalled: Vec<i32> = o.log.lines().filter_map(|l| {
@@ -263,7 +263,7 @@ fn ps_text_output_holds_no_control_bytes() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The root of another live `sheepdog run` job in the target's session, started after it, is
+/// The root of another live `sheepr run` job in the target's session, started after it, is
 /// that job's member, never a suspect; nor is that job's orphan that stays in the session (its
 /// parent exited; on macOS its responsible process is the job's supervisor). The orphan is the
 /// live-job rule's witness, on macOS (the root is excluded by the parent-PID-1 rule too, and on
@@ -278,7 +278,7 @@ fn a_live_jobs_root_in_the_session_is_no_suspect() {
         t.display(),
         d.display()
     );
-    let mut leader = Command::new(fixture()).args(["new-session", "/bin/sh", "-c", &script, fixture(), sheepdog()]).stdin(Stdio::null()).spawn().unwrap();
+    let mut leader = Command::new(fixture()).args(["new-session", "/bin/sh", "-c", &script, fixture(), sheepr()]).stdin(Stdio::null()).spawn().unwrap();
     struct Recs<'a>(&'a Path);
     impl Drop for Recs<'_> {
         fn drop(&mut self) {
@@ -314,8 +314,8 @@ fn including_suspects_turns_the_latch_on() {
     let d = scratch("latch");
     let t = Tree::build(&d, true);
     let sink = d.join("sink");
-    let mut c = Command::new(sheepdog());
-    c.args(["kill", "--include-suspects", &t.p("t").0.to_string()]).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null());
+    let mut c = Command::new(sheepr());
+    c.args(["kill", "--include-suspects", &t.p("t").0.to_string()]).env("SHEEPR_TEST_DEADLINE_MS", "500").stdin(Stdio::null());
     common::cell_sink(&mut c, &sink);
     let _ = c.status();
     let lines = std::fs::read_to_string(&sink).unwrap_or_default();
@@ -339,7 +339,7 @@ fn ps_of_a_job_lists_its_members() {
     let d = scratch("job");
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     let r = d.join("esc");
     struct Guard(std::process::Child);
     impl Drop for Guard {
@@ -349,9 +349,9 @@ fn ps_of_a_job_lists_its_members() {
         }
     }
     let mut sup = Guard(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", fixture(), "escapee-and-wait", r.to_str().unwrap()])
-            .env("SHEEPDOG_TEST_STATE", &s)
+            .env("SHEEPR_TEST_STATE", &s)
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
@@ -375,10 +375,10 @@ fn ps_of_a_job_lists_its_members() {
     let id = job().unwrap();
     // the escapee is journaled by now (the journal names it before it is listed below)
     std::thread::sleep(Duration::from_millis(600));
-    let live = sd(&d, &["ps", "--json", &id], &[("SHEEPDOG_TEST_STATE", s.to_str().unwrap())]);
+    let live = sd(&d, &["ps", "--json", &id], &[("SHEEPR_TEST_STATE", s.to_str().unwrap())]);
     common::send_child(&mut sup.0, libc::SIGKILL);
     let _ = sup.0.wait();
-    let dead = sd(&d, &["ps", "--json", &id], &[("SHEEPDOG_TEST_STATE", s.to_str().unwrap())]);
+    let dead = sd(&d, &["ps", "--json", &id], &[("SHEEPR_TEST_STATE", s.to_str().unwrap())]);
     let (rl, rd) = (rows(&live.out), rows(&dead.out));
     common::send(g.0, g.1, libc::SIGKILL);
     for p in ["esc.root", "esc.g"] {
@@ -405,7 +405,7 @@ fn a_supervisor_under_a_suspect_is_ended_first() {
     // the supervisor: gc's parent
     let sup: i32 = String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &gc.0.to_string()]).output().unwrap().stdout).trim().parse().unwrap_or(0);
     let supp = common::found(sup);
-    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "2000")]);
+    let o = sd(&d, &["kill", "--include-suspects", &t.p("t").0.to_string()], &[("SHEEPR_TEST_DEADLINE_MS", "2000")]);
     let root_gone = wait_until(10, || !common::alive(gc));
     if let Some(s) = supp {
         common::send(s.0, s.1, libc::SIGKILL);

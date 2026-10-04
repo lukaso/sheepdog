@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-st-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-st-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -55,14 +55,14 @@ struct Run {
     stderr: String,
 }
 
-/// `sheepdog run ARGS` with `--status-fd 3` pointed at a file (through a shell, `exec`), within
+/// `sheepr run ARGS` with `--status-fd 3` pointed at a file (through a shell, `exec`), within
 /// 30 s; `pre` runs with the child (e.g. to send it TERM).
 fn run(d: &Path, name: &str, args: &str, env: &[(&str, &str)], pre: impl FnOnce(&mut std::process::Child)) -> Run {
     let out = d.join(format!("{name}.status"));
     let err = d.join(format!("{name}.err"));
     let mut cmd = Command::new("/bin/sh");
     cmd.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {args} 3>"{}" 2>"{}""#, out.display(), err.display())])
-        .env("SD", sheepdog())
+        .env("SD", sheepr())
         .env("FX", fixture());
     for (k, v) in env {
         cmd.env(k, v);
@@ -108,7 +108,7 @@ fn cell_26_the_status_line_tells_the_125s_apart() {
         &d,
         "deadline",
         &format!(r#"--grace 0 -- "$FX" escape {m} "{}""#, r.display()),
-        &[("SHEEPDOG_TEST_NOKILL", "1"), ("SHEEPDOG_TEST_DEADLINE_MS", "500")],
+        &[("SHEEPR_TEST_NOKILL", "1"), ("SHEEPR_TEST_DEADLINE_MS", "500")],
         |_| {},
     );
     let g = records(&r, 1);
@@ -174,7 +174,7 @@ fn the_root_does_not_hold_the_status_fd() {
     // fd 57 is set up here, not by a shell: dash redirects single-digit fds only
     let file = std::fs::File::create(&out).unwrap();
     let raw = std::os::fd::AsRawFd::as_raw_fd(&file);
-    let mut cmd = Command::new(sheepdog());
+    let mut cmd = Command::new(sheepr());
     cmd.args(["run", "--status-fd", "57", "--", "/bin/sh", "-c", &format!(r#"if [ -e /dev/fd/57 ]; then touch "{}"; fi"#, flag.display())]);
     unsafe {
         std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
@@ -187,7 +187,7 @@ fn the_root_does_not_hold_the_status_fd() {
     let code = cmd.status().unwrap().code();
     drop(file);
     assert_eq!(code, Some(0));
-    assert_eq!(std::fs::read_to_string(&out).unwrap_or_default().lines().count(), 1, "control: sheepdog wrote its line to fd 57");
+    assert_eq!(std::fs::read_to_string(&out).unwrap_or_default().lines().count(), 1, "control: sheepr wrote its line to fd 57");
     assert!(!flag.exists(), "the root holds the status fd");
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -231,7 +231,7 @@ fn the_report_says_clean_only_when_tracking_was_complete() {
     let m = marker();
     let r = d.join("rec");
     let trace = d.join("trace");
-    let full = run(&d, "full", &format!(r#"--grace 0 -- "$FX" escape {m} "{}""#, r.display()), &[("SHEEPDOG_TEST_TRACE", trace.to_str().unwrap())], |_| {});
+    let full = run(&d, "full", &format!(r#"--grace 0 -- "$FX" escape {m} "{}""#, r.display()), &[("SHEEPR_TEST_TRACE", trace.to_str().unwrap())], |_| {});
     for p in records(&r, 1) {
         common::send(p.0, p.1, libc::SIGKILL);
     }
@@ -251,7 +251,7 @@ fn the_report_says_clean_only_when_tracking_was_complete() {
             &d,
             "degraded",
             &format!(r#"--grace 0 -- /bin/sh -c '/bin/sleep {m} & exit 0'"#),
-            &[("SHEEPDOG_TEST_SPI", "broken"), ("SHEEPDOG_TEST_TRACE", trace2.to_str().unwrap())],
+            &[("SHEEPR_TEST_SPI", "broken"), ("SHEEPR_TEST_TRACE", trace2.to_str().unwrap())],
             |_| {},
         );
         common::kill_marked(&[&m]);
@@ -294,7 +294,7 @@ fn the_status_fd_is_never_a_standard_stream() {
     let d = scratch("stdfd");
     for fd in ["0", "1", "2"] {
         let ran = d.join(format!("ran{fd}"));
-        let st = Command::new(sheepdog()).args(["run", "--status-fd", fd, "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())]).stderr(std::process::Stdio::null()).status().unwrap();
+        let st = Command::new(sheepr()).args(["run", "--status-fd", fd, "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())]).stderr(std::process::Stdio::null()).status().unwrap();
         assert_eq!(st.code(), Some(125), "--status-fd {fd}");
         assert!(!ran.exists(), "--status-fd {fd}: the command ran");
     }

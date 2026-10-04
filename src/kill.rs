@@ -1,16 +1,16 @@
-//! `sheepdog kill <pid>` (PLAN.md §3.0; PHASE1.md S6): kill the proved part of a tree that
-//! sheepdog did not start. No setup, so no guarantee: the proved members are the target's live
+//! `sheepr kill <pid>` (PLAN.md §3.0; PHASE1.md S6): kill the proved part of a tree that
+//! sheepr did not start. No setup, so no guarantee: the proved members are the target's live
 //! descendants by the ppid chain, iterated to a fixed point, and on macOS also every live process
 //! whose original parent's uniqueid (`puniq`) belongs to a member seen alive by an earlier scan.
 //! The kill is the loop of §3.3 (TERM grace, then freeze, verify, kill, repeat, with a deadline).
 //!
-//! A `sheepdog` process in the proved set (an inner supervisor, or its relay) is ended first:
+//! A `sheepr` process in the proved set (an inner supervisor, or its relay) is ended first:
 //! TERM, then CONT (a stopped supervisor would never act on the TERM), then a wait of up to its
 //! grace plus the kill deadline, so that its own kill reaches escapees that this kill cannot
-//! prove. A supervisor is recognised by its executable's file name, `sheepdog`.
+//! prove. A supervisor is recognised by its executable's file name, `sheepr`.
 //!
 //! Suspects (PLAN.md §3.0, PHASE2.md D7) are listed with the proved set and killed only with
-//! `--include-suspects`. `sheepdog ps` lists the same rows and signals nothing (`kill --dry-run`).
+//! `--include-suspects`. `sheepr ps` lists the same rows and signals nothing (`kill --dry-run`).
 //!
 //! Exit codes: 0 every targeted process is gone (also: the target was already gone); 1 refused,
 //! nothing signalled; 2 usage error; 125 the kill deadline passed with members alive.
@@ -20,7 +20,7 @@ use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
 use crate::{kill_failed, kill_tree, parse_duration, say, shown, signal, trace, KillOpts, RULE_GRACE};
-use sheepdog::ident::{identity, same};
+use sheepr::ident::{identity, same};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
@@ -58,16 +58,16 @@ struct Args {
     json: bool,
 }
 
-pub(crate) const USAGE_KILL: &str = "sheepdog kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID";
-pub(crate) const USAGE_PS: &str = "sheepdog ps [--json] PID | PID:ID | j-JOBID";
+pub(crate) const USAGE_KILL: &str = "sheepr kill [--dry-run] [--json] [--include-suspects] [--grace DURATION] PID | PID:ID | j-JOBID";
+pub(crate) const USAGE_PS: &str = "sheepr ps [--json] PID | PID:ID | j-JOBID";
 
 /// A usage error of `kill` (or `ps`): the command typed and what was wrong, then its usage.
 fn usage_because(ps: bool, why: String) -> i32 {
     if ps {
-        crate::fail!("sheepdog: ps: {why}");
+        crate::fail!("sheepr: ps: {why}");
         say!("usage: {USAGE_PS}");
     } else {
-        crate::fail!("sheepdog: kill: {why}");
+        crate::fail!("sheepr: kill: {why}");
         say!("usage: {USAGE_KILL}");
         say!("       {USAGE_PS}");
     }
@@ -115,17 +115,17 @@ fn parse(args: &[OsString]) -> Result<Args, String> {
     Ok(Args { target: tgt.ok_or("no target. Give a PID, PID:ID or j-JOBID.")?, dry_run, grace, include_suspects, json })
 }
 
-/// Is `pid` a sheepdog (its executable's file name)?
-/// A sheepdog supervisor (a Linux root shim before its exec runs the same binary, but is the
+/// Is `pid` a sheepr (its executable's file name)?
+/// A sheepr supervisor (a Linux root shim before its exec runs the same binary, but is the
 /// job's root, not a supervisor).
-pub(crate) fn is_sheepdog(pid: i32) -> bool {
-    os::exe_name(pid).as_deref() == Some("sheepdog") && os::cmdline(pid).get(1).map(String::as_str) != Some("__root")
+pub(crate) fn is_sheepr(pid: i32) -> bool {
+    os::exe_name(pid).as_deref() == Some("sheepr") && os::cmdline(pid).get(1).map(String::as_str) != Some("__root")
 }
 
-/// The parent of `pid`. Debug seam SHEEPDOG_TEST_PARENT_UNREADABLE=<pid>: that pid's parent
+/// The parent of `pid`. Debug seam SHEEPR_TEST_PARENT_UNREADABLE=<pid>: that pid's parent
 /// cannot be read (as under a `/proc` mounted with `hidepid`).
 pub(crate) fn parent(pid: i32) -> Option<i32> {
-    if crate::seam_ms("SHEEPDOG_TEST_PARENT_UNREADABLE") == Some(pid as u64) {
+    if crate::seam_ms("SHEEPR_TEST_PARENT_UNREADABLE") == Some(pid as u64) {
         return None;
     }
     os::parent(pid)
@@ -147,19 +147,19 @@ pub(crate) fn protected() -> Result<Vec<(i32, u64)>, i32> {
     Ok(v)
 }
 
-/// The supervisor of the running job that `t` belongs to, if any: the nearest `sheepdog`
-/// ancestor, or (macOS) a `sheepdog` responsible for it.
+/// The supervisor of the running job that `t` belongs to, if any: the nearest `sheepr`
+/// ancestor, or (macOS) a `sheepr` responsible for it.
 pub(crate) fn job_of(t: i32) -> Option<i32> {
     let mut p = parent(t);
     let mut n = 0;
     while let Some(q) = p.filter(|&q| q > 1 && n < 4096) {
-        if is_sheepdog(q) {
+        if is_sheepr(q) {
             return Some(q);
         }
         p = parent(q);
         n += 1;
     }
-    os::responsible_pid(t).filter(|&r| r > 1 && r != t && is_sheepdog(r))
+    os::responsible_pid(t).filter(|&r| r > 1 && r != t && is_sheepr(r))
 }
 
 /// The proved set, sticky across scans: a member stays known until it is gone, and (macOS) the
@@ -224,7 +224,7 @@ pub(crate) fn end_supervisors(sups: &[(i32, u64)], deadline: Duration, proved: &
     sups.iter().filter(|&&(p, id)| same(p, id)).map(|&(p, _)| p).collect()
 }
 
-/// The `--grace` of a `sheepdog run` from its argv (default 2 s).
+/// The `--grace` of a `sheepr run` from its argv (default 2 s).
 fn grace_of(pid: i32) -> Duration {
     let argv = os::cmdline(pid);
     let opts = argv.iter().skip(1).take_while(|a| a.as_str() != "--");
@@ -233,7 +233,7 @@ fn grace_of(pid: i32) -> Duration {
     it.next().and_then(|g| parse_duration(g)).unwrap_or(Duration::from_secs(2))
 }
 
-/// `sheepdog ps ARGS`: the rows of `kill --dry-run` (it lists; it never signals).
+/// `sheepr ps ARGS`: the rows of `kill --dry-run` (it lists; it never signals).
 pub fn ps(args: &[OsString]) -> i32 {
     let mut a: Vec<OsString> = vec!["--dry-run".into()];
     for x in args {
@@ -251,7 +251,7 @@ pub fn main(args: &[OsString]) -> i32 {
 
 /// `kill`, or (`ps`) its dry run: a usage error names the command that was typed.
 fn main_as(args: &[OsString], ps: bool) -> i32 {
-    // signals that would end sheepdog at their default action and that it never uses: blocked
+    // signals that would end sheepr at their default action and that it never uses: blocked
     // for the whole run (a closed stderr is EPIPE, never SIGPIPE; phase-1 review)
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
@@ -269,7 +269,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
     };
     #[cfg(target_os = "linux")]
     if let Some(why) = os::proc_problem() {
-        crate::fail!("sheepdog: {why}, so sheepdog cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");
+        crate::fail!("sheepr: {why}, so sheepr cannot tell which process is which. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was signalled.");
         return 1;
     }
     let by_job = matches!(a.target, Target::Job(_));
@@ -282,7 +282,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
             // a PID:ID target is a fact from outside: a phase-2 source (the wall's token)
             let Some(_token) = crate::wall::gate() else { return 1 };
             if identity(*p) != Some(*id) {
-                crate::fail!("sheepdog: refusing to kill pid {p}: it is not the process {p}:{id} any more. Nothing was signalled.");
+                crate::fail!("sheepr: refusing to kill pid {p}: it is not the process {p}:{id} any more. Nothing was signalled.");
                 return 1;
             }
             (*p, Some(*id))
@@ -298,31 +298,31 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
         },
     };
     if t == 1 {
-        crate::fail!("sheepdog: refusing to kill pid 1: it is the system's init process. Nothing was signalled.");
+        crate::fail!("sheepr: refusing to kill pid 1: it is the system's init process. Nothing was signalled.");
         return 1;
     }
     let Some(tid) = identity(t) else {
-        say!("sheepdog: pid {t} is already gone; nothing to kill.");
+        say!("sheepr: pid {t} is already gone; nothing to kill.");
         return 0;
     };
     if expected.is_some_and(|e| e != tid) {
-        crate::fail!("sheepdog: refusing to kill pid {t}: it is another process now. Nothing was signalled.");
+        crate::fail!("sheepr: refusing to kill pid {t}: it is another process now. Nothing was signalled.");
         return 1;
     }
     if os::procs().iter().find(|p| p.pid == t && p.id == tid).map(|p| p.uid) != Some(unsafe { libc::getuid() }) {
-        crate::fail!("sheepdog: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
+        crate::fail!("sheepr: refusing to kill pid {t}: it belongs to another user. Nothing was signalled.");
         return 1;
     }
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            crate::fail!("sheepdog: refusing to kill pid {t}: sheepdog cannot follow its own chain of parent processes at pid {link} (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
+            crate::fail!("sheepr: refusing to kill pid {t}: sheepr cannot follow its own chain of parent processes at pid {link} (on Linux, /proc mounted with hidepid hides them), so it cannot rule out that pid {t} is one of them. Nothing was signalled.");
             return 1;
         }
     };
     if protected.iter().any(|&(p, id)| p == t && id == tid) {
-        let what = if t == unsafe { libc::getpid() } { "it is this sheepdog" } else { "it is an ancestor of this sheepdog (the shell or program that started it)" };
-        crate::fail!("sheepdog: refusing to kill pid {t}: {what}. Nothing was signalled.");
+        let what = if t == unsafe { libc::getpid() } { "it is this sheepr" } else { "it is an ancestor of this sheepr (the shell or program that started it)" };
+        crate::fail!("sheepr: refusing to kill pid {t}: {what}. Nothing was signalled.");
         return 1;
     }
     let mut proved = Proved { known: HashMap::from([(t, tid)]), ever: HashSet::new(), protected };
@@ -331,28 +331,28 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
     let _held = match journal_subtree(t, tid, &mut proved) {
         Ok(j) => j,
         Err(p) => {
-            crate::fail!("sheepdog: refusing to kill pid {t}: its journaled subtree holds pid {p}, this sheepdog or one of its ancestors (the shell that runs it). Nothing was signalled.");
+            crate::fail!("sheepr: refusing to kill pid {t}: its journaled subtree holds pid {p}, this sheepr or one of its ancestors (the shell that runs it). Nothing was signalled.");
             return 1;
         }
     };
     let set = proved.scan();
-    let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
-    if !is_sheepdog(t) {
+    let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepr(p)).collect();
+    if !is_sheepr(t) {
         if let Some(s) = job_of(t) {
-            // one line that claims only this: `s` is the nearest sheepdog above `t` (by parent,
-            // or on macOS by responsibility), and `sheepdog kill s` is the way to end its job:
+            // one line that claims only this: `s` is the nearest sheepr above `t` (by parent,
+            // or on macOS by responsibility), and `sheepr kill s` is the way to end its job:
             // its TERM ends the whole job, strays too, even with --leave-strays. An `s` whose
             // caller ignores TERM does not end on it; what that kill can still prove is said at
             // `ADOPTS_ESCAPEES`
             match live_job_of(s) {
-                Some(job) => say!("sheepdog: pid {t} runs under sheepdog pid {s} (job {job}). To end that job: sheepdog kill {job}"),
-                None => say!("sheepdog: pid {t} runs under sheepdog pid {s}. To end that sheepdog's job: sheepdog kill {s}"),
+                Some(job) => say!("sheepr: pid {t} runs under sheepr pid {s} (job {job}). To end that job: sheepr kill {job}"),
+                None => say!("sheepr: pid {t} runs under sheepr pid {s}. To end that sheepr's job: sheepr kill {s}"),
             }
         }
     }
     // the suspects (PHASE2.md D7): a phase-2 source, none under the phase-1 opt-out
     let procs = os::procs();
-    let sus = if crate::seam_flag("SHEEPDOG_TEST_PHASE1") { Vec::new() } else { suspects((t, tid), &set, &procs, &proved.protected) };
+    let sus = if crate::seam_flag("SHEEPR_TEST_PHASE1") { Vec::new() } else { suspects((t, tid), &set, &procs, &proved.protected) };
     // what a kill with the suspects would also take: their proved trees (ps lists it)
     let under: Vec<(i32, u64)> = if sus.is_empty() {
         Vec::new()
@@ -383,7 +383,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
                     ev.push("journal".to_string());
                 }
                 if sups.iter().any(|&(q, _)| q == p) {
-                    ev.push("sheepdog: ended first".to_string());
+                    ev.push("sheepr: ended first".to_string());
                 }
                 Row { pid: p, id, class: "proved", evidence: ev }
             })
@@ -400,8 +400,8 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
         rows.extend(sus.iter().map(|((p, id), ev)| Row { pid: *p, id: *id, class: "suspect", evidence: ev.clone() }));
         rows.extend(under.iter().map(|&(p, id)| {
             let mut ev = vec!["under a suspect".to_string()];
-            if is_sheepdog(p) {
-                ev.push("sheepdog: ended first".into());
+            if is_sheepr(p) {
+                ev.push("sheepr: ended first".into());
             }
             Row { pid: p, id, class: "suspect", evidence: ev }
         }));
@@ -419,7 +419,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
             left = 0;
             // a supervisor under a suspect is ended first too (its own kill reaches its job)
             for m in proved.scan() {
-                if is_sheepdog(m.0) && !sups.contains(&m) {
+                if is_sheepr(m.0) && !sups.contains(&m) {
                     sups.push(m);
                 }
             }
@@ -430,12 +430,12 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
     // `kill j-`: a job's supervisor that does not end on TERM is left alone (no escalation): its
     // own kill at the job's end still guards what this kill cannot prove
     if by_job && unended.contains(&t) {
-        crate::fail!("sheepdog: the job's supervisor pid {t} did not end on TERM (its caller may ignore TERM); it was left running. The job is NOT ended.");
+        crate::fail!("sheepr: the job's supervisor pid {t} did not end on TERM (its caller may ignore TERM); it was left running. The job is NOT ended.");
         return 125;
     }
     let initial: HashMap<i32, u64> = proved.known.clone();
-    // a signal that ends sheepdog between a freeze and its SIGKILL would leave the tree stopped
-    // for good: the kill loop holds them from its first freeze on, and sheepdog then acts on any
+    // a signal that ends sheepr between a freeze and its SIGKILL would leave the tree stopped
+    // for good: the kill loop holds them from its first freeze on, and sheepr then acts on any
     // that arrived (the caller sees it die of the signal, as without the hold)
     opts.hold = vec![libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
     let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -443,7 +443,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
     let code = match kill_tree(&opts, || proved.scan(), || {}, || None, signal, initial) {
         Ok(()) if !unended.is_empty() && !os::ADOPTS_ESCAPEES => {
             // its escapees are members of its job only, which `kill` cannot prove on macOS
-            crate::fail!("sheepdog: supervisor pid(s) {unended:?} did not end on TERM (its caller may ignore TERM), so the escapees of its job may still be alive. The tree is NOT clean.");
+            crate::fail!("sheepr: supervisor pid(s) {unended:?} did not end on TERM (its caller may ignore TERM), so the escapees of its job may still be alive. The tree is NOT clean.");
             125
         }
         Ok(()) => 0,
@@ -453,7 +453,7 @@ fn main_as(args: &[OsString], ps: bool) -> i32 {
     if left > 0 {
         let pids: Vec<String> = sus.iter().filter(|((p, id), _)| same(*p, *id)).map(|((p, _), _)| p.to_string()).collect();
         if !pids.is_empty() {
-            say!("sheepdog: {} suspect(s) left alive: pid {} (sheepdog ps {t} shows why; --include-suspects kills them too).", pids.len(), pids.join(", "));
+            say!("sheepr: {} suspect(s) left alive: pid {} (sheepr ps {t} shows why; --include-suspects kills them too).", pids.len(), pids.join(", "));
         }
     }
     code
@@ -519,19 +519,19 @@ pub(crate) fn human(b: u64) -> String {
 }
 
 /// The suspects of target `t` (PLAN.md §3.0, PHASE2.md D7): live, same-uid processes that are
-/// not in `set` (proved), not `protected`, not PID 1 and no `sheepdog`, that are orphaned (their
-/// parent is PID 1 or a `sheepdog`), started after the target (a greater identity), and have a
+/// not in `set` (proved), not `protected`, not PID 1 and no `sheepr`, that are orphaned (their
+/// parent is PID 1 or a `sheepr`), started after the target (a greater identity), and have a
 /// link: the session or group of the target or a proved member, or (macOS) a `puniq` that is no
 /// live process, greater than the target's uniqueid, with the target's responsible process.
 /// Each with the links that matched.
 fn suspects(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32, u64)]) -> Vec<((i32, u64), Vec<String>)> {
     let uid = unsafe { libc::getuid() };
-    suspects_with(t, set, procs, protected, uid, |p| is_sheepdog(p) || job_of(p).is_some())
+    suspects_with(t, set, procs, protected, uid, |p| is_sheepr(p) || job_of(p).is_some())
 }
 
-/// The rules of `suspects`, with the uid and "is a sheepdog or a live job's member" given (for
+/// The rules of `suspects`, with the uid and "is a sheepr or a live job's member" given (for
 /// its unit cells). PHASE2.md D9 narrowed PLAN §3.0: orphaned means parent PID 1 (a child of a
-/// sheepdog is its job's); a session or group led by PID 1 is no link (in a container it holds
+/// sheepr is its job's); a session or group led by PID 1 is no link (in a container it holds
 /// almost everything); `puniq` is evidence beside a session or group link, never a link alone
 /// (every process under one terminal app shares the responsible process).
 fn suspects_with(t: (i32, u64), set: &[(i32, u64)], procs: &[Proc], protected: &[(i32, u64)], uid: u32, in_a_job: impl Fn(i32) -> bool) -> Vec<((i32, u64), Vec<String>)> {
@@ -678,7 +678,7 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
     let found: Vec<_> = journal_files().into_iter().filter(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().starts_with(prefix))).collect();
     let path = match found.as_slice() {
         [] => {
-            crate::fail!("sheepdog: no job {prefix} in this boot's journals. Nothing was signalled.");
+            crate::fail!("sheepr: no job {prefix} in this boot's journals. Nothing was signalled.");
             return Err(1);
         }
         [one] => one.clone(),
@@ -688,12 +688,12 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
         }
     };
     let Some(sup) = journal_sup(&path) else {
-        crate::fail!("sheepdog: job {prefix}'s journal is not this user's, not of this boot, or unreadable. Nothing was signalled.");
+        crate::fail!("sheepr: job {prefix}'s journal is not this user's, not of this boot, or unreadable. Nothing was signalled.");
         return Err(1);
     };
     if sup.0 > 1 && same(sup.0, sup.1) {
-        if !is_sheepdog(sup.0) {
-            crate::fail!("sheepdog: job {prefix}'s journal names pid {} as its supervisor, but that process is not a sheepdog. Nothing was signalled.", sup.0);
+        if !is_sheepr(sup.0) {
+            crate::fail!("sheepr: job {prefix}'s journal names pid {} as its supervisor, but that process is not a sheepr. Nothing was signalled.", sup.0);
             return Err(1);
         }
         return Ok(JobTarget::Live(sup.0, sup.1, path));
@@ -716,24 +716,24 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
     }
     // a dead job: the sweep of this one journal
     let Ok(protected) = protected() else {
-        crate::fail!("sheepdog: refusing to sweep {prefix}: sheepdog cannot follow its own chain of parent processes. Nothing was signalled.");
+        crate::fail!("sheepr: refusing to sweep {prefix}: sheepr cannot follow its own chain of parent processes. Nothing was signalled.");
         return Err(1);
     };
     match crate::sweep::open_fenced(&path) {
         Ok(j) => match crate::sweep::sweep_job_as(j, &protected, crate::sweep::Mode::Explicit) {
             crate::sweep::Outcome::Swept(_) => Ok(JobTarget::Done(0)),
             crate::sweep::Outcome::Skipped(why) => {
-                crate::fail!("sheepdog: refusing to sweep {prefix}: {why}. Nothing was signalled.");
+                crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
                 Err(1)
             }
             crate::sweep::Outcome::Deadline(c) => Ok(JobTarget::Done(c)),
         },
         Err(crate::sweep::Skip::Live) => {
-            crate::fail!("sheepdog: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
+            crate::fail!("sheepr: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
             Err(1)
         }
         Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) => {
-            crate::fail!("sheepdog: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
+            crate::fail!("sheepr: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
             Err(1)
         }
     }

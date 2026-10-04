@@ -17,17 +17,17 @@ use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-inh-{name}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
+    let d = std::env::temp_dir().join(format!("sr-inh-{name}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -88,7 +88,7 @@ impl Drop for Guard {
     }
 }
 
-/// macOS: the uniqueid of the process responsible for `pid` (the private SPI, as sheepdog reads it).
+/// macOS: the uniqueid of the process responsible for `pid` (the private SPI, as sheepr reads it).
 #[cfg(target_os = "macos")]
 fn resp_of(pid: i32) -> Option<u64> {
     type F = unsafe extern "C" fn(libc::pid_t) -> u64;
@@ -147,7 +147,7 @@ fn supervisor_under_t(t: (i32, u64), first: (i32, u64)) -> (i32, u64) {
 }
 
 /// Cells 2, 3 and 12 in inherit mode (under T): the job's escapees are members by the `puniq`
-/// facts sheepdog saw, and none survives the job's end.
+/// facts sheepr saw, and none survives the job's end.
 #[cfg(target_os = "macos")]
 #[test]
 fn cell2_inherit_a_setsid_grandchild_leaves_no_survivor() {
@@ -155,7 +155,7 @@ fn cell2_inherit_a_setsid_grandchild_leaves_no_survivor() {
     let r = d.join("r");
     let rg = PathBuf::from(format!("{}.g", r.display()));
     let mut g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
-    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "setsid-kid-fx", r.to_str().unwrap()]);
+    let t = t_launch(&d, &mut g, sheepr(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "setsid-kid-fx", r.to_str().unwrap()]);
     assert!(wait_until(15, || !records(&r).is_empty() && !records(&rg).is_empty()), "the tree did not start");
     let sup = supervisor_under_t(t, records(&r)[0]);
     let all: Vec<(i32, u64)> = records(&r).into_iter().chain(records(&rg)).collect();
@@ -173,7 +173,7 @@ fn cell3_inherit_an_escapee_seen_by_a_scan_leaves_no_survivor() {
     let (r, go) = (d.join("r"), d.join("go"));
     let st = state(&d);
     let mut g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
-    let t = t_launch_env(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", r.to_str().unwrap(), go.to_str().unwrap()], &[("SHEEPDOG_TEST_STATE", &st)]);
+    let t = t_launch_env(&d, &mut g, sheepr(), &["run", "--quiet", "--inherit-terminal-permissions", "--", fixture(), "escape-after", r.to_str().unwrap(), go.to_str().unwrap()], &[("SHEEPR_TEST_STATE", &st)]);
     assert!(wait_until(15, || !records(&r).is_empty()), "C did not start");
     let sup = supervisor_under_t(t, records(&r)[0]);
     // the readiness handshake: C escapes only after a supervisor scan has seen it (journaled)
@@ -198,10 +198,10 @@ fn cell12_inherit_a_clean_exit_with_a_stray_leaves_no_survivor() {
     let mut g = Guard { recs: vec![s.clone()], markers: vec![], children: vec![] };
     // the root exits by itself, after the test has checked the supervisor's precondition
     let script = format!(r#"echo $$ > "{}"; "{}" sigcount "{}" & while [ ! -e "{}" ]; do sleep 0.01; done; exit 0"#, rootf.display(), fixture(), s.display(), go.display());
-    let t = t_launch(&d, &mut g, sheepdog(), &["run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]);
+    let t = t_launch(&d, &mut g, sheepr(), &["run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]);
     assert!(wait_until(15, || std::fs::read_to_string(&rootf).is_ok_and(|x| x.ends_with('\n')) && !records(&s).is_empty()), "the job did not start");
     let root: i32 = std::fs::read_to_string(&rootf).unwrap().trim().parse().unwrap();
-    let rid = sheepdog::ident::identity(root).expect("the root");
+    let rid = sheepr::ident::identity(root).expect("the root");
     supervisor_under_t(t, (root, rid));
     std::fs::write(&go, b"").unwrap();
     let code = {
@@ -233,7 +233,7 @@ fn another_tabs_process_survives_an_inherit_mode_job() {
     let (a, decoy) = (d.join("a"), d.join("decoy"));
     let mut g = Guard { recs: vec![a.clone(), decoy.clone()], markers: vec![], children: vec![] };
     let script = format!(r#""$0" run --quiet --inherit-terminal-permissions -- "$1" sigcount "{}" & "$1" sigcount "{}" & wait"#, a.display(), decoy.display());
-    let t = t_launch(&d, &mut g, "/bin/sh", &["-c", &script, sheepdog(), fixture()]);
+    let t = t_launch(&d, &mut g, "/bin/sh", &["-c", &script, sheepr(), fixture()]);
     assert!(wait_until(15, || !records(&a).is_empty() && !records(&decoy).is_empty()), "the tabs did not start");
     let (ap, dp) = (records(&a)[0], records(&decoy)[0]);
     assert_eq!(resp_of(dp.0), Some(t.1), "precondition: the decoy is responsible to T");
@@ -264,7 +264,7 @@ fn cell17_an_open_g_app_survives_the_job() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>SdFake17</string>
-<key>CFBundleIdentifier</key><string>com.lukaso.sheepdog.test.fake17</string>
+<key>CFBundleIdentifier</key><string>com.lukaso.sheepr.test.fake17</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>LSUIElement</key><true/>
 </dict></plist>
@@ -273,7 +273,7 @@ fn cell17_an_open_g_app_survives_the_job() {
     .unwrap();
     let r = d.join("app");
     let g = Guard { recs: vec![r.clone()], markers: vec![], children: vec![] };
-    let st = Command::new(sheepdog())
+    let st = Command::new(sheepr())
         .args(["run", "--quiet", "--", "/usr/bin/open", "-g", "-n", bundle.to_str().unwrap(), "--args", "sigcount", r.to_str().unwrap()])
         .stdin(Stdio::null())
         .status()
@@ -292,7 +292,7 @@ fn cell17_an_open_g_app_survives_the_job() {
 #[test]
 fn doctor_reports_what_is_degraded_now() {
     let run = |env: &[(&str, &str)]| -> Json {
-        let mut c = Command::new(sheepdog());
+        let mut c = Command::new(sheepr());
         c.args(["doctor", "--json"]);
         for (k, v) in env {
             c.env(k, v);
@@ -303,7 +303,7 @@ fn doctor_reports_what_is_degraded_now() {
     };
     let degraded = |j: &Json| j.get("degraded").and_then(Json::arr).map_or(usize::MAX, |a| a.len());
     if cfg!(target_os = "macos") {
-        let broken = run(&[("SHEEPDOG_TEST_SPI", "broken")]);
+        let broken = run(&[("SHEEPR_TEST_SPI", "broken")]);
         assert!(degraded(&broken) >= 1 && degraded(&broken) != usize::MAX, "the forced missing SPI is not degraded: {broken:?}");
     }
     let plain = run(&[]);
@@ -326,13 +326,13 @@ fn the_doctor_disclaim_check_has_a_control() {
         (ok, cannot)
     };
     // control: the doctor is T's tab, T alive
-    let o = Command::new(fixture()).arg("t").arg(d.join("T1")).args([sheepdog(), "doctor", "--json"]).output().unwrap();
+    let o = Command::new(fixture()).arg("t").arg(d.join("T1")).args([sheepr(), "doctor", "--json"]).output().unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
     let live = json::parse(String::from_utf8_lossy(&o.stdout).trim()).expect("one JSON object");
     // the doctor starts only after T (its responsible process) has exited
     let (go, out) = (d.join("go"), d.join("orphan.json"));
     let tab = format!(r#""$FX" after "{}" "$SD" doctor --json > "{}" 2>/dev/null & exit 0"#, go.display(), out.display());
-    let t = Command::new(fixture()).arg("t").arg(d.join("T2")).args(["/bin/sh", "-c", &tab]).env("FX", fixture()).env("SD", sheepdog()).status().unwrap();
+    let t = Command::new(fixture()).arg("t").arg(d.join("T2")).args(["/bin/sh", "-c", &tab]).env("FX", fixture()).env("SD", sheepr()).status().unwrap();
     assert_eq!(t.code(), Some(0), "T did not run its tab");
     let tp = std::fs::read_to_string(d.join("T2")).unwrap_or_default().split_whitespace().next().and_then(|p| p.parse::<i32>().ok());
     assert!(tp.is_some_and(|p| wait_until(5, || unsafe { libc::kill(p, 0) } != 0)), "T is still alive");
@@ -356,22 +356,22 @@ fn the_privacy_warning_fires_only_for_a_refused_protected_folder() {
     std::fs::create_dir_all(&plain).unwrap();
     let warned = |cwd: &Path, flags: &[&str]| -> bool {
         let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
-        // an inherit-mode sheepdog runs only under T (its responsible process is T, never the
+        // an inherit-mode sheepr runs only under T (its responsible process is T, never the
         // operator's terminal)
         let mut c = if flags.contains(&"--inherit-terminal-permissions") {
             let mut c = Command::new(fixture());
-            c.arg("t").arg(d.join(format!("T-{}", SEQ.fetch_add(1, Ordering::SeqCst)))).arg(sheepdog());
+            c.arg("t").arg(d.join(format!("T-{}", SEQ.fetch_add(1, Ordering::SeqCst)))).arg(sheepr());
             c
         } else {
-            Command::new(sheepdog())
+            Command::new(sheepr())
         };
         let st = c
             .arg("run")
             .args(flags)
             .args(["--", "/usr/bin/true"])
             .current_dir(cwd)
-            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
-            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .env("SHEEPR_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPR_TEST_TRACE", &trace)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -396,11 +396,11 @@ fn the_privacy_warning_counts_only_arguments_written_as_paths() {
     std::fs::create_dir_all(&prot).unwrap();
     let warned = |arg: &str| -> bool {
         let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
-        let st = Command::new(sheepdog())
+        let st = Command::new(sheepr())
             .args(["run", "--", "/bin/echo", arg])
             .current_dir(&d)
-            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
-            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .env("SHEEPR_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPR_TEST_TRACE", &trace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -427,11 +427,11 @@ fn the_privacy_warning_follows_the_disclaim() {
     std::fs::create_dir_all(&prot).unwrap();
     let warned = |env: &[(&str, &str)]| -> bool {
         let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
-        let st = Command::new(sheepdog())
+        let st = Command::new(sheepr())
             .args(["run", "--", "/usr/bin/true"])
             .current_dir(&prot)
-            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
-            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .env("SHEEPR_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPR_TEST_TRACE", &trace)
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
@@ -440,8 +440,8 @@ fn the_privacy_warning_follows_the_disclaim() {
         assert_eq!(st.code(), Some(0));
         std::fs::read_to_string(&trace).unwrap_or_default().lines().any(|l| l.starts_with("tcc-warning "))
     };
-    assert!(warned(&[("SHEEPDOG_TEST_SPI", "broken")]), "no warning, though the disclaimed re-exec happened");
-    assert!(!warned(&[("SHEEPDOG_TEST_SPI", "nodisclaim")]), "a warning, though there was no disclaim");
+    assert!(warned(&[("SHEEPR_TEST_SPI", "broken")]), "no warning, though the disclaimed re-exec happened");
+    assert!(!warned(&[("SHEEPR_TEST_SPI", "nodisclaim")]), "a warning, though there was no disclaim");
     assert!(warned(&[]), "control: a plain run warns");
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -459,12 +459,12 @@ fn a_blocked_privacy_probe_does_not_hold_the_start() {
     let go = |cwd: &Path| -> (Option<i32>, Duration, String) {
         let trace = d.join(format!("trace-{}", SEQ.fetch_add(1, Ordering::SeqCst)));
         let t0 = Instant::now();
-        let mut c = Command::new(sheepdog())
+        let mut c = Command::new(sheepr())
             .args(["run", "--", "/usr/bin/true"])
             .current_dir(cwd)
-            .env("SHEEPDOG_TEST_TCC_PROTECTED", &prot)
-            .env("SHEEPDOG_TEST_TCC_PROBE_HANG", &prot)
-            .env("SHEEPDOG_TEST_TRACE", &trace)
+            .env("SHEEPR_TEST_TCC_PROTECTED", &prot)
+            .env("SHEEPR_TEST_TCC_PROBE_HANG", &prot)
+            .env("SHEEPR_TEST_TRACE", &trace)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -496,9 +496,9 @@ fn inherit_mode_refuses_under_the_phase1_opt_out() {
     let go = |name: &str, phase1: bool| -> (Option<i32>, bool) {
         let ran = d.join(format!("ran-{name}"));
         let mut c = Command::new(fixture());
-        c.arg("t").arg(d.join(format!("T-{name}"))).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/usr/bin/touch", ran.to_str().unwrap()]).stdin(Stdio::null()).stderr(Stdio::null());
+        c.arg("t").arg(d.join(format!("T-{name}"))).args([sheepr(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/usr/bin/touch", ran.to_str().unwrap()]).stdin(Stdio::null()).stderr(Stdio::null());
         if phase1 {
-            c.env("SHEEPDOG_TEST_PHASE1", "1");
+            c.env("SHEEPR_TEST_PHASE1", "1");
         }
         let code = c.status().unwrap().code();
         (code, ran.exists())
@@ -513,10 +513,10 @@ fn inherit_mode_refuses_under_the_phase1_opt_out() {
 /// `--version` prints this build's version.
 #[test]
 fn version_prints_the_build_version() {
-    let o = Command::new(sheepdog()).arg("--version").output().unwrap();
+    let o = Command::new(sheepr()).arg("--version").output().unwrap();
     assert_eq!(o.status.code(), Some(0));
     let line = String::from_utf8_lossy(&o.stdout).trim().to_string();
-    assert!(line == format!("sheepdog {}", env!("CARGO_PKG_VERSION")) || line.starts_with(&format!("sheepdog {} ", env!("CARGO_PKG_VERSION"))), "{line}");
+    assert!(line == format!("sheepr {}", env!("CARGO_PKG_VERSION")) || line.starts_with(&format!("sheepr {} ", env!("CARGO_PKG_VERSION"))), "{line}");
 }
 
 /// Linux: `--inherit-terminal-permissions` is accepted and changes nothing (a stray still dies).
@@ -525,7 +525,7 @@ fn version_prints_the_build_version() {
 fn inherit_is_accepted_on_linux() {
     let m = marker();
     let script = format!("sleep {m} & exit 0");
-    let st = Command::new(sheepdog()).args(["run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).status().unwrap();
+    let st = Command::new(sheepr()).args(["run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).status().unwrap();
     let left = common::scan(&m, |_| true).unwrap_or_default();
     common::kill_marked(&[&m]);
     assert_eq!(st.code(), Some(0));
@@ -535,7 +535,7 @@ fn inherit_is_accepted_on_linux() {
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     s
 }
 
@@ -555,7 +555,7 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     // the inner job's escapee escapes only after scans saw its parent (the handshake), so both
     // supervisors hold it by `puniq` (in this mode it is not responsible to them)
     let script = format!(
-        r#"SHEEPDOG_TEST_STATE="{}" "$0" run --quiet --inherit-terminal-permissions -- "$1" escape-after "{}" "{}" & echo $! > "{}"; exec "$1" sigcount "{}""#,
+        r#"SHEEPR_TEST_STATE="{}" "$0" run --quiet --inherit-terminal-permissions -- "$1" escape-after "{}" "{}" & echo $! > "{}"; exec "$1" sigcount "{}""#,
         inner_state.display(),
         r.display(),
         go.display(),
@@ -566,8 +566,8 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     let t_child = Command::new(fixture())
         .arg("t")
         .arg(&tr)
-        .args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script, sheepdog(), fixture()])
-        .env("SHEEPDOG_TEST_STATE", &s)
+        .args([sheepr(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script, sheepr(), fixture()])
+        .env("SHEEPR_TEST_STATE", &s)
         .stdin(Stdio::null())
         .spawn()
         .unwrap();
@@ -592,16 +592,16 @@ fn the_auto_sweep_defers_an_inherit_mode_inner_job() {
     common::send(outer.0, outer.1, libc::SIGKILL);
     assert!(wait_until(5, || !common::alive(outer)));
     let ran = d.join("ran");
-    let st = Command::new(sheepdog())
+    let st = Command::new(sheepr())
         .args(["run", "--quiet", "--", "/usr/bin/touch", ran.to_str().unwrap()])
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_DEADLINE_MS", "500")
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_DEADLINE_MS", "500")
         .stdin(Stdio::null())
         .status()
         .unwrap();
     let sigs = std::fs::read_to_string(format!("{}.g.sig", r.display())).unwrap_or_default().lines().count();
     let kept = common::alive(esc) && sigs == 0;
-    let _ = Command::new(sheepdog()).arg("sweep").env("SHEEPDOG_TEST_STATE", &s).status();
+    let _ = Command::new(sheepr()).arg("sweep").env("SHEEPR_TEST_STATE", &s).status();
     let gone = wait_until(10, || !common::alive(esc));
     assert_eq!(st.code(), Some(0));
     assert!(ran.exists(), "the new command ran");
@@ -625,7 +625,7 @@ fn an_inherit_mode_run_turns_the_latch_on() {
     let script = format!(r#"/usr/bin/env -i "{0}" sigcount "{1}" & while [ ! -s "{1}" ]; do sleep 0.01; done; exit 0"#, fixture(), u.display());
     let tr = d.join("T");
     let mut c = Command::new(fixture());
-    c.arg("t").arg(&tr).args([sheepdog(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).env("SHEEPDOG_TEST_DEADLINE_MS", "500").stdin(Stdio::null());
+    c.arg("t").arg(&tr).args([sheepr(), "run", "--quiet", "--inherit-terminal-permissions", "--", "/bin/sh", "-c", &script]).env("SHEEPR_TEST_DEADLINE_MS", "500").stdin(Stdio::null());
     common::cell_sink(&mut c, &sink);
     g.children.push(c.spawn().unwrap());
     assert!(wait_until(15, || !records(&u).is_empty()), "the stray did not start");

@@ -15,12 +15,12 @@ set -u
 fx_dir
 NT=$(npm root -g 2>/dev/null)/npm/node_modules/tar
 [ -f "$NT/index.js" ] || { fail "no npm-bundled node-tar at $NT"; finish; }
-mkdir -p "$FX/pk" "$FX/h" && cp "$SD_ROOT/LICENSE-MIT" "$FX/pk/" && printf '{"name":"@lukaso/t","version":"0.0.1","files":["LICENSE-MIT"]}\n' > "$FX/pk/package.json"
+mkdir -p "$FX/pk" "$FX/h" && cp "$SR_ROOT/LICENSE-MIT" "$FX/pk/" && printf '{"name":"sheepr-t","version":"0.0.1","files":["LICENSE-MIT"]}\n' > "$FX/pk/package.json"
 (cd "$FX/pk" && env HOME="$FX/h" npm_config_cache="$FX/h/c" npm_config_userconfig=/dev/null npm pack --silent --pack-destination "$FX" > /dev/null) || { fail "npm pack"; finish; }
-BASE=$FX/lukaso-t-0.0.1.tgz
+BASE=$FX/sheepr-t-0.0.1.tgz
 [ -s "$BASE" ] || { fail "no $BASE"; finish; }
 # the interpreter npm-check runs (its gzip code differs between versions)
-/usr/bin/python3 -I -B - "$SD_ROOT/scripts/lib/npm-same.py" "$BASE" "$FX" <<'PY' > "$FX/rows"
+/usr/bin/python3 -I -B - "$SR_ROOT/scripts/lib/npm-same.py" "$BASE" "$FX" <<'PY' > "$FX/rows"
 import sys, gzip, io, json, importlib.util, contextlib
 spec = importlib.util.spec_from_file_location("ns", sys.argv[1]); ns = importlib.util.module_from_spec(spec); spec.loader.exec_module(ns)
 base, fx = sys.argv[2], sys.argv[3]

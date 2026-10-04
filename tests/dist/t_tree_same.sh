@@ -6,7 +6,7 @@
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
-T="$SD_ROOT/tests/lib/tree-same.py"
+T="$SR_ROOT/tests/lib/tree-same.py"
 mk() { # dir: a small tree with a file, an executable, a link, an empty dir
   mkdir -p "$1/Contents/MacOS" "$1/Contents/empty" && printf 'a\n' > "$1/Contents/f" && printf 'x\n' > "$1/Contents/MacOS/x" \
     && chmod 755 "$1/Contents/MacOS/x" && ln -s MacOS/x "$1/Contents/l" && chmod 755 "$1"

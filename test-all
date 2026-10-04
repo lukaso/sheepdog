@@ -10,11 +10,11 @@
 #   alpine       the suite in the pinned Alpine image, scripts/release.conf (arm64 on this host), privileged, plus the pid-reuse
 #                race cell; the pidfd probe must use pidfds
 #   debian       the suite in the pinned slim image, privileged, plus the pid-reuse race cell
-#   amd64        the suite in an emulated amd64 Alpine (image tag sd-amd64-alpine; user space
+#   amd64        the suite in an emulated amd64 Alpine (image tag sr-amd64-alpine; user space
 #                only, the same arm64 kernel: it does NOT test another kernel)
-#   pid1         sheepdog as PID 1 of a container: TERM exits 143 (the kernel ignores raise for
+#   pid1         sheepr as PID 1 of a container: TERM exits 143 (the kernel ignores raise for
 #                an init); a TSTP stops the job and then counts as discarded (the job runs on)
-#   init         sheepdog under `docker run --init`: TERM exits 143 (it dies of TERM)
+#   init         sheepr under `docker run --init`: TERM exits 143 (it dies of TERM)
 #   enosys       the suite under a seccomp profile where pidfd_open fails with ENOSYS; the pidfd
 #                probe must fall back to kill
 #   sh1          `sh` as PID 1 (no --init): strays --kill skips its live child unless named
@@ -28,14 +28,14 @@
 #                (scripts/dist-linux.sh); the npm packages installed with npm in both images, and
 #                the x64 package in the amd64 image (scripts/dist-linux-npm.sh), built here for
 #                amd64 in that image (needs the local amd64 base: ./test-all pull)
-#   hardened     the macOS suite against a sheepdog signed ad hoc with the hardened runtime (the
+#   hardened     the macOS suite against a sheepr signed ad hoc with the hardened runtime (the
 #                runtime notarization needs; PHASE3.md S1); every test binary must have run so
 #   bundle       the phase-3 packaging cells on this Mac (tests/dist: the exec door, bundle.sh,
 #                the commit override, the npm launcher; PHASE3.md §3)
 #   pull         (not automatic) fetch the pinned images from the registry; the one step that
 #                reaches it (Docker Desktop may show a keychain prompt for its credential helper)
 #   rc           (not automatic) the rc leg: tests/rc against the operator's rc output, read
-#                only; SD_RC_DIR=<out>/vX.Y.Z-rc.N and SD_RC_CONTROL_DIR=<same>-control (PHASE3.md §3)
+#                only; SR_RC_DIR=<out>/vX.Y.Z-rc.N and SR_RC_CONTROL_DIR=<same>-control (PHASE3.md §3)
 #   tcc          (not automatic) the macOS privacy grant through the PATH symlink: needs an
 #                installed release or rc and a click in System Settings; prints the steps
 #
@@ -48,9 +48,9 @@ ROOT=$PWD
 # --pull=never (a registry call can show a keychain prompt); `./test-all pull` fetches them.
 . scripts/release.conf || exit 3
 # the amd64 base under its own local name: this Docker store keeps one platform per reference, so
-# pulling linux/amd64 of $SD_IMG_ALPINE would make every native leg run amd64 (review, S1 round 3)
-AMD64_BASE="sd-amd64-base:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
-AMD64_IMG="sd-amd64-alpine:$(printf %s "${SD_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+# pulling linux/amd64 of $SR_IMG_ALPINE would make every native leg run amd64 (review, S1 round 3)
+AMD64_BASE="sr-amd64-base:$(printf %s "${SR_IMG_ALPINE##*sha256:}" | cut -c1-12)"
+AMD64_IMG="sr-amd64-alpine:$(printf %s "${SR_IMG_ALPINE##*sha256:}" | cut -c1-12)"
 case $(uname -m) in arm64|aarch64) NATIVE=aarch64 ;; *) NATIVE=$(uname -m) ;; esac
 # img_arch IMAGE [PLATFORM]: `uname -m` inside it (never pulls)
 img_arch() {
@@ -59,7 +59,7 @@ img_arch() {
 ALL="macos alpine debian amd64 pid1 init enosys sh1 other-user release bundle hardened dist-linux"
 [ "${1:-}" = "--list" ] && { echo "$ALL pull rc tcc"; exit 0; }
 LEGS="${*:-$ALL}"
-LOGDIR="${TMPDIR:-/tmp}/sheepdog-test-all.$$"
+LOGDIR="${TMPDIR:-/tmp}/sheepr-test-all.$$"
 mkdir -p "$LOGDIR"
 declare -a RESULTS=()
 CONTAINERS=()
@@ -101,7 +101,7 @@ bg_wait() {
 record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
 
 # A tag of its own for each leg (PHASE2.md §0.4): the runner adopts it, so every test process of
-# the leg carries SHEEPDOG_TEST_TAG=<it>, and after the suite any live process that still does is
+# the leg carries SHEEPR_TEST_TAG=<it>, and after the suite any live process that still does is
 # a leftover, whatever its name.
 legtag() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 
@@ -118,31 +118,31 @@ leg_run() { # leg-name docker-args...
 
 suite_in() { # image target-dir leg-name [docker args...]
   local img=$1 tgt=$2 name=$3; shift 3
-  leg_run "$name" "$@" -e SHEEPDOG_LEG_TAG="$(legtag)" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh
+  leg_run "$name" "$@" -e SHEEPR_LEG_TAG="$(legtag)" -v "$ROOT":/src:ro -v "$ROOT/$tgt":/tgt "$img" sh /src/scripts/linux-suite.sh
 }
 
 leg_macos() {
   [ "$(uname)" = Darwin ] || { record macos "skipped (not macOS)"; return 0; }
   local lt
   lt=$(legtag)
-  SHEEPDOG_LEG_TAG=$lt bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
+  SHEEPR_LEG_TAG=$lt bg_wait timeout -k 30 3600 cargo test --no-fail-fast > "$LOGDIR/macos.log" 2>&1
   local rc=$?
   local left tagged
-  # a nested run or a root shim found through the test PATH has argv[0] `sheepdog`
-  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
+  # a nested run or a root shim found through the test PATH has argv[0] `sheepr`
+  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sr-fixture|sheepr run)|sheepr (run|__root)|/bin/sleep 2[0-9]\.)")
   # and any process that still carries the leg's tag (`ps eww` shows the environment of every
   # process but Apple's platform binaries; the bracket keeps grep's own argv from matching)
-  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPDOG_TEST_TA[G]=$lt")
+  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPR_TEST_TA[G]=$lt")
   [ $rc -eq 0 ] && [ "$left" -eq 0 ] && [ "$tagged" -eq 0 ] && record macos PASS || record macos "FAIL (rc $rc, leftovers $left, tagged $tagged; $LOGDIR/macos.log)"
 }
 
 leg_alpine() {
-  suite_in "$SD_IMG_ALPINE" target-linux alpine --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+  suite_in "$SR_IMG_ALPINE" target-linux alpine --privileged -e SR_REUSE_TEST=1 -e SR_LEG_PROBE=pidfd \
     && record alpine PASS || record alpine "FAIL ($LOGDIR/alpine.log)"
 }
 
 leg_debian() {
-  suite_in "$SD_IMG_SLIM" target-linux-gnu debian --privileged -e SD_REUSE_TEST=1 -e SD_LEG_PROBE=pidfd \
+  suite_in "$SR_IMG_SLIM" target-linux-gnu debian --privileged -e SR_REUSE_TEST=1 -e SR_LEG_PROBE=pidfd \
     && record debian PASS || record debian "FAIL ($LOGDIR/debian.log)"
 }
 
@@ -171,32 +171,32 @@ amd64_image() { # the amd64 test image ($AMD64_IMG), built once from the local b
 leg_amd64() {
   local img=$AMD64_IMG
   amd64_image || { record amd64 "FAIL ($AMD64_WHY)"; return; }
-  suite_in "$img" target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SD_PS_SHIM=1 \
+  suite_in "$img" target-linux-amd64 amd64 --platform linux/amd64 --privileged -e SR_PS_SHIM=1 \
     && record amd64 PASS || record amd64 "FAIL ($LOGDIR/amd64.log)"
 }
 
-# Build sheepdog for amd64 in the amd64 image, into target-linux-amd64 (the suite builds into the
+# Build sheepr for amd64 in the amd64 image, into target-linux-amd64 (the suite builds into the
 # container's own dir, so this is the one writer of that build; dist-linux packs it)
 build_amd64() {
   # built in the container's own target dir (a build into the share fails at random, PHASE2.md),
   # only the binary copied out
   leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepdog && mkdir -p /tgt/debug && cp /t/debug/sheepdog /tgt/debug/sheepdog'
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr'
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
-  leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SD_IMG_ALPINE" sh -c \
+  leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SR_IMG_ALPINE" sh -c \
     'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins'
 }
 
-# Start `sheepdog run -- sd-fixture ticker` as the container's main process; prints the id.
+# Start `sheepr run -- sr-fixture ticker` as the container's main process; prints the id.
 # (a command substitution runs this in a subshell: its id goes to a cidfile of its own, which
 # cleanup's *.cid glob covers even if the interrupt comes before the caller records it)
 start_job() { # extra docker args...
   local cf="$LOGDIR/job-$RANDOM$RANDOM.cid"
-  timeout 60 docker run -d --pull=never --cidfile "$cf" "$@" -e SHEEPDOG_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" \
-    /tgt/debug/sheepdog run --quiet -- /tgt/debug/sd-fixture ticker 29.1 /tmp/r
+  timeout 60 docker run -d --pull=never --cidfile "$cf" "$@" -e SHEEPR_TEST_SIGNAL_LOG=/tmp/log -v "$ROOT/target-linux":/tgt:ro "$SR_IMG_ALPINE" \
+    /tgt/debug/sheepr run --quiet -- /tgt/debug/sr-fixture ticker 29.1 /tmp/r
 }
 
 job_ready() { # id
@@ -210,7 +210,7 @@ job_ready() { # id
 
 ticks() { timeout 30 docker exec "$1" sh -c 'wc -l < /tmp/r.tick' 2>/dev/null | tr -d ' '; }
 
-# Every recorded member of the job has a line "<door> <pid> <sig>" in sheepdog's signal log
+# Every recorded member of the job has a line "<door> <pid> <sig>" in sheepr's signal log
 # (waits up to 10 s).
 logged_for_all() { # id sig
   local i=0
@@ -233,8 +233,8 @@ leg_pid1() {
   job_ready "$c" || why="job not ready"
   local pid1
   pid1=$(timeout 30 docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
-  case "${pid1%% *}" in */sheepdog) ;; *) why="${why:+$why; }PID 1 is not sheepdog: $pid1" ;; esac
-  # TSTP: sheepdog stops every member (a STOP in its signal log for each recorded one), then its
+  case "${pid1%% *}" in */sheepr) ;; *) why="${why:+$why; }PID 1 is not sheepr: $pid1" ;; esac
+  # TSTP: sheepr stops every member (a STOP in its signal log for each recorded one), then its
   # own stop is ignored (an init: discarded), so it continues each member it stopped (a CONT for
   # each) and the job runs on. Read on readiness: the log lines.
   timeout 30 docker kill -s TSTP "$c" >/dev/null
@@ -264,7 +264,7 @@ leg_init() {
   job_ready "$c" || why="job not ready"
   local pid1
   pid1=$(timeout 30 docker exec "$c" sh -c 'cat /proc/1/cmdline | tr "\0" " "')
-  case "${pid1%% *}" in */sheepdog) why="${why:+$why; }PID 1 is sheepdog (no --init?)" ;; esac
+  case "${pid1%% *}" in */sheepr) why="${why:+$why; }PID 1 is sheepr (no --init?)" ;; esac
   timeout 30 docker kill -s TERM "$c" >/dev/null
   local code
   code=$(wait_exit "$c")
@@ -275,7 +275,7 @@ leg_init() {
 leg_enosys() {
   local prof="$LOGDIR/seccomp-enosys.json"
   echo '{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["pidfd_open"],"action":"SCMP_ACT_ERRNO","errnoRet":38}]}' > "$prof"
-  suite_in "$SD_IMG_ALPINE" target-linux enosys --security-opt "seccomp=$prof" -e SD_LEG_PROBE=kill \
+  suite_in "$SR_IMG_ALPINE" target-linux enosys --security-opt "seccomp=$prof" -e SR_LEG_PROBE=kill \
     && record enosys PASS || record enosys "FAIL ($LOGDIR/enosys.log)"
 }
 
@@ -283,7 +283,7 @@ leg_sh1() {
   build_alpine || { record sh1 "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
   # no --init: the script's shell is PID 1 (the shape under test)
   rm -f "$LOGDIR/sh1.cid"
-  bg_wait timeout -k 30 600 docker run --rm --pull=never --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro "$SD_IMG_ALPINE" sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
+  bg_wait timeout -k 30 600 docker run --rm --pull=never --cidfile "$LOGDIR/sh1.cid" -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt:ro "$SR_IMG_ALPINE" sh /src/scripts/sh1-leg.sh > "$LOGDIR/sh1.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/sh1.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/sh1.cid")" >/dev/null 2>&1
   [ $rc -eq 0 ] && record sh1 PASS || record sh1 "FAIL ($LOGDIR/sh1.log)"
@@ -292,7 +292,7 @@ leg_sh1() {
 leg_other_user() {
   # --init: the script's shell must not be PID 1 (BusyBox `timeout` execs the command, so a test
   # binary would be a child of PID 1, which a cell that needs an ancestor above it refuses)
-  leg_run other-user -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SD_IMG_ALPINE" sh /src/scripts/linux-other-user.sh \
+  leg_run other-user -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SR_IMG_ALPINE" sh /src/scripts/linux-other-user.sh \
     && record other-user PASS || record other-user "FAIL ($LOGDIR/other-user.log)"
 }
 
@@ -309,15 +309,15 @@ leg_bundle() {
 leg_dist_linux() {
   build_alpine || { record dist-linux "FAIL (build; $LOGDIR/build-alpine.log)"; return; }
   local srv="$LOGDIR/dist-srv" art i ok=1
-  art=sheepdog-linux-$NATIVE
+  art=sheepr-linux-$NATIVE
   rm -rf "$srv" && mkdir -p "$srv"
   sh scripts/lib/render-install.sh scripts/install.sh 0.0.0 "$srv/install.sh" || { record dist-linux "FAIL (render)"; return; }
   # the README's Docker snippet: its RUN line joined as Docker joins it, and its ARG's version
   awk '/^```dockerfile$/{f=1; next} /^```$/{f=0} f && /^RUN /{r=1} f && r {l=$0; if (sub(/\\$/, "", l)) printf "%s", l; else {print l; r=0}}' README.md \
-    | sed 's/^RUN //' > "$srv/readme-run.sh" && sed -n 's/^ARG SHEEPDOG_VERSION=//p' README.md > "$srv/readme-version" \
+    | sed 's/^RUN //' > "$srv/readme-run.sh" && sed -n 's/^ARG SHEEPR_VERSION=//p' README.md > "$srv/readme-version" \
     && [ -s "$srv/readme-run.sh" ] && [ -s "$srv/readme-version" ] || { record dist-linux "FAIL (no Docker snippet in README.md)"; return; }
-  cp "$ROOT/target-linux/debug/sheepdog" "$srv/$art" && (cd "$srv" && shasum -a 256 "$art" > SHA256SUMS) || { record dist-linux "FAIL (serve dir)"; return; }
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+  cp "$ROOT/target-linux/debug/sheepr" "$srv/$art" && (cd "$srv" && shasum -a 256 "$art" > SHA256SUMS) || { record dist-linux "FAIL (serve dir)"; return; }
+  for i in "$SR_IMG_ALPINE" "$SR_IMG_SLIM"; do
     echo "== dist-linux in $i" >> "$LOGDIR/dist-linux.log"
     bg_wait timeout -k 30 900 docker run --rm --pull=never -v "$srv":/srv:ro -v "$ROOT/target-linux":/tgt:ro -v "$ROOT/scripts":/scripts:ro \
       "$i" sh /scripts/dist-linux.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
@@ -328,10 +328,10 @@ leg_dist_linux() {
   # stand-in, not run)
   local pk="$LOGDIR/dist-npm" other
   case $NATIVE in aarch64) other=linux-x64 ;; *) other=linux-arm64 ;; esac
-  rm -rf "$pk" && mkdir -p "$pk/tgz" "$pk/tgz-noplat" "$pk/app/Sheepdog.app/Contents/MacOS" \
-    && printf '<plist/>\n' > "$pk/app/Sheepdog.app/Contents/Info.plist" && printf '#!/bin/sh\n' > "$pk/app/Sheepdog.app/Contents/MacOS/sheepdog" \
-    && chmod 755 "$pk/app/Sheepdog.app/Contents/MacOS/sheepdog" && sh scripts/lib/archive.sh make "$pk/app/Sheepdog.app" "$pk/mac.tar.gz" \
-    && cp "$ROOT/target-linux/debug/sheepdog" "$pk/bin-$( [ $NATIVE = aarch64 ] && echo linux-arm64 || echo linux-x64)" \
+  rm -rf "$pk" && mkdir -p "$pk/tgz" "$pk/tgz-noplat" "$pk/app/Sheepr.app/Contents/MacOS" \
+    && printf '<plist/>\n' > "$pk/app/Sheepr.app/Contents/Info.plist" && printf '#!/bin/sh\n' > "$pk/app/Sheepr.app/Contents/MacOS/sheepr" \
+    && chmod 755 "$pk/app/Sheepr.app/Contents/MacOS/sheepr" && sh scripts/lib/archive.sh make "$pk/app/Sheepr.app" "$pk/mac.tar.gz" \
+    && cp "$ROOT/target-linux/debug/sheepr" "$pk/bin-$( [ $NATIVE = aarch64 ] && echo linux-arm64 || echo linux-x64)" \
     || { record dist-linux "FAIL (npm fixture)"; return; }
   # the other arch's package: on an arm64 host, this tree built for amd64 in the amd64 image (run in
   # that image below); on an x86_64 host, a stand-in (an arm64 build there is not run)
@@ -342,14 +342,14 @@ leg_dist_linux() {
     touch "$LOGDIR/amd64-build.stamp"
     if amd64_image; then build_amd64 || amd_why="amd64 build; $LOGDIR/build-amd64.log"; else amd_why=$AMD64_WHY; fi
   fi
-  if [ $NATIVE = aarch64 ] && [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ]; then cp "$ROOT/target-linux-amd64/debug/sheepdog" "$pk/bin-$other"
+  if [ $NATIVE = aarch64 ] && [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepr" ]; then cp "$ROOT/target-linux-amd64/debug/sheepr" "$pk/bin-$other"
   else printf '#!/bin/sh\necho stand-in\n' > "$pk/bin-$other"; fi
-  sh scripts/lib/npm-pack.sh 0.0.0 "$pk/mac.tar.gz" "$pk/bin-linux-arm64" "$pk/bin-linux-x64" npm/sheepdog/bin/sheepdog "$pk/tgz" > /dev/null \
-    && cp npm/sheepdog/bin/sheepdog "$pk/launcher" && python3 scripts/lib/static-registry.py "$pk/reg" 4873 "" "$pk/tgz" \
-    && cp "$pk/tgz/lukaso-sheepdog-0.0.0.tgz" "$pk/tgz/lukaso-sheepdog-darwin-universal-0.0.0.tgz" "$pk/tgz-noplat/" \
+  sh scripts/lib/npm-pack.sh 0.0.0 "$pk/mac.tar.gz" "$pk/bin-linux-arm64" "$pk/bin-linux-x64" npm/sheepr/bin/sheepr "$pk/tgz" > /dev/null \
+    && cp npm/sheepr/bin/sheepr "$pk/launcher" && python3 scripts/lib/static-registry.py "$pk/reg" 4873 "" "$pk/tgz" \
+    && cp "$pk/tgz/sheepr-0.0.0.tgz" "$pk/tgz/sheepr-darwin-universal-0.0.0.tgz" "$pk/tgz-noplat/" \
     && python3 scripts/lib/static-registry.py "$pk/reg-noplat" 4874 "" "$pk/tgz-noplat" \
     || { record dist-linux "FAIL (npm packages; $LOGDIR/dist-linux.log)"; return; }
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+  for i in "$SR_IMG_ALPINE" "$SR_IMG_SLIM"; do
     echo "== dist-linux npm in $i" >> "$LOGDIR/dist-linux.log"
     bg_wait timeout -k 30 1200 docker run --rm --pull=never -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
       "$i" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
@@ -358,7 +358,7 @@ leg_dist_linux() {
     echo "== dist-linux npm in $AMD64_IMG (linux/amd64)" >> "$LOGDIR/dist-linux.log"
     # the amd64 build must be this tree's: no source newer than it
     local stale; stale=$(find "$ROOT/src" "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/build.rs" -newer "$LOGDIR/amd64-build.stamp" -type f 2>/dev/null | head -1)
-    if [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepdog" ] && [ -z "$stale" ]; then
+    if [ -z "$amd_why" ] && [ -x "$ROOT/target-linux-amd64/debug/sheepr" ] && [ -z "$stale" ]; then
       bg_wait timeout -k 30 2400 docker run --rm --pull=never --platform linux/amd64 -v "$pk":/pk:ro -v "$ROOT/scripts":/scripts:ro \
         "$AMD64_IMG" sh /scripts/dist-linux-npm.sh >> "$LOGDIR/dist-linux.log" 2>&1 || ok=0
     else echo "FAIL: the x64 package was not built for this tree (${amd_why:-${stale:+$stale is newer than the build}})" >> "$LOGDIR/dist-linux.log"; ok=0; fi
@@ -370,11 +370,11 @@ leg_hardened() {
   [ "$(uname -s)" = Darwin ] || { record hardened "skipped (not macOS)"; return; }
   local ev="$LOGDIR/hardened.flags" lt left tagged; : > "$ev"
   lt=$(legtag)
-  SHEEPDOG_LEG_TAG=$lt bg_wait env SD_TEST_HARDENED="$ev" timeout -k 30 5400 cargo test --no-fail-fast > "$LOGDIR/hardened.log" 2>&1
+  SHEEPR_LEG_TAG=$lt bg_wait env SR_TEST_HARDENED="$ev" timeout -k 30 5400 cargo test --no-fail-fast > "$LOGDIR/hardened.log" 2>&1
   local rc=$?
   # the same leftover checks as the macos leg
-  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sd-fixture|sheepdog run)|sheepdog (run|__root)|/bin/sleep 2[0-9]\.)")
-  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPDOG_TEST_TA[G]=$lt")
+  left=$(ps -Ao args | grep -cE "^($ROOT/target/debug/(sr-fixture|sheepr run)|sheepr (run|__root)|/bin/sleep 2[0-9]\.)")
+  tagged=$(ps eww -A -o pid=,command= | grep -c "SHEEPR_TEST_TA[G]=$lt")
   # the evidence: one line per test binary, each with the runtime flag
   local n bins bins_run
   n=$(awk '$2 == "adhoc,runtime"' "$ev" | grep -c .); bins=$(grep -c . "$ev")
@@ -387,29 +387,29 @@ leg_pull() {
   local ok=1 i
   # amd64 first, tagged under its own name; then the native images last, so the pinned
   # references point at the native platform again
-  echo "pulling linux/amd64 $SD_IMG_ALPINE (Docker Desktop may ask for keychain access)"
-  timeout 1800 docker pull -q --platform linux/amd64 "$SD_IMG_ALPINE" >> "$LOGDIR/pull.log" 2>&1 \
-    && timeout 60 docker tag "$SD_IMG_ALPINE" "$AMD64_BASE" || ok=0
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+  echo "pulling linux/amd64 $SR_IMG_ALPINE (Docker Desktop may ask for keychain access)"
+  timeout 1800 docker pull -q --platform linux/amd64 "$SR_IMG_ALPINE" >> "$LOGDIR/pull.log" 2>&1 \
+    && timeout 60 docker tag "$SR_IMG_ALPINE" "$AMD64_BASE" || ok=0
+  for i in "$SR_IMG_ALPINE" "$SR_IMG_SLIM"; do
     echo "pulling $i"
     timeout 1800 docker pull -q "$i" >> "$LOGDIR/pull.log" 2>&1 || ok=0
   done
-  [ "$(img_arch "$SD_IMG_ALPINE")" = "$NATIVE" ] && [ "$(img_arch "$SD_IMG_SLIM")" = "$NATIVE" ] \
+  [ "$(img_arch "$SR_IMG_ALPINE")" = "$NATIVE" ] && [ "$(img_arch "$SR_IMG_SLIM")" = "$NATIVE" ] \
     && [ "$(img_arch "$AMD64_BASE" linux/amd64)" = x86_64 ] || { echo "pull: an image has the wrong platform" >> "$LOGDIR/pull.log"; ok=0; }
   [ $ok = 1 ] && record pull PASS || record pull "FAIL ($LOGDIR/pull.log)"
 }
 
 leg_rc() {
   [ "$(uname -s)" = Darwin ] || { record rc "FAIL (macOS only)"; return; }
-  bg_wait timeout -k 30 3600 env SD_RC_DIR="${SD_RC_DIR:-}" SD_RC_CONTROL_DIR="${SD_RC_CONTROL_DIR:-}" sh tests/rc/run.sh > "$LOGDIR/rc.log" 2>&1 \
+  bg_wait timeout -k 30 3600 env SR_RC_DIR="${SR_RC_DIR:-}" SR_RC_CONTROL_DIR="${SR_RC_CONTROL_DIR:-}" sh tests/rc/run.sh > "$LOGDIR/rc.log" 2>&1 \
     && record rc PASS || record rc "FAIL ($LOGDIR/rc.log)"
 }
 
 leg_tcc() {
   cat <<'TXT'
 The grant leg needs the operator (PHASE3.md S7), with a release or rc installed by its own
-install.sh (so ~/.local/bin/sheepdog links into ~/Applications/Sheepdog.app):
-  1. Full Disk Access off for Sheepdog: sheepdog run -- ls ~/Library/Safari   (must be denied)
+install.sh (so ~/.local/bin/sheepr links into ~/Applications/Sheepr.app):
+  1. Full Disk Access off for Sheepr: sheepr run -- ls ~/Library/Safari   (must be denied)
   2. Turn it on: System Settings > Privacy & Security > Full Disk Access.
   3. The same command through the link: must exit 0.
   4. Off again: denied, with no prompt.
@@ -425,7 +425,7 @@ native_check() {
   [ -n "$NATIVE_CHECKED" ] && return
   NATIVE_CHECKED=1
   local i a
-  for i in "$SD_IMG_ALPINE" "$SD_IMG_SLIM"; do
+  for i in "$SR_IMG_ALPINE" "$SR_IMG_SLIM"; do
     a=$(img_arch "$i")
     if [ -z "$a" ]; then NATIVE_BAD="$NATIVE_BAD $i is missing or Docker is unreachable;"
     elif [ "$a" != "$NATIVE" ]; then NATIVE_BAD="$NATIVE_BAD $i runs as '$a' (want $NATIVE; run ./test-all pull);"; fi

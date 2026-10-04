@@ -1,5 +1,5 @@
 //! The caps (PLAN.md §3.1, §3.4; PHASE2.md §1 decisions 9-10): `--timeout` (running time: the
-//! time sheepdog spends stopped by its own job control is not counted; a discarded stop costs
+//! time sheepr spends stopped by its own job control is not counted; a discarded stop costs
 //! nothing, so then all time counts), `--max-mem` (the sum over live members: macOS
 //! `ri_phys_footprint`; Linux `smaps_rollup` Pss, `statm` RSS where that is missing), and
 //! `--max-procs` (live members). Evaluated on every tick while the job runs and on every scan
@@ -41,7 +41,7 @@ pub fn start() {
     with(|c| c.start = Instant::now());
 }
 
-/// Sheepdog was stopped by its own job control for `d`: that time does not run the job.
+/// Sheepr was stopped by its own job control for `d`: that time does not run the job.
 pub fn exclude(d: Duration) {
     with(|c| c.stopped_for += d);
 }

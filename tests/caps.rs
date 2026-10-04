@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-caps-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-caps-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -44,21 +44,21 @@ struct Run {
     code: Option<i32>,
     status: Option<Json>,
     took: Duration,
-    /// sheepdog's stderr (for messages)
+    /// sheepr's stderr (for messages)
     err: String,
-    /// sheepdog's trace (SHEEPDOG_TEST_TRACE)
+    /// sheepr's trace (SHEEPR_TEST_TRACE)
     trace: String,
 }
 
-/// `sheepdog run --status-fd 3 ARGS` (through a shell), bounded by `limit`; `during` runs while
-/// it does and may end it early (returning true stops the wait with a TERM to sheepdog).
+/// `sheepr run --status-fd 3 ARGS` (through a shell), bounded by `limit`; `during` runs while
+/// it does and may end it early (returning true stops the wait with a TERM to sheepr).
 fn run(d: &Path, name: &str, args: &str, env: &[(&str, &str)], limit: Duration, mut during: impl FnMut() -> bool) -> Run {
     let out = d.join(format!("{name}.status"));
     let errf = d.join(format!("{name}.err"));
     let tracef = d.join(format!("{name}.trace"));
     let mut cmd = Command::new("/bin/sh");
-    cmd.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {args} 3>"{}" 2>"{}""#, out.display(), errf.display())]).env("SD", sheepdog()).env("FX", fixture());
-    cmd.env("SHEEPDOG_TEST_TRACE", &tracef);
+    cmd.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {args} 3>"{}" 2>"{}""#, out.display(), errf.display())]).env("SD", sheepr()).env("FX", fixture());
+    cmd.env("SHEEPR_TEST_TRACE", &tracef);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -212,7 +212,7 @@ fn the_roots_exit_comes_before_a_cap_in_one_wake() {
     // first check, which then saw the root and at most one `sleep`: within --max-procs 2); three
     // members outlive the root, so the job stays past the cap after the root exits
     let body = |r: &Path, end: &str| format!(r#"--max-procs 2 -- /bin/sh -c ': > "{0}"; while [ ! -e "{0}.ready" ]; do sleep 0.01; done; "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & "$FX" sigcount "{0}" & while [ "$(wc -l < "{0}")" -lt 3 ]; do sleep 0.01; done; {end}'"#, r.display());
-    let hold = |r: &Path| [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500".to_string()), ("SHEEPDOG_TEST_READY_FILE", format!("{}.ready", r.display()))];
+    let hold = |r: &Path| [("SHEEPR_TEST_SLEEP_BEFORE_WAIT_MS", "1500".to_string()), ("SHEEPR_TEST_READY_FILE", format!("{}.ready", r.display()))];
     let (h1, h2) = (hold(&r1), hold(&r2));
     let (e1, e2): (Vec<(&str, &str)>, Vec<(&str, &str)>) = (h1.iter().map(|(k, v)| (*k, v.as_str())).collect(), h2.iter().map(|(k, v)| (*k, v.as_str())).collect());
     let ended = run(&d, "exit", &body(&r1, "exit 7"), &e1, Duration::from_secs(30), || false);
@@ -227,14 +227,14 @@ fn the_roots_exit_comes_before_a_cap_in_one_wake() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// A TERM and a cap in one wake: the TERM is the trigger and sheepdog dies of TERM, on both
+/// A TERM and a cap in one wake: the TERM is the trigger and sheepr dies of TERM, on both
 /// OSes (the TERM arrives while a seam holds the supervisor and the job is past the cap).
 #[test]
 fn a_term_comes_before_a_cap_in_one_wake() {
     let d = scratch("termcap");
     let r1 = d.join("rec");
     let ready = format!("{}.ready", r1.display());
-    let hold = [("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "1500"), ("SHEEPDOG_TEST_READY_FILE", ready.as_str())];
+    let hold = [("SHEEPR_TEST_SLEEP_BEFORE_WAIT_MS", "1500"), ("SHEEPR_TEST_READY_FILE", ready.as_str())];
     // as above: the root forks past --max-procs 2 once the supervisor holds; the TERM comes
     // while it holds
     let r = run(
@@ -255,7 +255,7 @@ fn a_term_comes_before_a_cap_in_one_wake() {
 }
 
 /// `--kill-deadline` shortens the kill deadline: a member that cannot be killed (seam) makes
-/// sheepdog give up after about 0.5 s, not the default 10 s (exit 125, deadline_missed).
+/// sheepr give up after about 0.5 s, not the default 10 s (exit 125, deadline_missed).
 #[test]
 fn kill_deadline_shortens_the_deadline() {
     let d = scratch("deadline");
@@ -264,7 +264,7 @@ fn kill_deadline_shortens_the_deadline() {
         &d,
         "dl",
         &format!(r#"--grace 0 --kill-deadline 500ms -- "$FX" escape 29.8 "{}""#, r1.display()),
-        &[("SHEEPDOG_TEST_NOKILL", "1")],
+        &[("SHEEPR_TEST_NOKILL", "1")],
         Duration::from_secs(30),
         || false,
     );
@@ -278,7 +278,7 @@ fn kill_deadline_shortens_the_deadline() {
 }
 
 /// Review P2-4: a TERM from outside is the trigger from the moment it is taken: a timeout that
-/// then expires during the kill's TERM grace is a note, and sheepdog dies of the TERM.
+/// then expires during the kill's TERM grace is a note, and sheepr dies of the TERM.
 #[test]
 fn a_term_before_the_timeout_stays_the_trigger() {
     let d = scratch("termfirst");
@@ -297,6 +297,6 @@ fn a_term_before_the_timeout_stays_the_trigger() {
     }
     assert_eq!(field(&r, "trigger").and_then(Json::str), Some("term"));
     assert!(notes(&r).iter().any(|n| n.starts_with("timeout")), "notes {:?}", notes(&r));
-    assert_eq!(r.code, None, "sheepdog dies of the TERM");
+    assert_eq!(r.code, None, "sheepr dies of the TERM");
     let _ = std::fs::remove_dir_all(&d);
 }

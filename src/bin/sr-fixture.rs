@@ -1,13 +1,13 @@
 //! Test fixture, not a product binary. Every mode writes `<pid> <identity>` lines to
 //! <record-file> for the processes it creates, so the checker can find them by identity
-//! (sheepdog::ident) and not only by argv. Every escapee runs `/bin/sleep <marker>`: the marker
+//! (sheepr::ident) and not only by argv. Every escapee runs `/bin/sleep <marker>`: the marker
 //! is a number such as `29.0123456`, unique to one test iteration, so a leak ends by itself
 //! after at most 29 s.
 //!
 //! Modes (PLAN.md §6):
 //! - `escape M R`: cell 3, shape "root waits". The root forks C; C calls setsid, forks G,
 //!   passes G's pid up a pipe and exits at once; the root records G and exits. The root is the
-//!   recorder because sheepdog never kills it before it exits (a C or G recorder can be killed
+//!   recorder because sheepr never kills it before it exits (a C or G recorder can be killed
 //!   before it writes: on Debian 26% were), so creation is counted exactly.
 //! - `escape-fast M R`: cell 3, shape "root exits at once" (does not wait for G). C records G
 //!   and can be killed before it does, so the creation count is a lower bound.
@@ -15,7 +15,7 @@
 //!   checker's control: only the identity check can find this G.
 //! - `breed M R N`: cell 7 (lite). As `escape`, but G keeps forking: N children, one every
 //!   200 µs, each recorded by G and running `/bin/sleep M`. The root exits as soon as G exists,
-//!   so the breeding happens while sheepdog is killing. A kill without freeze-and-repeat misses
+//!   so the breeding happens while sheepr is killing. A kill without freeze-and-repeat misses
 //!   children created between its scan and its signal.
 //! - `chain M R N [DELAY_US]`: cell 7 (chain). As `escape`, but G runs a chain of N generations:
 //!   each generation waits DELAY_US (default 500 µs; 0 = as fast as fork allows), forks its successor and exits, so the tree keeps moving; the last
@@ -25,11 +25,11 @@
 //!   do this (`trap '' CHLD` leaves SIGCHLD handled), so the SIGCHLD test needs it.
 //! - `print-mask`: print the numbers of the blocked signals, one per line.
 //! - `test-env TESTBIN ARGS...`: the cargo runner's body (`scripts/test-env`, PHASE2.md §0.4).
-//!   Runs TESTBIN with the test environment: a tag (`SHEEPDOG_LEG_TAG` if set, else 128 random
-//!   bits) in `SHEEPDOG_TEST_TAG`, a canary `SHEEPDOG_TEST_STATE` without the sentinel, a
-//!   withheld sink in `SHEEPDOG_TEST_SINK`, and first on PATH a directory whose `sheepdog` is a
+//!   Runs TESTBIN with the test environment: a tag (`SHEEPR_LEG_TAG` if set, else 128 random
+//!   bits) in `SHEEPR_TEST_TAG`, a canary `SHEEPR_TEST_STATE` without the sentinel, a
+//!   withheld sink in `SHEEPR_TEST_SINK`, and first on PATH a directory whose `sheepr` is a
 //!   symlink to the debug binary next to TESTBIN's `deps` directory; every other inherited
-//!   `SHEEPDOG_*` and `XDG_STATE_HOME` removed. It forwards TERM and INT, waits, passes the exit
+//!   `SHEEPR_*` and `XDG_STATE_HOME` removed. It forwards TERM and INT, waits, passes the exit
 //!   status on, and fails the run if anything was written to the canary or the sink.
 //! - `term-logger M R [stop]`: as `escape`, but G does not exec: it catches TERM, appends
 //!   `TERM <pid>` to `<R>.term` and exits 0. With `stop`, G first stops itself (SIGSTOP), so it
@@ -79,7 +79,7 @@
 //!   (`/bin/sleep M`, recorded), lives 300 ms and exits. This process then waits (60 s at most).
 //! - `escape-exec R PROG ARGS...`: S7 (cells 8, 9). As `escape`, but G records itself and then
 //!   execs PROG ARGS (`/bin/bash`, `env -i`, ...); the root records G too and exits (with
-//!   SD_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
+//!   SR_EXEC_READY=<file>, only once that file is non-empty: the route reached its program).
 //! - `storm DONE SECS`: S7 (cell 7, zombies). C (a new session) forks every 5 ms for SECS s; each
 //!   child forks an orphan that exits 20 ms later. Then this process creates DONE and waits.
 //! - `spawnp PROG ARGS...`: run PROG with posix_spawnp in this environment (PATH may be unset)
@@ -107,7 +107,7 @@
 //!   process is this fixture (60 s at most). R's lines: W, then E, then C.
 //! - `lineage-kill R GO1 GO2 RC`: P4 review (P1-B). W records itself and forks C; C forks E and
 //!   records itself once E has; C exits on GO1 (E is reparented, but the journal saw E under C
-//!   under W); on GO2, E runs `sheepdog kill <W>` (by name, the test PATH), waits for it, writes
+//!   under W); on GO2, E runs `sheepr kill <W>` (by name, the test PATH), waits for it, writes
 //!   its code to RC (its stderr to RC.err) and waits; without GO2 it exits and runs nothing. So the kill's own parent, E, is in W's journaled subtree although
 //!   W is no ancestor of it. R's lines: W, E, C.
 //! - `doublefork M R`: PHASE2.md P2 (`killed[].escaped`). The root forks C; C forks G (no new
@@ -117,10 +117,10 @@
 //!   line `SIG <n>` in `R.sig` and keeps running (SIGALRM ends it after 1800 s at most).
 //! - `bg-then-exec M PROG ARGS...`: fork a background job (`/bin/sleep M`, stdout and stderr
 //!   to /dev/null), then exec PROG in this process, with no shell in between (a shell such as
-//!   dash would reset the signal mask). This is the "job & exec sheepdog" shape.
+//!   dash would reset the signal mask). This is the "job & exec sheepr" shape.
 //!   `bg-apart-then-exec` is the same, but the background job moves to a group of its own.
 
-use sheepdog::ident::identity;
+use sheepr::ident::identity;
 use std::ffi::CString;
 use std::io::Write;
 
@@ -187,8 +187,8 @@ unsafe fn suspect_tree(dir: &str, untagged: bool) -> ! {
         libc::usleep(30_000);
         orphan(dir, "g", false, || {
             if libc::fork() == 0 {
-                // with SD_SUP (a sheepdog): gc is a supervisor whose job's root is `sigcount gc`
-                if let Ok(sd) = std::env::var("SD_SUP") {
+                // with SR_SUP (a sheepr): gc is a supervisor whose job's root is `sigcount gc`
+                if let Ok(sd) = std::env::var("SR_SUP") {
                     let me = std::env::current_exe().unwrap();
                     let args: Vec<CString> = [sd.as_str(), "run", "--", me.to_str().unwrap(), "sigcount", &format!("{dir}/gc")].iter().map(|s| CString::new(*s).unwrap()).collect();
                     let mut p: Vec<*const libc::c_char> = args.iter().map(|c| c.as_ptr()).collect();
@@ -228,10 +228,10 @@ fn reg_client(path: &std::path::Path, rec: &[u8], conn: &str) -> String {
     }
     // after the record: no file-system call inside the outer's per-connection deadline
     let _ = std::fs::write(conn, b"");
-    // the answer's timeout: SD_REG_TIMEOUT_MS, default 2000 (a cell that holds the outer back
+    // the answer's timeout: SR_REG_TIMEOUT_MS, default 2000 (a cell that holds the outer back
     // on purpose gives its clients longer)
     // (at least 1 ms: a zero timeout is refused by the socket and would mean no timeout at all)
-    let ms: u64 = std::env::var("SD_REG_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000).max(1);
+    let ms: u64 = std::env::var("SR_REG_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000).max(1);
     let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(ms)));
     let mut b = [0u8; 1];
     match s.read(&mut b) {
@@ -553,7 +553,7 @@ static mut FORK_TICK: [u8; 512] = [0; 512];
 static mut FORK_REC: [u8; 512] = [0; 512];
 
 /// ticker fork-on-tstp: 200 ms after a TSTP, fork a ticking child (recorded), and keep running
-/// (the root does not stop by itself, so sheepdog SIGSTOPs it after its wait). It allocates
+/// (the root does not stop by itself, so sheepr SIGSTOPs it after its wait). It allocates
 /// inside the handler (`format!`, `record`): safe only because the root's main loop sits in
 /// `pause()` and allocates nothing (a fixture, not a pattern).
 extern "C" fn fork_on_tstp(_: libc::c_int) {
@@ -588,7 +588,7 @@ extern "C" fn regroup_tstp(_: libc::c_int) {
         libc::sigemptyset(&mut one);
         libc::sigaddset(&mut one, libc::SIGTSTP);
         libc::sigprocmask(libc::SIG_UNBLOCK, &one, std::ptr::null_mut());
-        // first some work (restoring the terminal): the second TSTP then reaches sheepdog while
+        // first some work (restoring the terminal): the second TSTP then reaches sheepr while
         // it is stopping the job, not together with the terminal's
         libc::usleep(100_000);
         libc::kill(0, libc::SIGTSTP);
@@ -607,8 +607,8 @@ unsafe fn tick_forever(tick: &CString) -> ! {
     }
 }
 
-/// Is this process's parent a sheepdog (its executable's file name)?
-fn parent_is_sheepdog() -> bool {
+/// Is this process's parent a sheepr (its executable's file name)?
+fn parent_is_sheepr() -> bool {
     let ppid = unsafe { libc::getppid() };
     // under a binary translator (Rosetta, qemu-user) the exe link names the translator: argv[0]
     #[cfg(target_os = "linux")]
@@ -627,7 +627,7 @@ fn parent_is_sheepdog() -> bool {
         let n = unsafe { libc::proc_pidpath(ppid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
         String::from_utf8_lossy(&buf[..n.max(0) as usize]).into_owned()
     };
-    path.rsplit('/').next() == Some("sheepdog")
+    path.rsplit('/').next() == Some("sheepr")
 }
 
 /// Re-exec this fixture as `mode M R` with the responsibility disclaim (macOS), so the new
@@ -721,30 +721,30 @@ fn test_env(argv: &[String]) -> ! {
     use std::path::{Path, PathBuf};
     let bin = PathBuf::from(&argv[0]);
     let profile = bin.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
-    let tag = std::env::var("SHEEPDOG_LEG_TAG").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| {
+    let tag = std::env::var("SHEEPR_LEG_TAG").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| {
         let mut b = [0u8; 16];
         let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut b)).is_ok();
         if !ok {
-            eprintln!("sd-test-env: cannot read /dev/urandom");
+            eprintln!("sr-test-env: cannot read /dev/urandom");
             std::process::exit(125);
         }
         b.iter().map(|x| format!("{x:02x}")).collect()
     });
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("sd-testenv.{}.{nanos}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("sr-testenv.{}.{nanos}", std::process::id()));
     let (bindir, canary, sink) = (dir.join("bin"), dir.join("canary"), dir.join("sink"));
     let made = std::fs::create_dir_all(&bindir)
         .and_then(|_| std::fs::create_dir(&canary))
         .and_then(|_| std::fs::write(&sink, b""))
-        .and_then(|_| std::os::unix::fs::symlink(profile.join("sheepdog"), bindir.join("sheepdog")));
+        .and_then(|_| std::os::unix::fs::symlink(profile.join("sheepr"), bindir.join("sheepr")));
     if let Err(e) = made {
-        eprintln!("sd-test-env: cannot make {}: {e}", dir.display());
+        eprintln!("sr-test-env: cannot make {}: {e}", dir.display());
         std::process::exit(125);
     }
     let mut cmd = std::process::Command::new(&bin);
     cmd.args(&argv[1..]);
     for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("SHEEPDOG_") {
+        if k.to_string_lossy().starts_with("SHEEPR_") {
             cmd.env_remove(&k);
         }
     }
@@ -753,14 +753,14 @@ fn test_env(argv: &[String]) -> ! {
     newpath.push(":");
     newpath.push(path);
     cmd.env_remove("XDG_STATE_HOME")
-        .env("SHEEPDOG_TEST_TAG", &tag)
-        .env("SHEEPDOG_TEST_STATE", &canary)
-        .env("SHEEPDOG_TEST_SINK", &sink)
+        .env("SHEEPR_TEST_TAG", &tag)
+        .env("SHEEPR_TEST_STATE", &canary)
+        .env("SHEEPR_TEST_SINK", &sink)
         .env("PATH", newpath);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("sd-test-env: cannot run {}: {e}", bin.display());
+            eprintln!("sr-test-env: cannot run {}: {e}", bin.display());
             std::process::exit(125);
         }
     };
@@ -791,10 +791,10 @@ fn test_env(argv: &[String]) -> ! {
     let canary_used = std::fs::read_dir(&canary).map(|mut d| d.next().is_some()).unwrap_or(true);
     let sink_used = std::fs::metadata(&sink).map(|m| m.len() > 0).unwrap_or(true);
     if canary_used {
-        eprintln!("sd-test-env: something wrote to the canary state directory {}", canary.display());
+        eprintln!("sr-test-env: something wrote to the canary state directory {}", canary.display());
     }
     if sink_used {
-        eprintln!("sd-test-env: signals were withheld; see {}", sink.display());
+        eprintln!("sr-test-env: signals were withheld; see {}", sink.display());
     }
     if canary_used || sink_used {
         if rc == 0 {
@@ -809,7 +809,7 @@ fn test_env(argv: &[String]) -> ! {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let usage = || -> ! {
-        eprintln!("usage: sd-fixture escape|escape-fast M R | escape-nomarker R | breed M R N");
+        eprintln!("usage: sr-fixture escape|escape-fast M R | escape-nomarker R | breed M R N");
         std::process::exit(2)
     };
     let mode = a.get(1).map(String::as_str).unwrap_or_else(|| usage());
@@ -1179,19 +1179,19 @@ fn main() {
         std::process::exit(0);
     }
     // `register SRC IDX CLAIM KIND OUT [M]`: register with entry IDX of a registration chain
-    // (SRC: `env` for SHEEPDOG_OUTER, else a file holding the chain's text), claiming pid CLAIM
+    // (SRC: `env` for SHEEPR_OUTER, else a file holding the chain's text), claiming pid CLAIM
     // (`self` for its own), sending a well-formed record (`good`) or one with a bad magic
     // (`bad`). Creates OUT.conn once connected and sent. Writes `ack`, `refused`, `none` (no answer in
-    // 2 s, or SD_REG_TIMEOUT_MS) or `err <why>` to OUT (via a rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
+    // 2 s, or SR_REG_TIMEOUT_MS) or `err <why>` to OUT (via a rename), then runs `/bin/sleep M` if M is given, else exits 0 on `ack` and 1 otherwise.
     if mode == "register" && (a.len() == 7 || a.len() == 8) {
-        let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
-        let (chain, _) = sheepdog::regwire::parse(&text);
+        let text = if a[2] == "env" { std::env::var(sheepr::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
+        let (chain, _) = sheepr::regwire::parse(&text);
         let idx: usize = a[3].parse().unwrap_or(usize::MAX);
         let claim = if a[4] == "self" { std::process::id() as i32 } else { a[4].parse().unwrap_or(0) };
         let res = match chain.get(idx) {
             None => "err no such entry".to_string(),
             Some(e) => {
-                let mut rec = sheepdog::regwire::record(&e.nonce, claim);
+                let mut rec = sheepr::regwire::record(&e.nonce, claim);
                 if a[5] == "bad" {
                     rec[0] = b'X';
                 }
@@ -1209,8 +1209,8 @@ fn main() {
     // `silent SRC N READY`: open N connections to entry 0 of the chain and send nothing; write
     // the count to READY; then become `sigcount READY.hold`, which keeps them open.
     if mode == "silent" && a.len() == 5 {
-        let text = if a[2] == "env" { std::env::var(sheepdog::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
-        let (chain, _) = sheepdog::regwire::parse(&text);
+        let text = if a[2] == "env" { std::env::var(sheepr::regwire::VAR).unwrap_or_default() } else { std::fs::read_to_string(&a[2]).unwrap_or_default() };
+        let (chain, _) = sheepr::regwire::parse(&text);
         let n: usize = a[3].parse().unwrap_or(0);
         let mut held = Vec::new();
         if let Some(e) = chain.first() {
@@ -1237,13 +1237,13 @@ fn main() {
     }
     #[cfg(target_os = "macos")]
     if mode == "redisclaim-c" && a.len() == 4 {
-        // C after its disclaim re-exec: start GG, live SD_C_LIFE_MS (default 700 ms), exit.
+        // C after its disclaim re-exec: start GG, live SR_C_LIFE_MS (default 700 ms), exit.
         // Exit 4 if the disclaim did not take effect (the cell would pass for another reason).
         if !self_responsible() {
             std::process::exit(4);
         }
         let m = CString::new(a[2].as_str()).unwrap();
-        let life: u32 = std::env::var("SD_C_LIFE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700);
+        let life: u32 = std::env::var("SR_C_LIFE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(700);
         unsafe {
             if libc::fork() == 0 {
                 libc::setsid();
@@ -1366,7 +1366,7 @@ fn main() {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            eprintln!("sd-fixture: {mode} is macOS-only");
+            eprintln!("sr-fixture: {mode} is macOS-only");
             std::process::exit(2);
         }
     }
@@ -1476,10 +1476,10 @@ fn main() {
         }
     }
     if mode == "ticker" && (a.len() == 4 || a.len() == 5 || a.len() == 6) {
-        // regroup-tstp sends TSTP to its whole group: only when its parent (sheepdog) leads that
+        // regroup-tstp sends TSTP to its whole group: only when its parent (sheepr) leads that
         // group, never in a group it did not make (a test runner's: that would stop the runner)
-        if a.get(4).map(String::as_str) == Some("regroup-tstp") && !(unsafe { libc::getpgrp() == libc::getppid() } && parent_is_sheepdog()) {
-            eprintln!("sd-fixture: regroup-tstp refused: the parent does not lead this process group");
+        if a.get(4).map(String::as_str) == Some("regroup-tstp") && !(unsafe { libc::getpgrp() == libc::getppid() } && parent_is_sheepr()) {
+            eprintln!("sr-fixture: regroup-tstp refused: the parent does not lead this process group");
             std::process::exit(5);
         }
         let tick = CString::new(format!("{}.tick", a[3])).unwrap();
@@ -1582,7 +1582,7 @@ fn main() {
             let mut cmd = std::process::Command::new(&a[3]);
             cmd.args(&a[4..]).process_group(0);
             let mut c = cmd.spawn().unwrap_or_else(|e| {
-                eprintln!("sd-fixture: spawn failed: {e}");
+                eprintln!("sr-fixture: spawn failed: {e}");
                 std::process::exit(127)
             });
             // "<pid> <identity>", read before this process can reap it
@@ -1625,14 +1625,14 @@ fn main() {
             }
         }
         let e = std::process::Command::new(&a[3]).args(&a[4..]).exec();
-        eprintln!("sd-fixture: exec failed: {e}");
+        eprintln!("sr-fixture: exec failed: {e}");
         std::process::exit(127);
     }
     if mode == "exec-chld-ignored" && a.len() >= 3 {
         use std::os::unix::process::CommandExt;
         unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
         let e = std::process::Command::new(&a[2]).args(&a[3..]).exec();
-        eprintln!("sd-fixture: exec failed: {e}");
+        eprintln!("sr-fixture: exec failed: {e}");
         std::process::exit(127);
     }
     if mode == "alloc" && a.len() == 5 {
@@ -1802,7 +1802,7 @@ fn main() {
                         libc::_exit(3); // the test gave up: never run the kill late
                     }
                     let err = std::fs::File::create(format!("{rc}.err")).ok();
-                    let mut cmd = std::process::Command::new("sheepdog");
+                    let mut cmd = std::process::Command::new("sheepr");
                     cmd.args(["kill", &w.to_string()]);
                     if let Some(e) = err {
                         cmd.stderr(e);
@@ -2023,9 +2023,9 @@ fn main() {
             }) {
                 record(&a[2], g);
             }
-            // SD_EXEC_READY=<file>: exit only once that file is non-empty (the route has reached
+            // SR_EXEC_READY=<file>: exit only once that file is non-empty (the route has reached
             // its final program), 10 s at most
-            if let Ok(f) = std::env::var("SD_EXEC_READY") {
+            if let Ok(f) = std::env::var("SR_EXEC_READY") {
                 let mut n = 0;
                 while std::fs::metadata(&f).map_or(true, |m| m.len() == 0) && n < 1000 {
                     libc::usleep(10_000);

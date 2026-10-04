@@ -1,4 +1,4 @@
-//! `sheepdog doctor [--json] [--grants]` (PLAN.md §4.3, §4.4; PHASE2.md "P8 design"): which
+//! `sheepr doctor [--json] [--grants]` (PLAN.md §4.3, §4.4; PHASE2.md "P8 design"): which
 //! mechanisms work on this machine, what is degraded and why, and the state's journals. Every
 //! mechanism is probed on every call (nothing is cached). `--grants` (macOS) also probes whether
 //! a disclaimed child can read `~/Documents`; that can raise a macOS privacy prompt, so it is off
@@ -9,7 +9,7 @@ use crate::linux as os;
 #[cfg(target_os = "macos")]
 use crate::macos as os;
 use crate::fail;
-use sheepdog::ident::same;
+use sheepr::ident::same;
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -20,7 +20,7 @@ pub(crate) struct Mechanism {
     detail: String,
 }
 
-pub(crate) const USAGE: &str = "sheepdog doctor [--json] [--grants]";
+pub(crate) const USAGE: &str = "sheepr doctor [--json] [--grants]";
 
 pub fn main(args: &[OsString]) -> i32 {
     let (mut json, mut grants) = (false, false);
@@ -30,7 +30,7 @@ pub fn main(args: &[OsString]) -> i32 {
             b"--grants" => grants = true,
             _ => {
                 let what = if a.as_bytes().starts_with(b"-") { "unknown option" } else { "unexpected argument" };
-                fail!("sheepdog: doctor: {what} {}.", crate::shown(a));
+                fail!("sheepr: doctor: {what} {}.", crate::shown(a));
                 crate::say!("usage: {USAGE}");
                 return 2;
             }
@@ -42,7 +42,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let journals = journals();
     let grant = if grants { os::doctor_grant() } else { None };
     if grant == Some(false) {
-        degraded.push("privacy: a disclaimed job cannot read ~/Documents (give sheepdog Full Disk Access, or run with --inherit-terminal-permissions)".into());
+        degraded.push("privacy: a disclaimed job cannot read ~/Documents (give sheepr Full Disk Access, or run with --inherit-terminal-permissions)".into());
     }
     let out = if json {
         let esc = crate::journal::json_str;
@@ -64,7 +64,7 @@ pub fn main(args: &[OsString]) -> i32 {
             grant.map_or("null".into(), |g| g.to_string())
         )
     } else {
-        let mut s = format!("sheepdog {} on {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
+        let mut s = format!("sheepr {} on {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
         for m in &mechanisms {
             s.push_str(&format!("  {} {}: {}\n", if m.ok { "ok  " } else { "FAIL" }, m.name, m.detail));
         }
@@ -72,16 +72,16 @@ pub fn main(args: &[OsString]) -> i32 {
             s.push_str(&format!("  note {n}\n"));
         }
         match &journals {
-            Some((state, live, dead, other)) => s.push_str(&format!("  state {}: {live} live job(s), {dead} dead (sheepdog sweep ends them), {other} of other boots\n", state.display())),
+            Some((state, live, dead, other)) => s.push_str(&format!("  state {}: {live} live job(s), {dead} dead (sheepr sweep ends them), {other} of other boots\n", state.display())),
             None => s.push_str("  state: none (no journals are kept)\n"),
         }
         if let Some(g) = grant {
             s.push_str(&format!("  privacy: a disclaimed job {} read ~/Documents\n", if g { "can" } else { "cannot" }));
         }
         if degraded.is_empty() {
-            s.push_str("sheepdog: nothing is degraded.");
+            s.push_str("sheepr: nothing is degraded.");
         } else {
-            s.push_str(&format!("sheepdog: degraded: {}", degraded.join("; ")));
+            s.push_str(&format!("sheepr: degraded: {}", degraded.join("; ")));
         }
         s
     };

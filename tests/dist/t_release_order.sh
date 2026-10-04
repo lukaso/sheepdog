@@ -8,7 +8,7 @@ set -u
 [ "$(uname -s)" = Darwin ] || { echo "SKIP (macOS only)"; exit 0; }
 fx_dir; fx_repo
 fx_release 0.1.0 1 v0.1.0-rc.1
-pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SD_ROOT/rust-toolchain.toml")
+pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SR_ROOT/rust-toolchain.toml")
 S=$FX/shims; mkdir -p "$S"
 printf '#!/bin/sh\necho "cargo $*" >> "%s/calls"\nexit 0\n' "$S" > "$S/cargo"
 printf '#!/bin/sh\necho "rustc $*" >> "%s/calls"\ncat "%s/rustc.v"\n' "$S" "$S" > "$S/rustc"

@@ -1,7 +1,7 @@
 #!/bin/sh
-# PHASE3.md S5, cell 18 and D9, with a .dev bundle (with SD_NPM_RC_DIR: the rc's own packages and
+# PHASE3.md S5, cell 18 and D9, with a .dev bundle (with SR_NPM_RC_DIR: the rc's own packages and
 # its stapled bundle, run by tests/rc/t_rc_npm.sh; nothing is built then): the four
-# npm tarballs, packed as release.sh packs them around a release build of sheepdog, installed
+# npm tarballs, packed as release.sh packs them around a release build of sheepr, installed
 # globally with npm, pnpm (pinned: 10.18.2 by its path in a copy of the corepack cache) and bun, each into a
 # temp prefix with a temp HOME, from a static registry on 127.0.0.1 (no `npm publish`, no
 # registry software). For each manager:
@@ -10,7 +10,7 @@
 #     exec door's yes, and tests/lib/npm-gates.sh's npm_gate passes: the launcher the PATH entry
 #     reaches (a link, or pnpm 10.18.2's exact shim), and every copy of it at a package path, is the
 #     package's launcher (this tree's: the gate's copy of its resolution is checked against it in
-#     t_npm_gates.sh) and resolves to one of those judged files; else nothing of that manager runs; with SD_NPM_RC_DIR every installed bundle
+#     t_npm_gates.sh) and resolves to one of those judged files; else nothing of that manager runs; with SR_NPM_RC_DIR every installed bundle
 #     is the release archive's, file by file (tests/lib/tree-same.py), and its staple validates;
 #   - the process started through the PATH entry runs one of those judged files (lsof's txt entry;
 #     same pid: the sh launcher execs), and TERM to that pid ends the job's whole tree, a setsid
@@ -26,39 +26,39 @@ set -u
 [ "$(uname -s)" = Darwin ] || { echo "SKIP (macOS only)"; exit 0; }
 fx_dir
 mkdir -p "$FX/tgz" "$FX/lin"
-if [ -n "${SD_NPM_RC_DIR:-}" ]; then
+if [ -n "${SR_NPM_RC_DIR:-}" ]; then
   # the rc leg: the release's own four packages (read only: copied), its darwin bundle the one to
   # compare with; nothing is built
-  V=$(basename "$SD_NPM_RC_DIR"); V=${V#v}
-  for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
-    cp "$SD_NPM_RC_DIR/lukaso-$p-$V.tgz" "$FX/tgz/" || { fail "no lukaso-$p-$V.tgz in $SD_NPM_RC_DIR"; finish; }
+  V=$(basename "$SR_NPM_RC_DIR"); V=${V#v}
+  for p in sheepr sheepr-darwin-universal sheepr-linux-arm64 sheepr-linux-x64; do
+    cp "$SR_NPM_RC_DIR/$p-$V.tgz" "$FX/tgz/" || { fail "no $p-$V.tgz in $SR_NPM_RC_DIR"; finish; }
   done
-  mkdir -p "$FX/rcb" && tar -xzf "$FX/tgz/lukaso-sheepdog-darwin-universal-$V.tgz" -C "$FX/rcb" || { fail "cannot unpack the darwin package"; finish; }
-  app=$FX/rcb/package/Sheepdog.app
-  mkdir -p "$FX/rca" && tar -xzf "$SD_NPM_RC_DIR/sheepdog-macos-universal.tar.gz" -C "$FX/rca" || { fail "cannot unpack the release archive"; finish; }
+  mkdir -p "$FX/rcb" && tar -xzf "$FX/tgz/sheepr-darwin-universal-$V.tgz" -C "$FX/rcb" || { fail "cannot unpack the darwin package"; finish; }
+  app=$FX/rcb/package/Sheepr.app
+  mkdir -p "$FX/rca" && tar -xzf "$SR_NPM_RC_DIR/sheepr-macos-universal.tar.gz" -C "$FX/rca" || { fail "cannot unpack the release archive"; finish; }
 else
   V=0.1.0-rc.1
-  (cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
-  app=$("$SD_ROOT/scripts/bundle.sh" "$FX/target/release/sheepdog" "$FX/bundle" 0.1.0 1) || { fail "bundle"; finish; }
+  (cd "$SR_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepr) || { fail "release build"; finish; }
+  app=$("$SR_ROOT/scripts/bundle.sh" "$FX/target/release/sheepr" "$FX/bundle" 0.1.0 1) || { fail "bundle"; finish; }
 fi
-EXE=$app/Contents/MacOS/sheepdog
-"$SD_ROOT/scripts/lib/exec-guard.sh" check "$EXE" || { fail "the door refuses the bundle"; finish; }
+EXE=$app/Contents/MacOS/sheepr
+"$SR_ROOT/scripts/lib/exec-guard.sh" check "$EXE" || { fail "the door refuses the bundle"; finish; }
 
-if [ -z "${SD_NPM_RC_DIR:-}" ]; then
+if [ -z "${SR_NPM_RC_DIR:-}" ]; then
   # the packages, packed by scripts/lib/npm-pack.sh (what release.sh build runs)
-  "$SD_ROOT/scripts/lib/archive.sh" make "$app" "$FX/lin/sheepdog-macos-universal.tar.gz" || { fail "archive"; finish; }
+  "$SR_ROOT/scripts/lib/archive.sh" make "$app" "$FX/lin/sheepr-macos-universal.tar.gz" || { fail "archive"; finish; }
   printf '#!/bin/sh\n' > "$FX/lin/a"; printf '#!/bin/sh\n' > "$FX/lin/x"
-  sh "$SD_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepdog-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" >/dev/null \
+  sh "$SR_ROOT/scripts/lib/npm-pack.sh" "$V" "$FX/lin/sheepr-macos-universal.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SR_ROOT/npm/sheepr/bin/sheepr" "$FX/tgz" >/dev/null \
     || { fail "npm-pack.sh"; finish; }
 fi
 # a static registry: a packument per package, the tarballs beside (scripts/lib/static-registry.py,
 # shared with the S7 clean-user leg)
-reg() { python3 "$SD_ROOT/scripts/lib/static-registry.py" "$1" "$2" "${3:-}" "$FX/tgz"; } # dir port [skip-platform]
+reg() { python3 "$SR_ROOT/scripts/lib/static-registry.py" "$1" "$2" "${3:-}" "$FX/tgz"; } # dir port [skip-platform]
 port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 reg "$FX/reg" "$port"
 (cd "$FX/reg" && exec python3 -m http.server "$port" --bind 127.0.0.1) > "$FX/reg.log" 2>&1 & rp=$!
 trap '{ kill $rp; wait $rp; } 2>/dev/null; rm -rf "$FX"' EXIT
-i=0; until curl -fs "http://127.0.0.1:$port/@lukaso%2fsheepdog" >/dev/null 2>&1 || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
+i=0; until curl -fs "http://127.0.0.1:$port/sheepr" >/dev/null 2>&1 || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
 R=http://127.0.0.1:$port/
 
 # the managers, each with a temp HOME, prefix, cache and userconfig (only the registry)
@@ -70,12 +70,12 @@ PN=$FX/corepack/v1/pnpm/10.18.2/bin/pnpm.cjs
 install() { # manager -> sets BIN (the PATH entry dir); rc
   m=$1 h=$FX/home-$1; mkdir -p "$h"; printf 'registry=%s\n' "$R" > "$h/.npmrc"
   case $m in
-    npm) env HOME="$h" npm_config_userconfig="$h/.npmrc" npm_config_cache="$h/cache" npm i -g --prefix "$h/prefix" --ignore-scripts --registry "$R" "@lukaso/sheepdog@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/prefix/bin ;;
+    npm) env HOME="$h" npm_config_userconfig="$h/.npmrc" npm_config_cache="$h/cache" npm i -g --prefix "$h/prefix" --ignore-scripts --registry "$R" "sheepr@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/prefix/bin ;;
     pnpm) env HOME="$h" XDG_CONFIG_HOME="$h/xdg" COREPACK_ENABLE_NETWORK=0 PNPM_HOME="$h/pnpm" PATH="$h/pnpm:$PATH" \
-            npm_config_userconfig="$h/.npmrc" node "$PN" add -g --ignore-scripts --registry "$R" "@lukaso/sheepdog@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/pnpm
+            npm_config_userconfig="$h/.npmrc" node "$PN" add -g --ignore-scripts --registry "$R" "sheepr@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/pnpm
           pv=$(env HOME="$h" COREPACK_ENABLE_NETWORK=0 node "$PN" -v 2>/dev/null)
           [ "$pv" = 10.18.2 ] || fail "pnpm is $pv, not the pinned 10.18.2" ;;
-    bun) env HOME="$h" XDG_CONFIG_HOME="$h/xdg" BUN_INSTALL="$h/bun" BUN_CONFIG_REGISTRY="$R" bun add -g --ignore-scripts "@lukaso/sheepdog@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/bun/bin ;;
+    bun) env HOME="$h" XDG_CONFIG_HOME="$h/xdg" BUN_INSTALL="$h/bun" BUN_CONFIG_REGISTRY="$R" bun add -g --ignore-scripts "sheepr@$V" > "$FX/inst.$m" 2>&1; rc=$?; BIN=$h/bun/bin ;;
   esac
   return $rc
 }
@@ -109,7 +109,7 @@ RH=$FX/rh; mkdir -p "$RH"
 # the job's PATH has node's directory too, as a user's would (so a node launcher could run: the
 # D9 mutant must fail on the signal state, not on a missing node)
 JP=/usr/bin:/bin:$(dirname "$(command -v node)")
-job() { env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$@"; }
+job() { env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPR_STATE="$RH/s" "$@"; }
 callers() { # entry -> the probe's output for three callers, into $FX/c.<caller>
   for c in default ignore block; do
     case $c in
@@ -122,38 +122,38 @@ callers() { # entry -> the probe's output for three callers, into $FX/c.<caller>
 callers "$EXE"; for c in default ignore block; do cp "$FX/c.$c" "$FX/d.$c"; done
 [ -s "$FX/d.default" ] && ! cmp -s "$FX/d.default" "$FX/d.ignore" && pass "control: the callers differ in a direct run" || fail "control: the callers do not differ"
 
-. "$SD_ROOT/tests/lib/npm-gates.sh"
-# the launcher as the sheepdog package holds it (the gate judges each install against it)
-mkdir -p "$FX/lp" && tar -xzf "$FX/tgz/lukaso-sheepdog-$V.tgz" -C "$FX/lp" package/bin/sheepdog && cp "$FX/lp/package/bin/sheepdog" "$FX/launcher" \
-  || { fail "no launcher in lukaso-sheepdog-$V.tgz"; finish; }
-cmp -s "$FX/launcher" "$SD_ROOT/npm/sheepdog/bin/sheepdog" \
-  || { fail "the package's launcher is not this tree's npm/sheepdog/bin/sheepdog (t_npm_gates.sh proves the gate against this tree's): run the cell from the package's commit"; finish; }
+. "$SR_ROOT/tests/lib/npm-gates.sh"
+# the launcher as the sheepr package holds it (the gate judges each install against it)
+mkdir -p "$FX/lp" && tar -xzf "$FX/tgz/sheepr-$V.tgz" -C "$FX/lp" package/bin/sheepr && cp "$FX/lp/package/bin/sheepr" "$FX/launcher" \
+  || { fail "no launcher in sheepr-$V.tgz"; finish; }
+cmp -s "$FX/launcher" "$SR_ROOT/npm/sheepr/bin/sheepr" \
+  || { fail "the package's launcher is not this tree's npm/sheepr/bin/sheepr (t_npm_gates.sh proves the gate against this tree's): run the cell from the package's commit"; finish; }
 for m in npm pnpm bun; do
   if ! install $m; then fail "$m: install failed: $(tail -3 "$FX/inst.$m" | tr '\n' ' ')"; continue; fi
-  e=$BIN/sheepdog
+  e=$BIN/sheepr
   [ -e "$e" ] || { fail "$m: no PATH entry at $e"; continue; }
   # every installed copy of the bundle (bun keeps one in its cache too) is the tarball's and has
   # the door's yes, or nothing of this manager's install is run; the process row below then
   # checks the launcher ran one of these very files
-  insts=$(find "$FX/home-$m" -path '*Sheepdog.app/Contents/MacOS/sheepdog' -type f | while IFS= read -r f; do printf '%s/%s\n' "$(cd -P "$(dirname "$f")" && pwd -P)" "$(basename "$f")"; done | sort -u)
+  insts=$(find "$FX/home-$m" -path '*Sheepr.app/Contents/MacOS/sheepr' -type f | while IFS= read -r f; do printf '%s/%s\n' "$(cd -P "$(dirname "$f")" && pwd -P)" "$(basename "$f")"; done | sort -u)
   [ -n "$insts" ] || { fail "$m: no installed bundle"; continue; }
   ok=yes
   for inst in $insts; do
     cmp -s "$inst" "$EXE" || { fail "$m: an installed executable differs ($inst)"; ok=no; }
-    "$SD_ROOT/scripts/lib/exec-guard.sh" check "$inst" || { fail "$m: the door refuses $inst"; ok=no; }
+    "$SR_ROOT/scripts/lib/exec-guard.sh" check "$inst" || { fail "$m: the door refuses $inst"; ok=no; }
   done
   [ $ok = yes ] || continue
   pass "$m: every installed copy of the executable ($(printf '%s\n' "$insts" | grep -c .)) is the local tarball's, and the door allows it"
-  # the launcher's own target (npm/sheepdog/bin/sheepdog's resolution, for every installed copy of
+  # the launcher's own target (npm/sheepr/bin/sheepr's resolution, for every installed copy of
   # the launcher) must be one of the judged files before anything runs
   if ! npm_gate "$FX/home-$m" "$insts" "$e" "$FX/launcher" > "$FX/gate"; then
     while IFS= read -r l; do fail "$m: $l"; done < "$FX/gate"; continue
   fi
-  if [ -n "${SD_NPM_RC_DIR:-}" ]; then
+  if [ -n "${SR_NPM_RC_DIR:-}" ]; then
     for inst in $insts; do
     # the whole installed bundle is the release archive's (paths, types, modes, content), stapled
-    ia=${inst%/Contents/MacOS/sheepdog}
-    python3 "$SD_ROOT/tests/lib/tree-same.py" "$ia" "$FX/rca/Sheepdog.app" || { fail "$m: an installed bundle differs from the release archive's ($ia)"; ok=no; }
+    ia=${inst%/Contents/MacOS/sheepr}
+    python3 "$SR_ROOT/tests/lib/tree-same.py" "$ia" "$FX/rca/Sheepr.app" || { fail "$m: an installed bundle differs from the release archive's ($ia)"; ok=no; }
     env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/xcrun stapler validate "$ia" >/dev/null 2>&1 || { fail "$m: no valid staple ticket on $ia"; ok=no; }
     done
     [ $ok = yes ] || continue
@@ -162,7 +162,7 @@ for m in npm pnpm bun; do
   rm -f "$FX/esc"
   # env in the background directly (a function in the background is a forked subshell, whose pid
   # is not the launched process's)
-  env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
+  env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPR_STATE="$RH/s" "$e" run --no-sweep -- perl "$FX/escape.pl" "$FX/esc" >/dev/null 2>&1 & jp=$!
   i=0; while [ ! -s "$FX/esc" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   if runs_one_of $jp "$insts"; then pass "$m: the PATH entry's process runs one of the bundle executables the door judged (pid $jp)"
   else fail "$m: pid $jp runs '$(/usr/sbin/lsof -a -p $jp -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)', not one the door judged"
@@ -174,22 +174,22 @@ for m in npm pnpm bun; do
   else pass "$m: TERM to the PATH entry's process ended the tree, the escapee included"; fi
   callers "$e"
   for c in default ignore block; do
-    # SHEEPDOG_OUTER names each job's own registration socket: its presence counts, not its value
+    # SHEEPR_OUTER names each job's own registration socket: its presence counts, not its value
     # (PWD: sh, the launcher, adds it for a caller that had none, a stated limit of D9)
-    x='s/^env SHEEPDOG_OUTER=.*/env SHEEPDOG_OUTER=(set)/; /^env PWD=/d'
+    x='s/^env SHEEPR_OUTER=.*/env SHEEPR_OUTER=(set)/; /^env PWD=/d'
     if [ $m = pnpm ]; then sed "$x" "$FX/c.$c" | grep -v '^env NODE_PATH=' > "$FX/c2"; sed "$x" "$FX/d.$c" | grep -v '^env NODE_PATH=' > "$FX/d2"
     else sed "$x" "$FX/c.$c" > "$FX/c2"; sed "$x" "$FX/d.$c" > "$FX/d2"; fi
     cmp -s "$FX/c2" "$FX/d2" && pass "$m, $c caller: the job's signals, mask, fds and environment equal a direct run" || fail "$m, $c caller: differs: $(diff "$FX/d2" "$FX/c2" | head -3 | tr '\n' ' ')"
   done
-  ww=$(find "$FX/home-$m" -path '*@lukaso*' \( -perm -g+w -o -perm -o+w \) -type f 2>/dev/null | head -3)
-  if [ $m = bun ]; then echo "note: bun's installed modes: $(find "$FX/home-$m" -path '*@lukaso*' -name sheepdog -type f -exec stat -f %Sp {} \; | head -2 | tr '\n' ' ')"
+  ww=$(find "$FX/home-$m" -path '*/node_modules/sheepr*' \( -perm -g+w -o -perm -o+w \) -type f 2>/dev/null | head -3)
+  if [ $m = bun ]; then echo "note: bun's installed modes: $(find "$FX/home-$m" -path '*/node_modules/sheepr*' -name sheepr -type f -exec stat -f %Sp {} \; | head -2 | tr '\n' ' ')"
   else [ -z "$ww" ] && pass "$m: no installed file is group- or world-writable" || fail "$m: writable: $ww"; fi
 done
 
 # control of the process check (runs_one_of, the rows' own function) on the bundle's own
 # executable: it passes (the controls that must fail are t_npm_gates.sh's)
-ER=$(cd -P "$(dirname "$EXE")" && pwd -P)/sheepdog
-env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPDOG_STATE="$RH/s" "$EXE" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
+ER=$(cd -P "$(dirname "$EXE")" && pwd -P)/sheepr
+env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPR_STATE="$RH/s" "$EXE" run --no-sweep -- sh -c 'sleep 2' >/dev/null 2>&1 & wp=$!; sleep 0.7
 runs_one_of $wp "$ER" && pass "control: the executable itself passes the process check" || fail "control: the executable itself fails the process check"
 wait $wp 2>/dev/null
 # control: no platform package in the registry
@@ -197,14 +197,14 @@ kill $rp 2>/dev/null; wait $rp 2>/dev/null
 port2=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
 reg "$FX/reg2" "$port2" skip
 (cd "$FX/reg2" && exec python3 -m http.server "$port2" --bind 127.0.0.1) > "$FX/reg2.log" 2>&1 & rp=$!
-i=0; until curl -fs "http://127.0.0.1:$port2/@lukaso%2fsheepdog" >/dev/null 2>&1 || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
+i=0; until curl -fs "http://127.0.0.1:$port2/sheepr" >/dev/null 2>&1 || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
 R=http://127.0.0.1:$port2/
 rm -rf "$FX/home-npm"; install npm
 # the launcher runs only if nothing it could exec was installed
-nb=$(find "$FX/home-npm" \( -name Sheepdog.app -o -name 'sheepdog-darwin-universal*' \) | head -3)
+nb=$(find "$FX/home-npm" \( -name Sheepr.app -o -name 'sheepr-darwin-universal*' \) | head -3)
 if [ -n "$nb" ]; then fail "control: no platform package in the registry, but npm installed $nb (the launcher is not run)"
 else
-  out=$(job "$FX/home-npm/prefix/bin/sheepdog" --version 2>&1); r=$?
-  [ $r = 1 ] && printf '%s' "$out" | grep -q '@lukaso/sheepdog-darwin-universal' && pass "control: no platform package: none installed, exit 1, the package named" || fail "control: no platform package: rc=$r $out"
+  out=$(job "$FX/home-npm/prefix/bin/sheepr" --version 2>&1); r=$?
+  [ $r = 1 ] && printf '%s' "$out" | grep -q 'sheepr-darwin-universal' && pass "control: no platform package: none installed, exit 1, the package named" || fail "control: no platform package: rc=$r $out"
 fi
 finish

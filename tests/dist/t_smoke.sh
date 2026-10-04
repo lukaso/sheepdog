@@ -1,6 +1,6 @@
 #!/bin/sh
-# PHASE3.md S7: scripts/smoke.sh against a release build of sheepdog (it names what it tests; cell
-# 1, cell 3 and the control all pass), and against stand-in "sheepdog"s, each of which must fail
+# PHASE3.md S7: scripts/smoke.sh against a release build of sheepr (it names what it tests; cell
+# 1, cell 3 and the control all pass), and against stand-in "sheepr"s, each of which must fail
 # the smoke on the named row: one that only runs the command (cell 3: survived), one that runs it
 # with no PATH so the escapee never starts (cell 3: did not start), one that changes the exit code
 # (cell 1), and one that kills the escapee only after 31 s (cell 3: too slow; the smoke must tell
@@ -8,14 +8,14 @@
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
-(cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
+(cd "$SR_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepr) || { fail "release build"; finish; }
 mkdir -p "$FX/h"
-sm() { env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPDOG_STATE="$FX/h/s" TMPDIR="$FX/h" sh "$SD_ROOT/scripts/smoke.sh" "$1" < /dev/null > "$FX/o" 2>&1; }
-B=$FX/target/release/sheepdog
-"$SD_ROOT/scripts/lib/exec-guard.sh" check "$B" || { fail "the door refuses the build"; finish; }
+sm() { env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPR_STATE="$FX/h/s" TMPDIR="$FX/h" sh "$SR_ROOT/scripts/smoke.sh" "$1" < /dev/null > "$FX/o" 2>&1; }
+B=$FX/target/release/sheepr
+"$SR_ROOT/scripts/lib/exec-guard.sh" check "$B" || { fail "the door refuses the build"; finish; }
 sm "$B"; r=$?
 [ $r = 0 ] && pass "smoke passes on a release build" || fail "smoke: $(tr '\n' ' ' < "$FX/o")"
-for row in 'smoke: testing .*sheepdog [0-9]' 'ok: cell 1:' 'ok: cell 3:' 'ok: control:'; do
+for row in 'smoke: testing .*sheepr [0-9]' 'ok: cell 1:' 'ok: cell 3:' 'ok: control:'; do
   grep -q "^$row" "$FX/o" && pass "release build: '$row'" || fail "release build: no '$row' line"
 done
 # the stand-ins: skip `run` and the options up to `--`, then act on the command

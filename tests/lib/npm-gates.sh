@@ -23,15 +23,15 @@ npm_walk() {
   printf '%s\n' "$nw_me"
 }
 
-# npm_target ARG0: the real path of the file npm/sheepdog/bin/sheepdog execs when it runs as ARG0
+# npm_target ARG0: the real path of the file npm/sheepr/bin/sheepr execs when it runs as ARG0
 # (its resolution, copied: t_npm_gates.sh runs the launcher itself beside this copy on every layout
 # it resolves); rc 1 if it resolves to nothing
 npm_target() {
   nt_me=$(npm_walk "$1")
   nt_pkg=$(cd -P "$(dirname "$nt_me")/.." 2>/dev/null && pwd -P) || return 1
-  for nt_d in "$nt_pkg/node_modules/@lukaso/sheepdog-darwin-universal" "$nt_pkg/../sheepdog-darwin-universal"; do
-    if [ -x "$nt_d/Sheepdog.app/Contents/MacOS/sheepdog" ]; then
-      nt_t=$(npm_walk "$nt_d/Sheepdog.app/Contents/MacOS/sheepdog")
+  for nt_d in "$nt_pkg/node_modules/sheepr-darwin-universal" "$nt_pkg/../sheepr-darwin-universal"; do
+    if [ -x "$nt_d/Sheepr.app/Contents/MacOS/sheepr" ]; then
+      nt_t=$(npm_walk "$nt_d/Sheepr.app/Contents/MacOS/sheepr")
       printf '%s/%s\n' "$(cd -P "$(dirname "$nt_t")" && pwd -P)" "$(basename "$nt_t")"; return 0
     fi
   done
@@ -73,7 +73,7 @@ EOF
 #     names (neither may hold a quote, $, backquote or backslash), and whose `$basedir//bin/sh`,
 #     which it would run instead, must not exist; each launcher it reaches is byte-equal LAUNCHER
 #     and resolves to one of INSTS (real paths, one per line);
-#   - every copy of the launcher at a package path under HOME (*/@lukaso/sheepdog/bin/sheepdog;
+#   - every copy of the launcher at a package path under HOME (*/sheepr/bin/sheepr;
 #     bun's cache and pnpm's store keep theirs under other names, and only ENTRY is ever run) is
 #     byte-equal LAUNCHER, and a copy that resolves to an executable resolves to one of INSTS (one
 #     that resolves to nothing runs nothing).
@@ -94,7 +94,7 @@ npm_gate() {
     [ -n "$ng_a0" ] || ng_bad=1
     if [ -e "$(dirname "$3")//bin/sh" ] || [ -L "$(dirname "$3")//bin/sh" ]; then echo "the pnpm shim $3 would run $(dirname "$3")/bin/sh"; ng_bad=1; fi
   else ng_a0=""; echo "the PATH entry $3 is neither a link nor a pnpm shim"; ng_bad=1; fi
-  ng_cp=$(find "$1" -path '*/@lukaso/sheepdog/bin/sheepdog' -type f)
+  ng_cp=$(find "$1" -path '*/sheepr/bin/sheepr' -type f)
   ng_ifs=$IFS; IFS=$ng_nl; set -f
   for ng_w in $(printf '%s\n' "$ng_a0" | sed 's/^/entry /'; printf '%s\n' "$ng_cp" | sed 's/^/copy /'); do
     ng_k=${ng_w%% *} ng_a=${ng_w#* }

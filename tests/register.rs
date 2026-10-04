@@ -1,6 +1,6 @@
 //! Phase-2 P5: registration of nested runs (PLAN.md §3.2, PHASE2.md decision 13 and D5).
 //!
-//! Cell 15: an inner `sheepdog run` started through a fast double fork (and through a Node and a
+//! Cell 15: an inner `sheepr run` started through a fast double fork (and through a Node and a
 //! Python launcher on macOS) is killed with SIGKILL; then the outer is ended; the inner job's
 //! escapee must not survive. Three levels too: O -> A -> B, with A and B killed first. On macOS
 //! only registration can tie the inner job to the outer (the double fork hides the inner from
@@ -20,17 +20,17 @@ use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-reg-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-reg-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -99,7 +99,7 @@ fn cleanup(recs: &[&Path]) {
 /// escapee. True if the escapee is gone within 5 s of O's end.
 fn trial(d: &Path, esc: &Path, sups: &[PathBuf], launch: &[String]) -> Result<bool, String> {
     let trace = PathBuf::from(format!("{}.trace", esc.display()));
-    let mut o = Command::new(sheepdog()).args(["run", "--"]).args(launch).env("SHEEPDOG_TEST_TRACE", &trace).stdin(Stdio::null()).spawn().unwrap();
+    let mut o = Command::new(sheepr()).args(["run", "--"]).args(launch).env("SHEEPR_TEST_TRACE", &trace).stdin(Stdio::null()).spawn().unwrap();
     let ok = wait_until(20, || records(esc).len() == 1 && sups.iter().all(|s| !records(s).is_empty()));
     let g = records(esc).first().copied();
     // past the stated loss window (PLAN.md §3.2: one 250 ms scan): a child born to a registered
@@ -163,7 +163,7 @@ fn fx() -> String {
     fixture().to_string()
 }
 fn sd() -> String {
-    sheepdog().to_string()
+    sheepr().to_string()
 }
 
 /// Cell 15, two levels: O -> (fast double fork) -> inner run; the inner supervisor is SIGKILLed,
@@ -241,7 +241,7 @@ fn cell15_through_node_and_python_launchers() {
             let t = std::thread::spawn(move || {
                 if wait_until(20, || !read(&pidf2).trim().is_empty()) {
                     let p: i32 = read(&pidf2).trim().parse().unwrap_or(0);
-                    if let Some(id) = sheepdog::ident::identity(p) {
+                    if let Some(id) = sheepr::ident::identity(p) {
                         std::fs::write(&sup2, format!("{p} {id}\n")).unwrap();
                     }
                 }
@@ -265,11 +265,11 @@ fn cell15_through_node_and_python_launchers() {
 #[cfg(target_os = "macos")]
 fn outer(d: &Path, root: &str, env: &[(&str, &str)]) -> (Option<i32>, String, String) {
     let (trace, err) = (d.join("trace"), d.join("err"));
-    let mut c = Command::new(sheepdog());
+    let mut c = Command::new(sheepr());
     c.args(["run", "--", "/bin/sh", "-c", root])
         .env("FX", fixture())
-        .env("SD", sheepdog())
-        .env("SHEEPDOG_TEST_TRACE", &trace)
+        .env("SD", sheepr())
+        .env("SHEEPR_TEST_TRACE", &trace)
         .stdin(Stdio::null())
         .stderr(std::fs::File::create(&err).unwrap());
     for (k, v) in env {
@@ -288,7 +288,7 @@ fn cell25_a_long_tmpdir_still_gets_the_ack() {
     let d = scratch("c25");
     let long = d.join("t".repeat(100 - d.as_os_str().len().min(90)).as_str()).join("u".repeat(20));
     std::fs::create_dir_all(&long).unwrap();
-    assert!(long.join("sd-XXXXXXXX/s").as_os_str().len() > 100, "the cell's TMPDIR is not long enough");
+    assert!(long.join("sr-XXXXXXXX/s").as_os_str().len() > 100, "the cell's TMPDIR is not long enough");
     let (code, trace, _) = outer(&d, r#""$SD" run -- /usr/bin/true"#, &[("TMPDIR", long.to_str().unwrap())]);
     let registered = trace.lines().any(|l| l.starts_with("registered "));
     let refused = trace.lines().filter(|l| l.starts_with("unregistered ")).collect::<Vec<_>>();
@@ -303,14 +303,14 @@ fn cell25_a_long_tmpdir_still_gets_the_ack() {
 #[test]
 fn the_chain_holds_sixteen_entries() {
     let d = scratch("cap");
-    let fake = |n: usize| (0..n).map(|i| format!("{:032x} /nonexistent/sd-{i}/s", i + 1)).collect::<Vec<_>>().join("\n");
+    let fake = |n: usize| (0..n).map(|i| format!("{:032x} /nonexistent/sr-{i}/s", i + 1)).collect::<Vec<_>>().join("\n");
     for (given, want) in [(15, 16), (16, 16)] {
         let out = d.join(format!("env{given}"));
-        let (code, trace, _) = outer(&d, &format!(r#""$FX" print-env SHEEPDOG_OUTER "{}""#, out.display()), &[("SHEEPDOG_OUTER", &fake(given))]);
-        let (seen, bad) = sheepdog::regwire::parse(&read(&out));
+        let (code, trace, _) = outer(&d, &format!(r#""$FX" print-env SHEEPR_OUTER "{}""#, out.display()), &[("SHEEPR_OUTER", &fake(given))]);
+        let (seen, bad) = sheepr::regwire::parse(&read(&out));
         assert_eq!(code, Some(0));
         assert_eq!((seen.len(), bad), (want, 0), "given {given}");
-        let (mine, _) = sheepdog::regwire::parse(&fake(given));
+        let (mine, _) = sheepr::regwire::parse(&fake(given));
         assert_eq!(seen[..given], mine[..], "the given entries are passed on unchanged");
         let full = trace.lines().any(|l| l == "chain full");
         assert_eq!(full, given == 16, "given {given}: {trace}");
@@ -332,7 +332,7 @@ fn a_malformed_or_changed_registration_is_refused() {
     assert_eq!((read(&bad).as_str(), read(&good).as_str()), ("refused", "ack"));
     let changed = d.join("changed");
     let root = format!(r#""$FX" register env 0 self good "{}"; true"#, changed.display());
-    let (code, _, _) = outer(&d, &root, &[("SHEEPDOG_TEST_REG_PIDVERSION_CHANGE", "1")]);
+    let (code, _, _) = outer(&d, &root, &[("SHEEPR_TEST_REG_PIDVERSION_CHANGE", "1")]);
     assert_eq!(code, Some(0));
     assert_eq!(read(&changed), "refused");
     let _ = std::fs::remove_dir_all(&d);
@@ -347,7 +347,7 @@ fn silent_clients_do_not_stall_the_timeout() {
     let ready = d.join("ready");
     let _g = Recs(vec![ready.clone()]);
     let t0 = Instant::now();
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--timeout", "1s", "--grace", "0", "--"])
         .args([fixture(), "silent", "env", "20", ready.to_str().unwrap()])
         .stdin(Stdio::null())
@@ -399,8 +399,8 @@ fn a_non_member_with_the_nonce_is_refused() {
     let m0 = marker();
     let _m = Marked(m0.clone());
     let mut o = Outer(
-        Command::new(sheepdog())
-            .args(["run", "--", fixture(), "print-env", "SHEEPDOG_OUTER", chain.to_str().unwrap(), &m0])
+        Command::new(sheepr())
+            .args(["run", "--", fixture(), "print-env", "SHEEPR_OUTER", chain.to_str().unwrap(), &m0])
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
@@ -440,9 +440,9 @@ fn registration_turns_the_latch_on() {
     let (chain, out, sink) = (d.join("chain"), d.join("out"), d.join("sink"));
     let m = marker();
     let _m = Marked(m.clone());
-    let root = format!(r#""$FX" print-env SHEEPDOG_OUTER "{}"; exec /usr/bin/env -i "$FX" register "{}" 0 self good "{}" {m}"#, chain.display(), chain.display(), out.display());
-    let mut c = Command::new(sheepdog());
-    c.args(["run", "--", "/bin/sh", "-c", &root]).env("FX", fixture()).env("SHEEPDOG_TEST_DEADLINE_MS", "500").env_remove("SHEEPDOG_TEST_STATE").stdin(Stdio::null());
+    let root = format!(r#""$FX" print-env SHEEPR_OUTER "{}"; exec /usr/bin/env -i "$FX" register "{}" 0 self good "{}" {m}"#, chain.display(), chain.display(), out.display());
+    let mut c = Command::new(sheepr());
+    c.args(["run", "--", "/bin/sh", "-c", &root]).env("FX", fixture()).env("SHEEPR_TEST_DEADLINE_MS", "500").env_remove("SHEEPR_TEST_STATE").stdin(Stdio::null());
     common::cell_sink(&mut c, &sink);
     let mut o = Outer(c.spawn().unwrap());
     assert!(wait_until(10, || !read(&out).is_empty()), "the registrant did not answer");
@@ -465,7 +465,7 @@ fn registration_turns_the_latch_on() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// An inner run that starts after the process responsible for it has died (its outer sheepdog was
+/// An inner run that starts after the process responsible for it has died (its outer sheepr was
 /// SIGKILLed first) still disclaims, so its escapee is its member and dies with its job.
 #[cfg(target_os = "macos")]
 #[test]
@@ -474,14 +474,14 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
     let (go, rec, itrace) = (d.join("go"), d.join("esc"), d.join("itrace"));
     let _g = Recs(vec![rec.clone()]);
     let mut o = Outer(
-        Command::new(sheepdog())
-            .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepdog(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
-            .env("SHEEPDOG_TEST_TRACE", &itrace)
+        Command::new(sheepr())
+            .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepr(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
+            .env("SHEEPR_TEST_TRACE", &itrace)
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
     );
-    // the outer's root is waiting for GO (the only process whose argv starts `sd-fixture after`);
+    // the outer's root is waiting for GO (the only process whose argv starts `sr-fixture after`);
     // end the outer, then let the inner start
     let go_word = go.to_str().unwrap().to_string();
     let waiting = |w: &[&str]| w.get(2) == Some(&"after");
@@ -513,21 +513,21 @@ fn a_burst_of_registrations_is_served() {
     // (the wait for GO is bounded: 10 s)
     let root = format!(r#"n=0; until [ -e "{}" ] || [ $n -ge 500 ]; do sleep 0.02; n=$((n+1)); done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#, go.display(), d.display());
     let mut o = Outer(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", "/bin/sh", "-c", &root])
             .env("FX", fixture())
-            .env("SHEEPDOG_TEST_TRACE", &trace)
-            .env("SD_REG_TIMEOUT_MS", "15000")
+            .env("SHEEPR_TEST_TRACE", &trace)
+            .env("SR_REG_TIMEOUT_MS", "15000")
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
     );
     assert!(wait_until(10, || read(&trace).lines().any(|l| l.starts_with("listening "))), "the outer is not listening");
-    let sup = (o.0.id() as i32, sheepdog::ident::identity(o.0.id() as i32).unwrap_or(0));
+    let sup = (o.0.id() as i32, sheepr::ident::identity(o.0.id() as i32).unwrap_or(0));
     common::send(sup.0, sup.1, libc::SIGSTOP);
     std::fs::write(&go, b"").unwrap();
     // all 40 have connected and sent (queued in the stopped outer's backlog) before it runs
-    // again; the clients wait 15 s for their answer (SD_REG_TIMEOUT_MS), so a slow start under
+    // again; the clients wait 15 s for their answer (SR_REG_TIMEOUT_MS), so a slow start under
     // load (up to this wait's 10 s) still leaves them time
     let conn = || (1..=40).filter(|i| d.join(format!("out{i}.conn")).exists()).count();
     let queued = wait_until(10, || conn() == 40);
@@ -557,7 +557,7 @@ fn silent_clients_past_the_cap_do_not_lock_registration_out() {
         r = ready.display(),
         o = out.display()
     );
-    let (code, trace, _) = outer(&d, &root, &[("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
+    let (code, trace, _) = outer(&d, &root, &[("SHEEPR_TEST_DEADLINE_MS", "500")]);
     assert_eq!(read(&ready), "40", "the silent clients did not all connect");
     assert_eq!(read(&out), "ack", "trace:\n{trace}");
     assert_eq!(code, Some(0));
@@ -577,7 +577,7 @@ fn a_middle_run_holds_the_jobs_nested_in_it() {
         fx(), "dfork-exec".into(), b.display().to_string(), sd(), "run".into(), "--".into(),
         fx(), "escapee-and-wait".into(), esc.display().to_string(),
     ];
-    let mut o = Outer(Command::new(sheepdog()).args(["run", "--"]).args(&launch).stdin(Stdio::null()).spawn().unwrap());
+    let mut o = Outer(Command::new(sheepr()).args(["run", "--"]).args(&launch).stdin(Stdio::null()).spawn().unwrap());
     assert!(wait_until(20, || !records(&esc).is_empty() && !records(&a).is_empty() && !records(&b).is_empty()), "the job did not start");
     let (g, pa, pb) = (records(&esc)[0], records(&a)[0], records(&b)[0]);
     std::thread::sleep(Duration::from_millis(800)); // past the loss window (see `trial`)

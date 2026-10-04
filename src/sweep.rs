@@ -1,4 +1,4 @@
-//! `sheepdog sweep [--owner X]` (PLAN.md §3.5; PHASE2.md §3): end what dead jobs left behind,
+//! `sheepr sweep [--owner X]` (PLAN.md §3.5; PHASE2.md §3): end what dead jobs left behind,
 //! from their journals.
 //!
 //! Only this boot's and this pid namespace's folder is read, after its ownership checks (the state
@@ -11,7 +11,7 @@
 //! that holds this sweep's own process or one of its ancestors is skipped whole (never a signal
 //! to the caller). Holding the lock, the sweep journals every closure candidate before its first
 //! signal (a candidate that survives is still named for the next sweep). A candidate that is a
-//! sheepdog supervisor is ended first (TERM, CONT, then its grace plus the deadline); then the
+//! sheepr supervisor is ended first (TERM, CONT, then its grace plus the deadline); then the
 //! freeze-and-kill loop, without a TERM grace. The journal is removed when every candidate is gone.
 //!
 //! Reading a journal is a phase-2 source: the sweep takes the wall's token first (PHASE2.md §0.1),
@@ -20,10 +20,10 @@
 //! Exit codes: 0 done (also: nothing to sweep); 1 refused (the state directory is not safe);
 //! 2 usage error; 125 a job's kill deadline passed with members alive.
 
-use crate::kill::{end_supervisors, is_sheepdog, parent, protected, Proved};
+use crate::kill::{end_supervisors, is_sheepr, parent, protected, Proved};
 use crate::{kill_failed, kill_tree, say, signal, trace, KillOpts};
-use sheepdog::ident::same;
-use sheepdog::json::{self, Json};
+use sheepr::ident::same;
+use sheepr::json::{self, Json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write;
@@ -230,7 +230,7 @@ pub(crate) fn peek(path: &Path) -> Vec<(i32, u64)> {
 
 /// How a sweep treats live supervisors and live jobs.
 pub enum Mode<'a> {
-    /// `sheepdog sweep`: a candidate supervisor is ended first
+    /// `sheepr sweep`: a candidate supervisor is ended first
     Explicit,
     /// the auto-sweep: a live supervisor and its set, and anything a live job's journal names,
     /// are left for an explicit sweep; no grace; a 500 ms deadline, and what a pass that misses
@@ -266,7 +266,7 @@ fn deferred(c: (i32, u64), sups: &[i32], held: &HashSet<(i32, u64)>) -> bool {
 /// and every line of this journal whose lineage (parent pid and identity, or macOS `puniq`)
 /// leads to one of those.
 fn held_set(j: &Journal, set: &[(i32, u64)], live_named: &HashSet<(i32, u64)>) -> HashSet<(i32, u64)> {
-    let mut held: HashSet<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
+    let mut held: HashSet<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepr(p)).collect();
     held.extend(live_named.iter().copied());
     loop {
         let ids: HashSet<u64> = held.iter().map(|&(_, id)| id).collect();
@@ -310,10 +310,10 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
     let mut opts = KillOpts::from_env();
     if let Mode::Auto { live_named } = mode {
         // a pass is bounded (500 ms, unless the debug deadline seam is set)
-        if crate::seam_ms("SHEEPDOG_TEST_DEADLINE_MS").is_none() {
+        if crate::seam_ms("SHEEPR_TEST_DEADLINE_MS").is_none() {
             opts.deadline = std::time::Duration::from_millis(500);
         }
-        let sups: Vec<i32> = set.iter().filter(|&&(p, _)| is_sheepdog(p)).map(|&(p, _)| p).collect();
+        let sups: Vec<i32> = set.iter().filter(|&&(p, _)| is_sheepr(p)).map(|&(p, _)| p).collect();
         let held_by = held_set(&j, &set, live_named);
         let held: Vec<(i32, u64)> = set.iter().copied().filter(|&c| deferred(c, &sups, &held_by)).collect();
         let n = set.len() - held.len();
@@ -330,7 +330,7 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
                 Outcome::Swept(n)
             }
             Ok(()) => {
-                crate::status::add_note(&format!("deferred: job {} holds a live supervisor or a live job's processes; run sheepdog sweep", j.job));
+                crate::status::add_note(&format!("deferred: job {} holds a live supervisor or a live job's processes; run sheepr sweep", j.job));
                 crate::note(format!("deferred {}", j.job));
                 Outcome::Swept(n)
             }
@@ -348,7 +348,7 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
         };
     }
     if explicit {
-        let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepdog(p)).collect();
+        let sups: Vec<(i32, u64)> = set.iter().copied().filter(|&(p, _)| is_sheepr(p)).collect();
         if !sups.is_empty() {
             end_supervisors(&sups, opts.deadline, &mut proved);
         }
@@ -374,7 +374,7 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
     }
 }
 
-/// The auto-sweep before a `sheepdog run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
+/// The auto-sweep before a `sheepr run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
 /// silently skipped on any problem (a note), within 200 ms between journals. It takes the wall's
 /// token only when there is a journal to open: an empty state produces no fact.
 pub fn auto(owner: &str, quiet: bool) {
@@ -396,7 +396,7 @@ pub fn auto(owner: &str, quiet: bool) {
     files.sort();
     let Some(_token) = crate::wall::gate() else { return };
     let Ok(protected) = protected() else {
-        crate::status::add_note("auto-sweep skipped: sheepdog cannot follow its own chain of parent processes");
+        crate::status::add_note("auto-sweep skipped: sheepr cannot follow its own chain of parent processes");
         return;
     };
     let start = std::time::Instant::now();
@@ -429,7 +429,7 @@ pub fn auto(owner: &str, quiet: bool) {
         }
     }
     if swept > 0 && killed > 0 && !quiet {
-        say!("sheepdog: swept {swept} dead job{} before the command ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
+        say!("sheepr: swept {swept} dead job{} before the command ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
     }
 }
 
@@ -438,7 +438,7 @@ pub fn folder(state: &Path) -> Option<PathBuf> {
     Some(state.join("jobs").join(format!("{}-{}", crate::journal::boot_id()?, crate::journal::pidns())))
 }
 
-pub(crate) const USAGE: &str = "sheepdog sweep [--owner NAME]";
+pub(crate) const USAGE: &str = "sheepr sweep [--owner NAME]";
 
 pub fn main(args: &[OsString]) -> i32 {
     unsafe {
@@ -459,7 +459,7 @@ pub fn main(args: &[OsString]) -> i32 {
             }
             a => {
                 let w = crate::shown(&args[i]);
-                crate::fail!("sheepdog: sweep: {}", match a {
+                crate::fail!("sheepr: sweep: {}", match a {
                     b"--owner" => "--owner needs a value: a name.".to_string(),
                     a if a.starts_with(b"-") => format!("unknown option {w}."),
                     _ => format!("unexpected argument {w}."),
@@ -471,7 +471,7 @@ pub fn main(args: &[OsString]) -> i32 {
     }
     #[cfg(target_os = "linux")]
     if let Some(why) = crate::linux::proc_problem() {
-        crate::fail!("sheepdog: {why}, so sweep cannot tell which processes are which. Nothing was signalled.");
+        crate::fail!("sheepr: {why}, so sweep cannot tell which processes are which. Nothing was signalled.");
         return 1;
     }
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else {
@@ -484,7 +484,7 @@ pub fn main(args: &[OsString]) -> i32 {
     }
     for p in [state.clone(), state.join("jobs"), dir.clone()] {
         if let Err(why) = safe_dir(&p) {
-            crate::fail!("sheepdog: refusing to sweep: {why}. Nothing was signalled.");
+            crate::fail!("sheepr: refusing to sweep: {why}. Nothing was signalled.");
             return 1;
         }
     }
@@ -492,7 +492,7 @@ pub fn main(args: &[OsString]) -> i32 {
     let protected = match protected() {
         Ok(v) => v,
         Err(link) => {
-            crate::fail!("sheepdog: refusing to sweep: sheepdog cannot follow its own chain of parent processes at pid {link}, so it cannot rule out a job that holds one of them. Nothing was signalled.");
+            crate::fail!("sheepr: refusing to sweep: sheepr cannot follow its own chain of parent processes at pid {link}, so it cannot rule out a job that holds one of them. Nothing was signalled.");
             return 1;
         }
     };
@@ -518,14 +518,14 @@ pub fn main(args: &[OsString]) -> i32 {
                 killed += n;
             }
             Outcome::Skipped(why) => {
-                say!("sheepdog: skipped job {job}: {why}.");
+                say!("sheepr: skipped job {job}: {why}.");
                 crate::note(format!("sweep skipped {job}: {why}"));
             }
             Outcome::Deadline(c) => code = code.max(c),
         }
     }
     if swept > 0 {
-        say!("sheepdog: swept {swept} dead job{} ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
+        say!("sheepr: swept {swept} dead job{} ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
     }
     code
 }

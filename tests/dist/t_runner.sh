@@ -5,7 +5,7 @@
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
-R="$SD_ROOT/tests/dist/run.sh"
+R="$SR_ROOT/tests/dist/run.sh"
 mk() { rm -rf "$FX/d"; mkdir -p "$FX/d"; cp "$R" "$FX/d/run.sh"; }
 mk; printf '#!/bin/sh\necho a\n' > "$FX/d/t_a.sh"
 sh "$FX/d/run.sh" > "$FX/o" 2>&1 && grep -q '^a$' "$FX/o" && pass "passing cells: green, output printed" || fail "passing cells"

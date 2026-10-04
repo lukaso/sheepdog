@@ -10,23 +10,23 @@ use common::{found, kill_marked, send, send_child};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 
 /// Run to completion within `limit`, or kill it and panic.
 fn run_bounded(args: &[&str], limit: Duration) -> i32 {
-    let mut child = Command::new(sheepdog()).args(args).stdout(Stdio::null()).spawn().unwrap();
+    let mut child = Command::new(sheepr()).args(args).stdout(Stdio::null()).spawn().unwrap();
     let start = Instant::now();
     loop {
         if let Some(st) = child.try_wait().unwrap() {
-            return st.code().expect("sheepdog died from a signal");
+            return st.code().expect("sheepr died from a signal");
         }
         if start.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("sheepdog {args:?} did not finish within {limit:?}");
+            panic!("sheepr {args:?} did not finish within {limit:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -48,17 +48,17 @@ fn a_missing_command_exits_127() {
 }
 
 /// PLAN.md §3.1 "at most one re-exec attempt": with the responsibility SPI answering "no
-/// fact" (debug-only seam), the self re-exec never takes effect. sheepdog must fall back and
+/// fact" (debug-only seam), the self re-exec never takes effect. sheepr must fall back and
 /// finish, not re-exec forever.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failing_self_reexec_falls_back_instead_of_looping() {
-    let log = std::env::temp_dir().join(format!("sd-degraded-{}", std::process::id()));
+    let log = std::env::temp_dir().join(format!("sr-degraded-{}", std::process::id()));
     let _ = std::fs::remove_file(&log);
-    let mut child = Command::new(sheepdog())
+    let mut child = Command::new(sheepr())
         .args(["run", "--", "true"])
-        .env("SHEEPDOG_TEST_SPI", "broken")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
+        .env("SHEEPR_TEST_SPI", "broken")
+        .env("SHEEPR_TEST_SIGNAL_LOG", &log)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -68,7 +68,7 @@ fn a_failing_self_reexec_falls_back_instead_of_looping() {
         if start.elapsed() > Duration::from_secs(5) {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("sheepdog re-exec'd forever when the SPI gave no answer");
+            panic!("sheepr re-exec'd forever when the SPI gave no answer");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -83,11 +83,11 @@ fn a_failing_self_reexec_falls_back_instead_of_looping() {
 // (SIGCHLD excepted: the root always gets it at default; see PLAN.md §3.1)
 
 /// Run `script` under `sh -c`, with the given signals ignored by the caller, then
-/// `exec sheepdog run -- sh -c <inner>`. Returns (exit code, stderr).
+/// `exec sheepr run -- sh -c <inner>`. Returns (exit code, stderr).
 fn with_caller_ignoring(ignored: &str, inner: &str) -> (i32, String) {
     let script = format!("trap '' {ignored}; exec \"$0\" run -- sh -c \"$1\"");
     let out = Command::new("sh")
-        .args(["-c", &script, sheepdog(), inner])
+        .args(["-c", &script, sheepr(), inner])
         .stdout(Stdio::null())
         .output()
         .unwrap();
@@ -95,13 +95,13 @@ fn with_caller_ignoring(ignored: &str, inner: &str) -> (i32, String) {
 }
 
 /// Cell 23 (mask): the root is born with exactly the caller's blocked signals, never with
-/// sheepdog's own (it blocks TERM and SIGCHLD for itself; on macOS the self re-exec must
-/// carry the caller's mask, or the re-exec'd image records sheepdog's mask as the caller's).
+/// sheepr's own (it blocks TERM and SIGCHLD for itself; on macOS the self re-exec must
+/// carry the caller's mask, or the re-exec'd image records sheepr's mask as the caller's).
 #[test]
 fn cell23_the_root_gets_exactly_the_callers_mask() {
     use std::os::unix::process::CommandExt;
     let out = unsafe {
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", fixture(), "print-mask"])
             .pre_exec(|| {
                 let mut set: libc::sigset_t = std::mem::zeroed();
@@ -147,7 +147,7 @@ fn cell23_an_ignored_sigpipe_stays_ignored() {
 
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 /// P1-B: a caller that ignores SIGCHLD makes the kernel reap children automatically. The
@@ -157,10 +157,10 @@ fn fixture() -> &'static str {
 #[test]
 fn a_caller_that_ignores_sigchld_does_not_break_the_supervisor() {
     let marker = format!("29.{}999001", std::process::id());
-    let rec = std::env::temp_dir().join(format!("sd-chld-{}", std::process::id()));
+    let rec = std::env::temp_dir().join(format!("sr-chld-{}", std::process::id()));
     let _ = std::fs::remove_file(&rec);
     let mut child = Command::new(fixture())
-        .args(["exec-chld-ignored", sheepdog(), "run", "--", fixture(), "escape", &marker])
+        .args(["exec-chld-ignored", sheepr(), "run", "--", fixture(), "escape", &marker])
         .arg(&rec)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -184,7 +184,7 @@ fn a_caller_that_ignores_sigchld_does_not_break_the_supervisor() {
     // cleanup by marker (and identity) before asserting
     kill_marked(&[&marker]);
     let _ = std::fs::remove_file(&rec);
-    assert_eq!(code, Some(0), "sheepdog did not return the root's code within 5 s");
+    assert_eq!(code, Some(0), "sheepr did not return the root's code within 5 s");
     assert_eq!(survivors.unwrap_or(1), 0, "the escapee survived");
 }
 
@@ -194,7 +194,7 @@ fn non_utf8_arguments_reach_the_root_unchanged() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     let arg = OsString::from_vec(vec![0xff, 0xfe]);
-    let out = Command::new(sheepdog())
+    let out = Command::new(sheepr())
         .args(["run", "--", "sh", "-c", "printf %s \"$1\" | od -An -tx1", "_"])
         .arg(&arg)
         .output()
@@ -204,13 +204,13 @@ fn non_utf8_arguments_reach_the_root_unchanged() {
 }
 
 /// P2: the deadline bounds the runtime even when the tree never looks empty (debug seam
-/// SHEEPDOG_TEST_NEVER_EMPTY=1 makes every emptiness check answer "not empty").
+/// SHEEPR_TEST_NEVER_EMPTY=1 makes every emptiness check answer "not empty").
 #[test]
 fn the_kill_deadline_bounds_the_runtime() {
-    let mut child = Command::new(sheepdog())
+    let mut child = Command::new(sheepr())
         .args(["run", "--", "true"])
-        .env("SHEEPDOG_TEST_NEVER_EMPTY", "1")
-        .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
+        .env("SHEEPR_TEST_NEVER_EMPTY", "1")
+        .env("SHEEPR_TEST_DEADLINE_MS", "300")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -224,7 +224,7 @@ fn the_kill_deadline_bounds_the_runtime() {
         if start.elapsed() > Duration::from_secs(5) {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("sheepdog ran past its kill deadline");
+            panic!("sheepr ran past its kill deadline");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -239,12 +239,12 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
     unsafe { libc::close(fds[0]) }; // nobody will ever read: writes fail with EPIPE
     let stderr = unsafe { Stdio::from_raw_fd(fds[1]) };
-    // Command resets SIGPIPE to default in the child (then the write kills sheepdog with
+    // Command resets SIGPIPE to default in the child (then the write kills sheepr with
     // SIGPIPE, which is correct); ignore it explicitly so the write returns EPIPE instead
     use std::os::unix::process::CommandExt;
     let st = unsafe {
         // a `run` usage error (125; a non-subcommand is 2 since PLAN §10.5, P9)
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--bogus", "--", "/usr/bin/true"])
             .stderr(stderr)
             .pre_exec(|| {
@@ -257,20 +257,20 @@ fn a_closed_stderr_does_not_turn_an_error_into_a_crash() {
     assert_eq!(st.code(), Some(125));
 }
 
-/// Review round 3: a shell that starts a background job and then execs sheepdog leaves that
-/// job as sheepdog's child. It is not part of the command's tree and must survive (it did not
+/// Review round 3: a shell that starts a background job and then execs sheepr leaves that
+/// job as sheepr's child. It is not part of the command's tree and must survive (it did not
 /// on Linux: the subreaper supervisor killed it as a member).
 #[test]
-fn a_background_job_started_before_sheepdog_is_not_killed() {
+fn a_background_job_started_before_sheepr_is_not_killed() {
     // the job's pid comes from `$!`, so the check does not depend on the job having exec'd yet
     // the job's identity is read while it is certainly alive: the script waits for the go file
-    // before it execs sheepdog (read after sheepdog ran, a killed job's pid could be reused)
-    let pidf = std::env::temp_dir().join(format!("sd-bg-{}", std::process::id()));
-    let go = std::env::temp_dir().join(format!("sd-bg-go-{}", std::process::id()));
+    // before it execs sheepr (read after sheepr ran, a killed job's pid could be reused)
+    let pidf = std::env::temp_dir().join(format!("sr-bg-{}", std::process::id()));
+    let go = std::env::temp_dir().join(format!("sr-bg-go-{}", std::process::id()));
     let _ = std::fs::remove_file(&pidf);
     let _ = std::fs::remove_file(&go);
     let script = format!("/bin/sleep 30 & echo $! > '{}'; n=0; while [ ! -e '{}' ] && [ $n -lt 1000 ]; do /bin/sleep 0.01; n=$((n+1)); done; [ $n -lt 1000 ] || exit 3; exec \"$0\" run -- true", pidf.display(), go.display());
-    let mut c = Command::new("sh").args(["-c", &script, sheepdog()]).spawn().unwrap();
+    let mut c = Command::new("sh").args(["-c", &script, sheepr()]).spawn().unwrap();
     wait_until("the background job's pid", || std::fs::read_to_string(&pidf).is_ok_and(|s| s.ends_with('\n')));
     let pid: i32 = std::fs::read_to_string(&pidf).unwrap().trim().parse().unwrap();
     let _ = std::fs::remove_file(&pidf);
@@ -279,7 +279,7 @@ fn a_background_job_started_before_sheepdog_is_not_killed() {
     std::fs::write(&go, "").unwrap();
     let st = c.wait().unwrap();
     let _ = std::fs::remove_file(&go);
-    // sheepdog has exited, so a job it killed is reaped by init promptly: wait for that, bounded
+    // sheepr has exited, so a job it killed is reaped by init promptly: wait for that, bounded
     let t = Instant::now();
     let mut alive = true;
     while t.elapsed() < Duration::from_millis(500) {
@@ -297,17 +297,17 @@ fn a_background_job_started_before_sheepdog_is_not_killed() {
 }
 
 /// Review round 3, F7: a panic after the freeze must not leave members stopped. Debug seam
-/// SHEEPDOG_TEST_PANIC_AFTER_STOP=1 panics right after the first SIGSTOP pass.
+/// SHEEPR_TEST_PANIC_AFTER_STOP=1 panics right after the first SIGSTOP pass.
 #[test]
 fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
     let marker = format!("29.{}777002", std::process::id());
-    let rec = std::env::temp_dir().join(format!("sd-panic-{}", std::process::id()));
+    let rec = std::env::temp_dir().join(format!("sr-panic-{}", std::process::id()));
     let _ = std::fs::remove_file(&rec);
-    let st = Command::new(sheepdog())
+    let st = Command::new(sheepr())
         // --grace 0: the TERM grace would end the escapee before the freeze is reached
         .args(["run", "--grace", "0", "--", fixture(), "escape", &marker])
         .arg(&rec)
-        .env("SHEEPDOG_TEST_PANIC_AFTER_STOP", "1")
+        .env("SHEEPR_TEST_PANIC_AFTER_STOP", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -337,7 +337,7 @@ fn a_panic_after_the_freeze_does_not_leave_members_stopped() {
 #[test]
 fn a_one_day_grace_is_accepted() {
     for v in ["86400", "86400000ms"] {
-        let st = Command::new(sheepdog()).args(["run", "--grace", v, "--", "true"]).stderr(Stdio::null()).status().unwrap();
+        let st = Command::new(sheepr()).args(["run", "--grace", v, "--", "true"]).stderr(Stdio::null()).status().unwrap();
         assert_eq!(st.code(), Some(0), "--grace {v} was refused");
     }
 }
@@ -346,7 +346,7 @@ fn a_one_day_grace_is_accepted() {
 #[test]
 fn an_unrepresentable_grace_is_a_usage_error() {
     for v in ["inf", "NaN", "1e30", "-1", "86401", "86400001ms"] {
-        let out = Command::new(sheepdog()).args(["run", "--grace", v, "--", "true"]).output().unwrap();
+        let out = Command::new(sheepr()).args(["run", "--grace", v, "--", "true"]).output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(125), "--grace {v}: {err}");
         assert!(err.contains("usage"), "--grace {v}: no usage line: {err}");
@@ -357,7 +357,7 @@ fn an_unrepresentable_grace_is_a_usage_error() {
 // ---- TERM ends the job (review round 5, P2-A) -----------------------------------------
 
 /// Live `/bin/sleep <marker>` processes only. Counting every process whose argv mentions the
-/// marker also counts sheepdog itself when the marker is inside its `sh -c` argument.
+/// marker also counts sheepr itself when the marker is inside its `sh -c` argument.
 fn sleeps(marker: &str) -> usize {
     let out = Command::new("ps").args(["-Ao", "pid=,args="]).output().expect("ps");
     assert!(out.status.success(), "ps failed");
@@ -380,45 +380,45 @@ fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
-/// PLAN.md §3.1: TERM to sheepdog ends the job. The root and an escapee are gone, and
-/// sheepdog itself dies of SIGTERM (so a caller sees death by signal).
+/// PLAN.md §3.1: TERM to sheepr ends the job. The root and an escapee are gone, and
+/// sheepr itself dies of SIGTERM (so a caller sees death by signal).
 #[test]
-fn term_to_sheepdog_ends_the_job() {
+fn term_to_sheepr_ends_the_job() {
     use std::os::unix::process::ExitStatusExt;
     let (root, esc) = (format!("26.{}444001", std::process::id()), format!("25.{}444002", std::process::id()));
     let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
-    let mut c = Command::new(sheepdog()).args(["run", "--", "sh", "-c", &inner]).spawn().unwrap();
+    let mut c = Command::new(sheepr()).args(["run", "--", "sh", "-c", &inner]).spawn().unwrap();
     wait_until("the root and the escapee", || sleeps(&root) == 1 && sleeps(&esc) == 1);
     let before = (sleeps(&root), sleeps(&esc));
-    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
     let st = c.wait().unwrap();
     std::thread::sleep(Duration::from_millis(200));
     let after = (sleeps(&root), sleeps(&esc));
     kill_marked(&[&root, &esc]);
     assert_eq!(before, (1, 1), "the job did not start");
     assert_eq!(after, (0, 0), "TERM left the job running (root, escapee)");
-    assert_eq!(st.signal(), Some(libc::SIGTERM), "sheepdog must die of SIGTERM, got {st:?}");
+    assert_eq!(st.signal(), Some(libc::SIGTERM), "sheepr must die of SIGTERM, got {st:?}");
 }
 
 // ---- the relay (review round 4; macOS since the S2 review, A-P2-1) ------------------------
-// When sheepdog starts with children it did not create, it forks a fresh supervisor and the
+// When sheepr starts with children it did not create, it forks a fresh supervisor and the
 // first process becomes the relay (Linux: not their subreaper; macOS: a fresh uniqueid).
 
 mod relay {
     use super::*;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
 
-    /// `sd-fixture bg-then-exec <job> sheepdog run -- <root...>` (with a job: the relay path),
-    /// or sheepdog directly (no job: the direct path). No shell in between.
+    /// `sr-fixture bg-then-exec <job> sheepr run -- <root...>` (with a job: the relay path),
+    /// or sheepr directly (no job: the direct path). No shell in between.
     fn start(job: Option<&str>, root: &[&str]) -> Command {
         let mut c = match job {
             Some(j) => {
                 let mut c = Command::new(fixture());
-                c.args(["bg-then-exec", j, sheepdog(), "run", "--"]);
+                c.args(["bg-then-exec", j, sheepr(), "run", "--"]);
                 c
             }
             None => {
-                let mut c = Command::new(sheepdog());
+                let mut c = Command::new(sheepr());
                 c.args(["run", "--"]);
                 c
             }
@@ -426,7 +426,7 @@ mod relay {
         c.args(root).stdout(Stdio::null()).stderr(Stdio::null());
         c
     }
-    /// The sheepdog children of `pid` (the relay's supervisor), with identities read at discovery.
+    /// The sheepr children of `pid` (the relay's supervisor), with identities read at discovery.
     fn supervisors_of(pid: i32) -> Vec<(i32, u64)> {
         let out = Command::new("ps").args(["-Ao", "pid=,ppid=,args="]).output().expect("ps");
         assert!(out.status.success(), "ps failed");
@@ -434,7 +434,7 @@ mod relay {
             .lines()
             .filter_map(|l| {
                 let w: Vec<&str> = l.split_whitespace().collect();
-                (w.len() >= 3 && w[1] == pid.to_string() && w[2].ends_with("sheepdog")).then(|| w[0].parse().ok()).flatten()
+                (w.len() >= 3 && w[1] == pid.to_string() && w[2].ends_with("sheepr")).then(|| w[0].parse().ok()).flatten()
             })
             .filter_map(found)
             .collect()
@@ -456,7 +456,7 @@ mod relay {
         let (d, r) = (direct.wait().unwrap(), relayed.wait().unwrap());
         kill_marked(&[&job, &r1, &r2]);
         assert_eq!(sups.len(), 1, "the relay path did not start a supervisor: {sups:?}");
-        assert_eq!(d.signal(), Some(libc::SIGTERM), "control: without the relay, sheepdog dies of SIGTERM");
+        assert_eq!(d.signal(), Some(libc::SIGTERM), "control: without the relay, sheepr dies of SIGTERM");
         assert_eq!(r.signal(), Some(libc::SIGTERM), "the relay turned death-by-signal into {r:?}");
     }
 
@@ -514,8 +514,8 @@ mod relay {
     }
 
     /// The spawn-window cells (macOS). The root's first action leaves the `ran` file. Seams: the
-    /// window's own (it writes the ready file on entry) and SHEEPDOG_TEST_CONT_FILE (written just
-    /// before sheepdog resumes the suspended root), so a cell can prove its action came first.
+    /// window's own (it writes the ready file on entry) and SHEEPR_TEST_CONT_FILE (written just
+    /// before sheepr resumes the suspended root), so a cell can prove its action came first.
     #[cfg(target_os = "macos")]
     struct Window {
         job: String,
@@ -527,7 +527,7 @@ mod relay {
     #[cfg(target_os = "macos")]
     impl Window {
         fn new(tag: u32) -> Self {
-            let f = |k: &str| std::env::temp_dir().join(format!("sd-{k}-{}-w{tag}", std::process::id()));
+            let f = |k: &str| std::env::temp_dir().join(format!("sr-{k}-{}-w{tag}", std::process::id()));
             let w = Window { job: m(tag), root: m(tag + 1), ready: f("ready"), ran: f("ran"), cont: f("cont") };
             for p in [&w.ready, &w.ran, &w.cont] {
                 let _ = std::fs::remove_file(p);
@@ -536,7 +536,7 @@ mod relay {
         }
         fn with(&self, root: &[&str], relayed: bool, seam: &str, ms: &str) -> Command {
             let mut c = start(relayed.then_some(self.job.as_str()), root);
-            c.env(seam, ms).env("SHEEPDOG_TEST_READY_FILE", &self.ready).env("SHEEPDOG_TEST_CONT_FILE", &self.cont);
+            c.env(seam, ms).env("SHEEPR_TEST_READY_FILE", &self.ready).env("SHEEPR_TEST_CONT_FILE", &self.cont);
             c
         }
         /// A root that acts (writes `ran`), then runs as `/bin/sleep <root>`.
@@ -551,7 +551,7 @@ mod relay {
             self.with(&["/usr/bin/touch", &ran], relayed, seam, ms)
         }
         fn wait_ready(&self) {
-            wait_until("sheepdog inside the window", || self.ready.exists());
+            wait_until("sheepr inside the window", || self.ready.exists());
         }
         /// The root, found while it is suspended (state T): its pid and identity (read at discovery).
         fn suspended_root(&self) -> (i32, u64) {
@@ -560,14 +560,14 @@ mod relay {
                 let out = Command::new("ps").args(["-Ao", "pid=,stat=,args="]).output().expect("ps");
                 pid = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
                     let w: Vec<&str> = l.split_whitespace().collect();
-                    let root = w.len() >= 3 && w[2] != sheepdog() && l.contains(&self.ran.display().to_string());
+                    let root = w.len() >= 3 && w[2] != sheepr() && l.contains(&self.ran.display().to_string());
                     (root && w[1].starts_with('T')).then(|| w[0].parse().ok()).flatten().and_then(found)
                 });
                 pid.is_some()
             });
             pid.unwrap()
         }
-        /// sheepdog has resumed the root (the CONT seam file exists).
+        /// sheepr has resumed the root (the CONT seam file exists).
         fn resumed(&self) -> bool {
             self.cont.exists()
         }
@@ -612,7 +612,7 @@ mod relay {
     /// The caller's shape for a spawn-window cell: HUP, INT, QUIT and TERM at their defaults (a
     /// test run as a background job of a script has INT and QUIT ignored); TERM blocked if asked;
     /// a process group of its own only for the stop cells (killpg). The other cells stay in the
-    /// test's group: a group of its own is orphaned when sheepdog dies, and the kernel then sends
+    /// test's group: a group of its own is orphaned when sheepr dies, and the kernel then sends
     /// HUP and CONT to its stopped members, which would end a root left stopped for another reason.
     #[cfg(target_os = "macos")]
     fn caller(c: &mut Command, own_group: bool, block_term: bool) {
@@ -652,9 +652,9 @@ mod relay {
         for (i, caller) in ["default", "blocked", "ignored", "cont-blocked, ignored"].into_iter().enumerate() {
             let w = Window::new(30 + 2 * i as u32);
             let mut c = if caller == "cont-blocked, ignored" {
-                w.quick_command(true, "SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
+                w.quick_command(true, "SHEEPR_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
             } else {
-                w.command(true, "SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
+                w.command(true, "SHEEPR_TEST_SLEEP_BEFORE_REEXEC_MS", "600")
             };
             let how = caller;
             unsafe {
@@ -703,7 +703,7 @@ mod relay {
         // from running once anything resumes it
         for (i, block_term) in [false, true].into_iter().enumerate() {
             let w = Window::new(40 + 20 * i as u32);
-            let mut c = w.quick_command(true, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            let mut c = w.quick_command(true, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "800");
             caller(&mut c, false, block_term);
             let mut relayed = c.spawn().unwrap();
             w.wait_ready();
@@ -716,7 +716,7 @@ mod relay {
             until_gone(&[root]);
             let (did_run, root_left, sup_after) = (w.ran.exists(), alive(root), sups.iter().filter(|&&p| alive(p)).count());
             w.cleanup(&[&sups[..], &[root]].concat());
-            assert!(!late, "caller blocks TERM={block_term}: the kill missed the window (load): sheepdog had already resumed the root");
+            assert!(!late, "caller blocks TERM={block_term}: the kill missed the window (load): sheepr had already resumed the root");
             assert_eq!(sups.len(), 1, "caller blocks TERM={block_term}: expected one supervisor in the window, found {sups:?}");
             assert!(!did_run, "caller blocks TERM={block_term}: the root acted although its relay died before it was resumed");
             assert!(!root_left, "caller blocks TERM={block_term}: the suspended root was left behind");
@@ -725,88 +725,88 @@ mod relay {
     }
 
     /// S2 review rounds 4-5 (macOS): a TERM that arrives while the root is still suspended ends
-    /// the job there: the root is never resumed, it is not left behind, and sheepdog dies of
+    /// the job there: the root is never resumed, it is not left behind, and sheepr dies of
     /// SIGTERM.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_term_in_the_spawn_window_starts_no_root() {
         for (i, block_term) in [false, true].into_iter().enumerate() {
             let w = Window::new(42 + 20 * i as u32);
-            let mut c = w.quick_command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            let mut c = w.quick_command(false, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "800");
             caller(&mut c, false, block_term);
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+            assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
             let late = w.resumed();
             let st = c.wait().unwrap();
             until_gone(&[root]);
             let (did_run, root_left) = (w.ran.exists(), alive(root));
             w.cleanup(&[root]);
-            assert!(!late, "caller blocks TERM={block_term}: the TERM missed the window (load): sheepdog had already resumed the root");
+            assert!(!late, "caller blocks TERM={block_term}: the TERM missed the window (load): sheepr had already resumed the root");
             assert!(!did_run, "caller blocks TERM={block_term}: the root acted although TERM came before it was resumed");
             assert!(!root_left, "caller blocks TERM={block_term}: the suspended root was left behind");
-            assert_eq!(st.signal(), Some(libc::SIGTERM), "caller blocks TERM={block_term}: sheepdog did not die of SIGTERM: {st:?}");
+            assert_eq!(st.signal(), Some(libc::SIGTERM), "caller blocks TERM={block_term}: sheepr did not die of SIGTERM: {st:?}");
         }
     }
 
     /// S2 review rounds 3-5 (macOS): a signal that still ends the supervisor between the root's
     /// suspended spawn and its CONT must not leave the root stopped. Since the phase-1 review
     /// only the faults (SEGV, BUS, ILL, FPE, TRAP, SYS; sent here with kill) and KILL still end
-    /// sheepdog; the full hold in the spawn window is what keeps the root from staying stopped.
+    /// sheepr; the full hold in the spawn window is what keeps the root from staying stopped.
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_signal_that_ends_sheepdog_in_the_spawn_window_leaves_no_stopped_root() {
+    fn a_signal_that_ends_sheepr_in_the_spawn_window_leaves_no_stopped_root() {
         for (i, sig) in [libc::SIGSYS, libc::SIGTRAP].into_iter().enumerate() {
             let w = Window::new(60 + 2 * i as u32);
-            let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            let mut c = w.command(false, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "800");
             caller(&mut c, false, false);
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            assert!(send_child(&mut c, sig), "sheepdog had already ended");
+            assert!(send_child(&mut c, sig), "sheepr had already ended");
             let late = w.resumed();
             let st = wait_bounded(&mut c, Duration::from_secs(15));
             std::thread::sleep(Duration::from_millis(200));
             let stopped = alive(root) && state(root.0) == Some('T');
             w.cleanup(&[root]);
-            assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
-            assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
+            assert!(!late, "signal {sig}: the signal missed the window (load): sheepr had already resumed the root");
+            assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepr did not die of it: {st:?}");
             assert!(!stopped, "signal {sig}: the root was left stopped after the supervisor died in the spawn window");
         }
     }
 
-    /// S2 review rounds 3-5, S4 and the phase-1 review (macOS): a signal to the sheepdog pid in
-    /// the spawn window (between the root's suspended spawn and its CONT) does not end sheepdog,
+    /// S2 review rounds 3-5, S4 and the phase-1 review (macOS): a signal to the sheepr pid in
+    /// the spawn window (between the root's suspended spawn and its CONT) does not end sheepr,
     /// and the root is not left stopped: it runs. TERM then ends the job. INT, HUP and QUIT are
-    /// watched; USR1 and ALRM end a process by default and are blocked for sheepdog. (The job has
+    /// watched; USR1 and ALRM end a process by default and are blocked for sheepr. (The job has
     /// no escapee, so this cell cannot see whether the signal is forwarded.)
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_signal_in_the_spawn_window_neither_ends_sheepdog_nor_leaves_the_root_stopped() {
+    fn a_signal_in_the_spawn_window_neither_ends_sheepr_nor_leaves_the_root_stopped() {
         for (i, sig) in [libc::SIGINT, libc::SIGHUP, libc::SIGQUIT, libc::SIGUSR1, libc::SIGALRM].into_iter().enumerate() {
             let w = Window::new(90 + 2 * i as u32);
-            let mut c = w.command(false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+            let mut c = w.command(false, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "800");
             caller(&mut c, false, false);
             let mut c = c.spawn().unwrap();
             w.wait_ready();
             let root = w.suspended_root();
-            assert!(send_child(&mut c, sig), "sheepdog had already ended");
+            assert!(send_child(&mut c, sig), "sheepr had already ended");
             let late = w.resumed();
             wait_until("the root's action", || w.ran.exists());
             std::thread::sleep(Duration::from_millis(300));
-            // after this try_wait, c.id() is signalled only if sheepdog had not ended (then it
-            // is not reaped); an ended sheepdog's status is kept for wait_bounded
+            // after this try_wait, c.id() is signalled only if sheepr had not ended (then it
+            // is not reaped); an ended sheepr's status is kept for wait_bounded
             let ended = c.try_wait().unwrap();
-            let sheepdog_alive = ended.is_none();
+            let sheepr_alive = ended.is_none();
             let root_state = state(root.0);
-            if sheepdog_alive {
+            if sheepr_alive {
                 send_child(&mut c, libc::SIGTERM);
             }
             let st = ended.or_else(|| wait_bounded(&mut c, Duration::from_secs(15)));
             w.cleanup(&[root]);
-            assert!(!late, "signal {sig}: the signal missed the window (load): sheepdog had already resumed the root");
-            assert!(sheepdog_alive, "signal {sig}: it ended sheepdog");
+            assert!(!late, "signal {sig}: the signal missed the window (load): sheepr had already resumed the root");
+            assert!(sheepr_alive, "signal {sig}: it ended sheepr");
             assert!(root_state.is_some_and(|s| s != 'T'), "signal {sig}: the root was left stopped ({root_state:?})");
             assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "signal {sig}: TERM did not end the job: {st:?}");
         }
@@ -814,13 +814,13 @@ mod relay {
 
     /// S2 review rounds 4-5 (macOS): a ctrl-Z (TSTP to the job's group) in the spawn window stops
     /// the job: the root does not act while the job is stopped, and after the group's CONT it
-    /// runs and sheepdog exits 0.
+    /// runs and sheepr exits 0.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_stop_in_the_spawn_window_stops_the_job() {
         let w = Window::new(50);
         let script = format!("echo RAN > '{}'", w.ran.display());
-        let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "800");
+        let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "800");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
         // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
@@ -829,7 +829,7 @@ mod relay {
         let root = w.suspended_root();
         assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
         let late = w.resumed();
-        wait_until("sheepdog stopped", || state(pg) == Some('T'));
+        wait_until("sheepr stopped", || state(pg) == Some('T'));
         std::thread::sleep(Duration::from_millis(300)); // the job stays stopped: nothing may run
         let ran_while_stopped = w.ran.exists();
         assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
@@ -839,9 +839,9 @@ mod relay {
             common::send_group(pg, pg_id, libc::SIGKILL);
         }
         w.cleanup(&[root]);
-        assert!(!late, "the stop missed the window (load): sheepdog had already resumed the root");
+        assert!(!late, "the stop missed the window (load): sheepr had already resumed the root");
         assert!(!ran_while_stopped, "the root acted while the job was stopped");
-        assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepdog did not finish after the CONT");
+        assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepr did not finish after the CONT");
         assert!(ran_after, "the root never ran after the CONT");
     }
 
@@ -852,17 +852,17 @@ mod relay {
     #[test]
     fn a_stop_before_the_identity_read_loses_no_member() {
         let w = Window::new(52);
-        let rec = std::env::temp_dir().join(format!("sd-rec-{}-w52", std::process::id()));
+        let rec = std::env::temp_dir().join(format!("sr-rec-{}-w52", std::process::id()));
         let _ = std::fs::remove_file(&rec);
         let recs = rec.display().to_string();
-        let mut c = w.with(&[fixture(), "puniq-only", &w.root, &recs], false, "SHEEPDOG_TEST_SLEEP_AFTER_SPAWN_MS", "3000");
+        let mut c = w.with(&[fixture(), "puniq-only", &w.root, &recs], false, "SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "3000");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
         // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
         let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
         w.wait_ready();
         assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
-        wait_until("sheepdog stopped", || state(pg) == Some('T'));
+        wait_until("sheepr stopped", || state(pg) == Some('T'));
         assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
         let st = wait_bounded(&mut c, Duration::from_secs(15));
         std::thread::sleep(Duration::from_millis(200));
@@ -874,19 +874,19 @@ mod relay {
                 Some((x.next()?.parse().ok()?, x.next()?.parse().ok()?))
             })
             .collect();
-        let left = d.iter().filter(|&&(p, id)| sheepdog::ident::same(p, id)).count();
+        let left = d.iter().filter(|&&(p, id)| sheepr::ident::same(p, id)).count();
         if st.is_none() {
             common::send_group(pg, pg_id, libc::SIGKILL);
         }
         let _ = std::fs::remove_file(&rec);
         w.cleanup(&d); // D recorded itself with its identity
-        assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepdog did not finish");
+        assert_eq!(st.and_then(|s| s.code()), Some(0), "sheepr did not finish");
         assert_eq!(d.len(), 1, "D was not created");
         assert_eq!(left, 0, "the root ran before its identity was read, and its disclaimed child survived");
     }
 
     /// S2 review round 5 (macOS): a stop in the window, then TERM and the job's CONT. The job's
-    /// CONT resumes the root too, so it may run (a debug seam holds sheepdog after the stop is let
+    /// CONT resumes the root too, so it may run (a debug seam holds sheepr after the stop is let
     /// through and before its check, so the root does run and starts a child). The check then
     /// finds TERM, and the whole job ends: the root and its child.
     #[cfg(target_os = "macos")]
@@ -895,20 +895,20 @@ mod relay {
         let w = Window::new(54);
         let esc = m(56);
         let script = format!("/bin/sleep {esc} & exec /bin/sleep {}", w.root);
-        let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
+        let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPR_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
         caller(&mut c, true, false);
         let mut c = c.spawn().unwrap();
         // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
         let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
         w.wait_ready();
         assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
-        wait_until("sheepdog stopped", || state(pg) == Some('T'));
-        // sheepdog (the group's leader) is stopped, not ended, so it is not reaped
-        assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+        wait_until("sheepr stopped", || state(pg) == Some('T'));
+        // sheepr (the group's leader) is stopped, not ended, so it is not reaped
+        assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
         assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
         wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
         let st = wait_bounded(&mut c, Duration::from_secs(15));
-        let resumed_by_sheepdog = w.resumed(); // read after sheepdog's check has run
+        let resumed_by_sheepr = w.resumed(); // read after sheepr's check has run
         std::thread::sleep(Duration::from_millis(200));
         let left = (sleeps(&w.root), sleeps(&esc));
         if st.is_none() {
@@ -916,13 +916,13 @@ mod relay {
         }
         kill_marked(&[&esc]);
         w.cleanup(&[]);
-        assert!(!resumed_by_sheepdog, "sheepdog resumed the root itself although TERM was pending");
-        assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "sheepdog did not die of SIGTERM");
+        assert!(!resumed_by_sheepr, "sheepr resumed the root itself although TERM was pending");
+        assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "sheepr did not die of SIGTERM");
         assert_eq!(left, (0, 0), "the job was left (root, the root's child)");
     }
 
     /// S2 review round 6 (macOS): the same early end, with another deadly signal (INT, HUP,
-    /// QUIT) sent to sheepdog together with the TERM: sheepdog still kills the whole job and dies
+    /// QUIT) sent to sheepr together with the TERM: sheepr still kills the whole job and dies
     /// of TERM; the other signal must not end it before the kill.
     #[cfg(target_os = "macos")]
     #[test]
@@ -934,17 +934,17 @@ mod relay {
             let w = Window::new(64 + 3 * i as u32);
             let esc = m(66 + 3 * i as u32);
             let script = format!("/bin/sleep {esc} & exec /bin/sleep {}", w.root);
-            let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
+            let mut c = w.with(&["/bin/sh", "-c", &script], false, "SHEEPR_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2000");
             caller(&mut c, true, block_term);
             let mut c = c.spawn().unwrap();
             // the group this test created (caller: setpgid(0, 0)); its leader's identity, recorded now
             let (pg, pg_id) = found(c.id() as i32).expect("the group leader's identity");
             w.wait_ready();
             assert!(common::send_group(pg, pg_id, libc::SIGTSTP), "the job's group is gone");
-            wait_until("sheepdog stopped", || state(pg) == Some('T'));
-            // sheepdog (the group's leader) is stopped, not ended, so it is not reaped
-            assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
-            assert!(send_child(&mut c, other), "sheepdog had already ended");
+            wait_until("sheepr stopped", || state(pg) == Some('T'));
+            // sheepr (the group's leader) is stopped, not ended, so it is not reaped
+            assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
+            assert!(send_child(&mut c, other), "sheepr had already ended");
             assert!(common::send_group(pg, pg_id, libc::SIGCONT), "the job's group is gone");
             wait_until("the root's child (the job's CONT resumed the root)", || sleeps(&esc) == 1);
             let st = wait_bounded(&mut c, Duration::from_secs(15));
@@ -956,22 +956,22 @@ mod relay {
             }
             kill_marked(&[&esc]);
             w.cleanup(&[]);
-            assert!(!late, "caller blocks TERM={block_term}, signal {other}: sheepdog resumed the root: the signals missed the window (load), or sheepdog skipped the early end");
+            assert!(!late, "caller blocks TERM={block_term}, signal {other}: sheepr resumed the root: the signals missed the window (load), or sheepr skipped the early end");
             assert_eq!(left, (0, 0), "caller blocks TERM={block_term}, signal {other}: the job was left (root, the root's child)");
-            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "caller blocks TERM={block_term}, signal {other}: sheepdog did not die of SIGTERM");
+            assert_eq!(st.and_then(|s| s.signal()), Some(libc::SIGTERM), "caller blocks TERM={block_term}, signal {other}: sheepr did not die of SIGTERM");
         }
     }
 
     /// S2 review round 7 (macOS): an early end caused by the relay's death, with another deadly
-    /// signal (INT) pending at sheepdog: the whole job is still killed. A CONT to the root itself
-    /// lets it run and start a child first (a debug seam holds sheepdog before its check).
+    /// signal (INT) pending at sheepr: the whole job is still killed. A CONT to the root itself
+    /// lets it run and start a child first (a debug seam holds sheepr before its check).
     #[cfg(target_os = "macos")]
     #[test]
     fn a_relay_death_and_another_signal_leave_nothing() {
         let w = Window::new(84);
         let esc = m(86);
         let script = format!("echo x > '{}'; /bin/sleep {esc} & exec /bin/sleep {}", w.ran.display(), w.root);
-        let mut c = w.with(&["/bin/sh", "-c", &script], true, "SHEEPDOG_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2500");
+        let mut c = w.with(&["/bin/sh", "-c", &script], true, "SHEEPR_TEST_SLEEP_BEFORE_CONT_CHECK_MS", "2500");
         caller(&mut c, false, false);
         let mut relayed = c.spawn().unwrap();
         w.wait_ready();
@@ -985,7 +985,7 @@ mod relay {
             send(p, id, libc::SIGINT);
         }
         until_gone(&sups);
-        // written only when sheepdog resumes the root; read after exit it cannot tell a missed
+        // written only when sheepr resumes the root; read after exit it cannot tell a missed
         // window from a skipped early end, so the message names both
         let late = w.resumed();
         std::thread::sleep(Duration::from_millis(200));
@@ -993,7 +993,7 @@ mod relay {
         kill_marked(&[&esc]);
         w.cleanup(&[&sups[..], &[root]].concat());
         assert_eq!(sups.len(), 1, "expected one supervisor, found {sups:?}");
-        assert!(!late, "sheepdog resumed the root: the relay kill and the INT missed the window (load), or sheepdog skipped the early end");
+        assert!(!late, "sheepr resumed the root: the relay kill and the INT missed the window (load), or sheepr skipped the early end");
         assert_eq!(left, (0, 0), "the job was left (root, the root's child)");
     }
 
@@ -1004,11 +1004,11 @@ mod relay {
     #[test]
     fn a_relay_dead_before_the_wait_still_ends_the_job() {
         let w = Window::new(58);
-        let registered = std::env::temp_dir().join(format!("sd-reg-{}-w58", std::process::id()));
+        let registered = std::env::temp_dir().join(format!("sr-reg-{}-w58", std::process::id()));
         let _ = std::fs::remove_file(&registered);
         let mut relayed = w
-            .with(&["/bin/sleep", &w.root], true, "SHEEPDOG_TEST_SLEEP_BEFORE_RELAY_REG_MS", "800")
-            .env("SHEEPDOG_TEST_RELAY_REG_FILE", &registered)
+            .with(&["/bin/sleep", &w.root], true, "SHEEPR_TEST_SLEEP_BEFORE_RELAY_REG_MS", "800")
+            .env("SHEEPR_TEST_RELAY_REG_FILE", &registered)
             .spawn()
             .unwrap();
         w.wait_ready();
@@ -1037,12 +1037,12 @@ mod relay {
     fn a_dead_relay_still_ends_the_job_while_polling() {
         let (job, root, esc) = (m(13), m(14), m(15));
         let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
-        let errf = std::env::temp_dir().join(format!("sd-relay-poll-{}", std::process::id()));
+        let errf = std::env::temp_dir().join(format!("sr-relay-poll-{}", std::process::id()));
         let logf = errf.with_extension("log");
         let _ = std::fs::remove_file(&logf);
         let mut relayed = start(Some(&job), &["sh", "-c", &inner])
-            .env("SHEEPDOG_TEST_KQ_EINVAL", "1")
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", &logf)
+            .env("SHEEPR_TEST_KQ_EINVAL", "1")
+            .env("SHEEPR_TEST_SIGNAL_LOG", &logf)
             .stderr(std::fs::File::create(&errf).unwrap())
             .spawn()
             .unwrap();
@@ -1110,7 +1110,7 @@ mod relay {
     fn the_relay_forwards_hup_only_as_session_leader() {
         // m(16), not m(13): a_dead_relay_still_ends_the_job_while_polling uses m(13) as its job.
         // Run in parallel, its `/bin/sleep` makes this count 2, and its cleanup by marker kills
-        // this job's sheepdog (the `sh -c` argv carries the word)
+        // this job's sheepr (the `sh -c` argv carries the word)
         let (j1, j2, r1, r2, e2) = (m(9), m(10), m(11), m(12), m(16));
         let mut plain = start(Some(&j1), &["/bin/sleep", &r1]).spawn().unwrap();
         let inner = format!("/bin/sleep {e2} & exec /bin/sleep {r2}");
@@ -1157,16 +1157,16 @@ mod relay {
 
 // ---- TERM windows (review round 6) -------------------------------------------------------
 
-/// Start sheepdog with a seam window of `ms`, wait until it signals that it is inside the
+/// Start sheepr with a seam window of `ms`, wait until it signals that it is inside the
 /// window (a ready file; never a guess with a sleep), and return the child.
 fn start_in_window(seam: &str, ms: &str, tag: &str, root: &[&str]) -> std::process::Child {
-    let ready = std::env::temp_dir().join(format!("sd-ready-{}-{}", std::process::id(), tag));
+    let ready = std::env::temp_dir().join(format!("sr-ready-{}-{}", std::process::id(), tag));
     let _ = std::fs::remove_file(&ready);
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--"])
         .args(root)
         .env(seam, ms)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
@@ -1175,7 +1175,7 @@ fn start_in_window(seam: &str, ms: &str, tag: &str, root: &[&str]) -> std::proce
         if start.elapsed() > Duration::from_secs(10) {
             let _ = c.kill();
             let _ = c.wait();
-            panic!("sheepdog never reached the {seam} window");
+            panic!("sheepr never reached the {seam} window");
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -1183,21 +1183,21 @@ fn start_in_window(seam: &str, ms: &str, tag: &str, root: &[&str]) -> std::proce
     c
 }
 // Debug seams widen each window so the tests are deterministic:
-// SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS (macOS: before the self re-exec) and
-// SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS (both: after the root is spawned, before the wait).
+// SHEEPR_TEST_SLEEP_BEFORE_REEXEC_MS (macOS: before the self re-exec) and
+// SHEEPR_TEST_SLEEP_BEFORE_WAIT_MS (both: after the root is spawned, before the wait).
 
-/// P2-1: a TERM before the root exists ends sheepdog, and the root never runs.
+/// P2-1: a TERM before the root exists ends sheepr, and the root never runs.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_term_during_the_self_reexec_is_not_lost() {
     use std::os::unix::process::ExitStatusExt;
     let root = format!("24.{}333001", std::process::id());
     // the root records that it started; a root that ran even briefly leaves this file
-    let started = std::env::temp_dir().join(format!("sd-started-{}", std::process::id()));
+    let started = std::env::temp_dir().join(format!("sr-started-{}", std::process::id()));
     let _ = std::fs::remove_file(&started);
     let script = format!("touch '{}'; exec /bin/sleep {root}", started.display());
-    let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_REEXEC_MS", "300", &root, &["sh", "-c", &script]);
-    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+    let mut c = start_in_window("SHEEPR_TEST_SLEEP_BEFORE_REEXEC_MS", "300", &root, &["sh", "-c", &script]);
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
     let start = Instant::now();
     let st = loop {
         if let Some(st) = c.try_wait().unwrap() {
@@ -1222,8 +1222,8 @@ fn a_term_during_the_self_reexec_is_not_lost() {
 fn a_term_just_before_the_wait_is_not_lost() {
     use std::os::unix::process::ExitStatusExt;
     let root = format!("24.{}333002", std::process::id());
-    let mut c = start_in_window("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS", "400", &root, &["/bin/sleep", &root]);
-    assert!(send_child(&mut c, libc::SIGTERM), "sheepdog had already ended");
+    let mut c = start_in_window("SHEEPR_TEST_SLEEP_BEFORE_WAIT_MS", "400", &root, &["/bin/sleep", &root]);
+    assert!(send_child(&mut c, libc::SIGTERM), "sheepr had already ended");
     let start = Instant::now();
     let st = loop {
         if let Some(st) = c.try_wait().unwrap() {
@@ -1256,7 +1256,7 @@ fn a_forwarded_hup_does_not_leak_the_tree() {
     let inner = format!("/bin/sleep {esc} & exec /bin/sleep {root}");
     let mut c = unsafe {
         Command::new(fixture())
-            .args(["bg-then-exec", &job, sheepdog(), "run", "--", "sh", "-c", &inner])
+            .args(["bg-then-exec", &job, sheepr(), "run", "--", "sh", "-c", &inner])
             .pre_exec(|| {
                 libc::setsid();
                 Ok(())

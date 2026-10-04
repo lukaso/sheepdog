@@ -1,17 +1,17 @@
 #!/bin/sh
-# A smoke test of an installed sheepdog (PHASE3.md S7): needs no repo and no cargo.
-#   smoke.sh [SHEEPDOG]      (default: the sheepdog on PATH)
+# A smoke test of an installed sheepr (PHASE3.md S7): needs no repo and no cargo.
+#   smoke.sh [SHEEPR]      (default: the sheepr on PATH)
 # It first names what it tests (the resolved path and `--version`). Cell 1: the command's exit
 # code passes through. Cell 3: an escapee (a fork, a new session, a fork again) leaves smoke's
 # process group, is alive when it records itself (its start time is read from the live process),
 # and is gone when the job ends, in well under its 300 s lifetime (so a kill, not a wait). Control:
-# the same escapee without sheepdog survives. Exit 0 only if all three hold. Processes are
+# the same escapee without sheepr survives. Exit 0 only if all three hold. Processes are
 # identified by pid and start time, never by name; every escapee still alive at exit (or on INT,
 # TERM or HUP) is killed by that identity. The escapee's session id is not read (macOS `ps` has
 # no session id); its process group, which setsid also changes, is.
 set -u
-SD=${1:-sheepdog}
-t=$(mktemp -d "${TMPDIR:-/tmp}/sd-smoke.XXXXXX") || exit 1
+SD=${1:-sheepr}
+t=$(mktemp -d "${TMPDIR:-/tmp}/sr-smoke.XXXXXX") || exit 1
 fails=0
 ok() { echo "ok: $*"; }
 bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
@@ -58,18 +58,18 @@ w=$(command -v "$SD" 2>/dev/null) || w=$SD
 echo "smoke: testing $w ($("$SD" --version < /dev/null 2>&1 | head -1))"
 "$SD" run -- sh -c 'exit 7' >/dev/null 2>&1; rc=$?
 [ $rc = 7 ] && ok "cell 1: the exit code passes through" || bad "cell 1: exit $rc, want 7"
-# cell 3: the root starts the escapee and ends; sheepdog must kill it, not wait for it
+# cell 3: the root starts the escapee and ends; sheepr must kill it, not wait for it
 t0=$(date +%s)
 "$SD" run --timeout 60s -- sh "$t/esc.sh" "$t/e1" >/dev/null 2>&1
 el=$(($(date +%s) - t0))
 if ! rec "$t/e1"; then bad "cell 3: the escapee did not start or could not record itself"
 elif [ "$g" = "$me" ]; then bad "cell 3: the escapee did not leave smoke's process group ($g)"
 elif alive "$t/e1"; then bad "cell 3: the escapee survived the job"
-elif [ $el -ge 30 ]; then bad "cell 3: the job took ${el}s, so sheepdog waited instead of killing (the escapee sleeps 300 s)"
+elif [ $el -ge 30 ]; then bad "cell 3: the job took ${el}s, so sheepr waited instead of killing (the escapee sleeps 300 s)"
 else ok "cell 3: the escapee left smoke's process group and was killed with the job (${el}s)"; fi
-# control: without sheepdog it survives (reap kills it at exit)
+# control: without sheepr it survives (reap kills it at exit)
 sh "$t/esc.sh" "$t/e2"
-if rec "$t/e2" && [ "$g" != "$me" ] && alive "$t/e2"; then ok "control: without sheepdog the escapee survives"
-else bad "control: the escapee did not start or record itself, did not escape, or did not survive without sheepdog (the check proves nothing)"; fi
+if rec "$t/e2" && [ "$g" != "$me" ] && alive "$t/e2"; then ok "control: without sheepr the escapee survives"
+else bad "control: the escapee did not start or record itself, did not escape, or did not survive without sheepr (the check proves nothing)"; fi
 [ $fails = 0 ] && { echo "smoke: PASS"; exit 0; }
 echo "smoke: FAIL ($fails)"; exit 1

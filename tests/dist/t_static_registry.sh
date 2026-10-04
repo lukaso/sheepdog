@@ -10,9 +10,9 @@ set -u
 fx_dir
 fx_bundle "$FX" com.example.sdregistry
 mkdir -p "$FX/tgz" "$FX/lin"
-"$SD_ROOT/scripts/lib/archive.sh" make "$FX/Sheepdog.app" "$FX/lin/mac.tar.gz" || { fail "archive"; finish; }
+"$SR_ROOT/scripts/lib/archive.sh" make "$FX/Sheepr.app" "$FX/lin/mac.tar.gz" || { fail "archive"; finish; }
 printf '#!/bin/sh\n' > "$FX/lin/a"; printf '#!/bin/sh\n' > "$FX/lin/x"
-sh "$SD_ROOT/scripts/lib/npm-pack.sh" 0.1.0-rc.9 "$FX/lin/mac.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SD_ROOT/npm/sheepdog/bin/sheepdog" "$FX/tgz" > /dev/null \
+sh "$SR_ROOT/scripts/lib/npm-pack.sh" 0.1.0-rc.9 "$FX/lin/mac.tar.gz" "$FX/lin/a" "$FX/lin/x" "$SR_ROOT/npm/sheepr/bin/sheepr" "$FX/tgz" > /dev/null \
   || { fail "npm-pack.sh"; finish; }
 check() { # registry-dir port skip expected-count
   python3 - "$1" "$2" "$3" "$4" "$FX/tgz" <<'PY'
@@ -40,12 +40,12 @@ if n != want: print("  %d packages, not %d" % (n, want)); ok = False
 sys.exit(0 if ok else 1)
 PY
 }
-python3 "$SD_ROOT/scripts/lib/static-registry.py" "$FX/r1" 41234 "" "$FX/tgz" && check "$FX/r1" 41234 "" 4 \
+python3 "$SR_ROOT/scripts/lib/static-registry.py" "$FX/r1" 41234 "" "$FX/tgz" && check "$FX/r1" 41234 "" 4 \
   && pass "four packuments: each the tarball's package.json, its dist the served file's URL, sha1 and sha512" || fail "the registry (see above)"
-python3 "$SD_ROOT/scripts/lib/static-registry.py" "$FX/r2" 41235 skip "$FX/tgz" && check "$FX/r2" 41235 skip 3 \
+python3 "$SR_ROOT/scripts/lib/static-registry.py" "$FX/r2" 41235 skip "$FX/tgz" && check "$FX/r2" 41235 skip 3 \
   && pass "with skip: the darwin package left out, the other three served" || fail "the registry with skip (see above)"
 # control: the check fails on a registry whose integrity is not the file's
-python3 "$SD_ROOT/scripts/lib/static-registry.py" "$FX/r3" 41236 "" "$FX/tgz" \
-  && python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); v=list(d["versions"].values())[0]; v["dist"]["integrity"]="sha512-AAAA"; json.dump(d,open(p,"w"))' "$FX/r3/@lukaso/sheepdog" \
+python3 "$SR_ROOT/scripts/lib/static-registry.py" "$FX/r3" 41236 "" "$FX/tgz" \
+  && python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); v=list(d["versions"].values())[0]; v["dist"]["integrity"]="sha512-AAAA"; json.dump(d,open(p,"w"))' "$FX/r3/sheepr" \
   && { check "$FX/r3" 41236 "" 4 >/dev/null && fail "control: a wrong integrity passed the check" || pass "control: a wrong integrity fails the check"; }
 finish

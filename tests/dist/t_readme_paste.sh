@@ -94,8 +94,8 @@ for form in '- remove it: `rm -rf x # a note`' \
   n=$((n + 1)); printf '%b\n' "$form" > "$FX/f$n.md"
   chk "$FX/f$n.md" > /dev/null && fail "control: a comment in form $n passed: $(head -3 "$FX/f$n.md" | tr '\n' '|')" || pass "control: a comment in form $n is refused"
 done
-printf '```dockerfile\n# a Dockerfile comment\nRUN true\n```\nSee `sheepdog help`, `#!/bin/sh`, `#[cfg(test)]` and `#`.\n```sh\necho ${#a} $# $(echo a)#b\n```\nAnd `echo ${#a} $# $(echo a)#b`.\n\n- a list item\n\n    see [npm](#npm)\n' > "$FX/t4.md"
+printf '```dockerfile\n# a Dockerfile comment\nRUN true\n```\nSee `sheepr help`, `#!/bin/sh`, `#[cfg(test)]` and `#`.\n```sh\necho ${#a} $# $(echo a)#b\n```\nAnd `echo ${#a} $# $(echo a)#b`.\n\n- a list item\n\n    see [npm](#npm)\n' > "$FX/t4.md"
 chk "$FX/t4.md" > /dev/null && pass "control: a Dockerfile comment, plain inline code, inline code that starts with #, \${#a}, \$#, \$(a)#b and a markdown link in an indented line pass" || fail "control: a Dockerfile block or plain inline code refused: $(chk "$FX/t4.md")"
 chk "$FX/t3.md" > /dev/null && pass "control: a # inside quotes or a word, or in a markdown block, passes" || fail "control: a quoted #, a word's # or a markdown block refused: $(chk "$FX/t3.md")"
-if bad=$(chk "$SD_ROOT/README.md"); then pass "no comment in any README shell block"; else fail "README shell lines a pasted zsh would mangle: $(printf '%s' "$bad" | tr '\n' '|')"; fi
+if bad=$(chk "$SR_ROOT/README.md"); then pass "no comment in any README shell block"; else fail "README shell lines a pasted zsh would mangle: $(printf '%s' "$bad" | tr '\n' '|')"; fi
 finish

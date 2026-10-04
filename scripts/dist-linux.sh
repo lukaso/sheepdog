@@ -1,8 +1,8 @@
 #!/bin/sh
 # The dist-linux leg's cells (PHASE3.md S3, the distribution cell's Linux half), run inside a
 # pinned image (Alpine: busybox wget; Debian: no downloader) as root. /srv holds a rendered
-# install.sh, the static binary as sheepdog-linux-<arch>, and SHA256SUMS; /tgt the Linux build
-# (for sd-fixture's `serve`). The server runs in this container on 127.0.0.1, and its log shows
+# install.sh, the static binary as sheepr-linux-<arch>, and SHA256SUMS; /tgt the Linux build
+# (for sr-fixture's `serve`). The server runs in this container on 127.0.0.1, and its log shows
 # every GET. Cells:
 #   - with no curl and no wget: refused, both named, nothing installed;
 #   - wget (if present), then curl (added with the image's package manager): installed, as root
@@ -17,11 +17,11 @@ set -u
 fails=0
 ok() { echo "ok: $*"; }
 bad() { echo "FAIL: $*"; fails=$((fails + 1)); }
-art=sheepdog-linux-$(uname -m)
+art=sheepr-linux-$(uname -m)
 [ -f "/srv/$art" ] || { echo "FAIL: no /srv/$art"; exit 1; }
 serve() { # dir -> sets PORT, SP; log in dir.log
   rm -f "$1.port"
-  /tgt/debug/sd-fixture serve "$1" "$1.port" 2>"$1.log" & SP=$!
+  /tgt/debug/sr-fixture serve "$1" "$1.port" 2>"$1.log" & SP=$!
   i=0; while [ ! -s "$1.port" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   PORT=$(cat "$1.port")
 }
@@ -30,39 +30,39 @@ cp -r /srv /tmp/badsum && awk '{c=substr($0,1,1); print (c=="0"?"1":"0") substr(
 cmp -s /srv/SHA256SUMS /tmp/badsum/SHA256SUMS && bad "the corrupted sum did not change"
 serve /tmp/badsum; BP=$PORT; BS=$SP
 inst() { # user base -> rc; output in /tmp/o
-  if [ "$1" = root ]; then env SHEEPDOG_INSTALL_BASE="$2" sh /tmp/good/install.sh > /tmp/o 2>&1
-  else su -s /bin/sh "$1" -c "env -u SHELL PATH=/usr/bin:/bin SHEEPDOG_INSTALL_BASE='$2' sh /tmp/good/install.sh" > /tmp/o 2>&1; fi   # SHELL unset, as in a bare container
+  if [ "$1" = root ]; then env SHEEPR_INSTALL_BASE="$2" sh /tmp/good/install.sh > /tmp/o 2>&1
+  else su -s /bin/sh "$1" -c "env -u SHELL PATH=/usr/bin:/bin SHEEPR_INSTALL_BASE='$2' sh /tmp/good/install.sh" > /tmp/o 2>&1; fi   # SHELL unset, as in a bare container
 }
 (adduser -D sduser 2>/dev/null || useradd -m sduser) >/dev/null 2>&1
 UH=$(eval echo ~sduser)
 
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   inst root "http://127.0.0.1:$GP"; r=$?
-  [ $r = 1 ] && grep -q curl /tmp/o && grep -q wget /tmp/o && [ ! -e /usr/local/bin/sheepdog ] \
+  [ $r = 1 ] && grep -q curl /tmp/o && grep -q wget /tmp/o && [ ! -e /usr/local/bin/sheepr ] \
     && ok "no curl and no wget: refused, both named, nothing installed" || bad "no downloader: rc=$r $(tail -1 /tmp/o)"
 fi
 round() { # label
-  rm -f /usr/local/bin/sheepdog "$UH/.local/bin/sheepdog"
+  rm -f /usr/local/bin/sheepr "$UH/.local/bin/sheepr"
   inst root "http://127.0.0.1:$GP"; r=$?
-  if [ $r = 0 ] && [ -x /usr/local/bin/sheepdog ]; then ok "$1, root: installed into /usr/local/bin"; else bad "$1, root: rc=$r $(tail -2 /tmp/o | tr '\n' ' ')"; fi
-  /usr/local/bin/sheepdog run -- sh -c 'exit 7' >/dev/null 2>&1; r=$?
+  if [ $r = 0 ] && [ -x /usr/local/bin/sheepr ]; then ok "$1, root: installed into /usr/local/bin"; else bad "$1, root: rc=$r $(tail -2 /tmp/o | tr '\n' ' ')"; fi
+  /usr/local/bin/sheepr run -- sh -c 'exit 7' >/dev/null 2>&1; r=$?
   [ $r = 7 ] && ok "$1: the installed binary runs a job (exit 7 passed through)" || bad "$1: the job's exit code: $r"
   inst sduser "http://127.0.0.1:$GP"; r=$?
-  [ $r = 0 ] && [ -x "$UH/.local/bin/sheepdog" ] && ok "$1, a plain user: installed into ~/.local/bin" || bad "$1, user: rc=$r $(tail -2 /tmp/o | tr '\n' ' ')"
+  [ $r = 0 ] && [ -x "$UH/.local/bin/sheepr" ] && ok "$1, a plain user: installed into ~/.local/bin" || bad "$1, user: rc=$r $(tail -2 /tmp/o | tr '\n' ' ')"
   grep -q 'is not on your PATH' /tmp/o && ok "$1: the PATH hint" || bad "$1: no PATH hint"
 }
 if command -v wget >/dev/null 2>&1; then round wget; fi
 if command -v apk >/dev/null 2>&1; then apk add -q curl >/dev/null 2>&1; else (apt-get update -qq && apt-get install -y -qq curl) >/dev/null 2>&1; fi
 command -v curl >/dev/null 2>&1 && round curl || bad "curl could not be added"
 # S7's smoke of the installed binary, with this image's ps (busybox's has no -p; slim has none)
-if [ -x /usr/local/bin/sheepdog ]; then
-  sh /scripts/smoke.sh /usr/local/bin/sheepdog > /tmp/sm 2>&1 && ok "smoke.sh passes on the installed binary" || bad "smoke: $(tr '\n' ' ' < /tmp/sm)"
+if [ -x /usr/local/bin/sheepr ]; then
+  sh /scripts/smoke.sh /usr/local/bin/sheepr > /tmp/sm 2>&1 && ok "smoke.sh passes on the installed binary" || bad "smoke: $(tr '\n' ' ' < /tmp/sm)"
 else bad "smoke: nothing installed to test"; fi
 grep -q "GET /$art" /tmp/good.log && grep -q 'GET /SHA256SUMS' /tmp/good.log && ok "the server's log shows the real downloads" || bad "no GET in the server's log"
 
-rm -f /usr/local/bin/sheepdog
-env SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$BP" sh /tmp/good/install.sh > /tmp/o 2>&1; r=$?
-[ $r = 1 ] && grep -qi checksum /tmp/o && [ ! -e /usr/local/bin/sheepdog ] && ok "a checksum mismatch: refused, nothing installed" || bad "bad sum: rc=$r $(tail -1 /tmp/o)"
+rm -f /usr/local/bin/sheepr
+env SHEEPR_INSTALL_BASE="http://127.0.0.1:$BP" sh /tmp/good/install.sh > /tmp/o 2>&1; r=$?
+[ $r = 1 ] && grep -qi checksum /tmp/o && [ ! -e /usr/local/bin/sheepr ] && ok "a checksum mismatch: refused, nothing installed" || bad "bad sum: rc=$r $(tail -1 /tmp/o)"
 kill "$GS" "$BS" 2>/dev/null
 
 # the README's Docker snippet: its RUN line as Docker joins it (/srv/readme-run.sh, made by the
@@ -70,34 +70,34 @@ kill "$GS" "$BS" 2>/dev/null
 # only the release's URL, uname a stand-in that names the arch, the hashes the files' own
 if [ -s /srv/readme-run.sh ] && [ -s /srv/readme-version ]; then
   v=$(cat /srv/readme-version); mkdir -p /tmp/rel /tmp/rs/bin
-  printf 'aarch64 build\n' > /tmp/rel/sheepdog-linux-aarch64; printf 'x86_64 build\n' > /tmp/rel/sheepdog-linux-x86_64
-  ha=$(sha256sum /tmp/rel/sheepdog-linux-aarch64 | cut -d' ' -f1) hx=$(sha256sum /tmp/rel/sheepdog-linux-x86_64 | cut -d' ' -f1)
+  printf 'aarch64 build\n' > /tmp/rel/sheepr-linux-aarch64; printf 'x86_64 build\n' > /tmp/rel/sheepr-linux-x86_64
+  ha=$(sha256sum /tmp/rel/sheepr-linux-aarch64 | cut -d' ' -f1) hx=$(sha256sum /tmp/rel/sheepr-linux-x86_64 | cut -d' ' -f1)
   cat > /tmp/rs/bin/curl <<EOF
 #!/bin/sh
 echo "curl \$*" >> /tmp/rs/curl.log
 out="" url=""
 while [ \$# -gt 0 ]; do case \$1 in -o) out=\$2; shift ;; -*) ;; *) url=\$1 ;; esac; shift; done
-case \$url in https://github.com/lukaso/sheepdog/releases/download/v$v/sheepdog-linux-*) cp "/tmp/rel/\${url##*/}" "\$out" ;;
+case \$url in https://github.com/lukaso/sheepr/releases/download/v$v/sheepr-linux-*) cp "/tmp/rel/\${url##*/}" "\$out" ;;
   *) echo "curl: not the release's url: \$url" >&2; exit 22 ;; esac
 EOF
-  printf '#!/bin/sh\necho "$SD_UNAME_M"\n' > /tmp/rs/bin/uname; chmod 755 /tmp/rs/bin/curl /tmp/rs/bin/uname
+  printf '#!/bin/sh\necho "$SR_UNAME_M"\n' > /tmp/rs/bin/uname; chmod 755 /tmp/rs/bin/curl /tmp/rs/bin/uname
   snip() { # arch hash-for-aarch64 hash-for-x86_64 -> rc
-    rm -f /usr/local/bin/sheepdog
-    sed -e "s/<sha256 of sheepdog-linux-aarch64>/$2/" -e "s/<sha256 of sheepdog-linux-x86_64>/$3/" /srv/readme-run.sh > /tmp/rs/run.sh
+    rm -f /usr/local/bin/sheepr
+    sed -e "s/<sha256 of sheepr-linux-aarch64>/$2/" -e "s/<sha256 of sheepr-linux-x86_64>/$3/" /srv/readme-run.sh > /tmp/rs/run.sh
     grep -q '<sha256' /tmp/rs/run.sh && { echo "a placeholder is left" > /tmp/rs/o; return 99; }
-    env PATH="/tmp/rs/bin:$PATH" SD_UNAME_M="$1" SHEEPDOG_VERSION="$v" /bin/sh /tmp/rs/run.sh > /tmp/rs/o 2>&1
+    env PATH="/tmp/rs/bin:$PATH" SR_UNAME_M="$1" SHEEPR_VERSION="$v" /bin/sh /tmp/rs/run.sh > /tmp/rs/o 2>&1
   }
   for a in aarch64 x86_64; do
     snip $a "$ha" "$hx"; r=$?
-    [ $r = 0 ] && [ -x /usr/local/bin/sheepdog ] && cmp -s /usr/local/bin/sheepdog /tmp/rel/sheepdog-linux-$a \
-      && grep -q "releases/download/v$v/sheepdog-linux-$a" /tmp/rs/curl.log \
+    [ $r = 0 ] && [ -x /usr/local/bin/sheepr ] && cmp -s /usr/local/bin/sheepr /tmp/rel/sheepr-linux-$a \
+      && grep -q "releases/download/v$v/sheepr-linux-$a" /tmp/rs/curl.log \
       && ok "the README's Docker snippet on $a: the $a file, its hash checked, executable" || bad "the README's snippet on $a: rc=$r $(tr '\n' ' ' < /tmp/rs/o)"
   done
   snip aarch64 "$hx" "$ha"; r=$?
-  [ $r != 0 ] && [ $r != 99 ] && [ ! -x /usr/local/bin/sheepdog ] && ok "the README's Docker snippet: a wrong hash fails the step, nothing executable" || bad "the snippet, a wrong hash: rc=$r"
+  [ $r != 0 ] && [ $r != 99 ] && [ ! -x /usr/local/bin/sheepr ] && ok "the README's Docker snippet: a wrong hash fails the step, nothing executable" || bad "the snippet, a wrong hash: rc=$r"
   rm -f /tmp/rs/curl.log; snip riscv64 "$ha" "$hx"; r=$?
-  [ $r != 0 ] && [ $r != 99 ] && [ ! -e /usr/local/bin/sheepdog ] && [ ! -s /tmp/rs/curl.log ] && ok "the README's Docker snippet: an arch with no build fails before any download" || bad "the snippet, riscv64: rc=$r"
-  rm -f /usr/local/bin/sheepdog
+  [ $r != 0 ] && [ $r != 99 ] && [ ! -e /usr/local/bin/sheepr ] && [ ! -s /tmp/rs/curl.log ] && ok "the README's Docker snippet: an arch with no build fails before any download" || bad "the snippet, riscv64: rc=$r"
+  rm -f /usr/local/bin/sheepr
 else bad "no README Docker snippet in /srv"
 fi
 [ $fails = 0 ] && { echo "PASS dist-linux"; exit 0; }

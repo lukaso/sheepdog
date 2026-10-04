@@ -5,6 +5,6 @@
 #   rt_meets PATH        the Developer ID release requirement holds for PATH
 #   rt_staple_ok PATH    the staple ticket validates
 #   rt_spctl_ok PATH     Gatekeeper accepts PATH for execution
-rt_meets() { /usr/bin/codesign -v -R="$SD_RELEASE_REQUIREMENT" "$1" >/dev/null 2>&1; }
+rt_meets() { /usr/bin/codesign -v -R="$SR_RELEASE_REQUIREMENT" "$1" >/dev/null 2>&1; }
 rt_staple_ok() { /usr/bin/env -u DEVELOPER_DIR -u SDKROOT -u TOOLCHAINS /usr/bin/xcrun stapler validate "$1" >/dev/null 2>&1; }
 rt_spctl_ok() { /usr/sbin/spctl -a -t exec "$1" >/dev/null 2>&1; }

@@ -1,7 +1,7 @@
 //! Phase 1, step S7 (PHASE1.md): the escape cells of PLAN.md §6 not built by earlier steps
-//! (1, 2, 4-12, 16) and the no-setup safety cells of `sheepdog kill`.
+//! (1, 2, 4-12, 16) and the no-setup safety cells of `sheepr kill`.
 //!
-//! Each escape cell has two halves: under sheepdog the route leaves 0 survivors; the control
+//! Each escape cell has two halves: under sheepr the route leaves 0 survivors; the control
 //! runs the same shape with the naive method PLAN.md names (kill of the root only, a group kill,
 //! TERM only, an env-tag sweep, waiting for the root only) and must leak. The checker reads the
 //! identities the processes recorded, plus the iteration's marker in argv; it acts after the
@@ -10,7 +10,7 @@
 mod common;
 
 use common::{found, scan, send, send_child, send_group};
-use sheepdog::ident::same;
+use sheepr::ident::same;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 /// One iteration's marker and record file; dropping it kills what is left.
@@ -37,7 +37,7 @@ impl Job {
     fn new() -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let marker = format!("27.{}{:06}", std::process::id(), n);
-        let rec = std::env::temp_dir().join(format!("sd-s7-{marker}"));
+        let rec = std::env::temp_dir().join(format!("sr-s7-{marker}"));
         let j = Job { marker, rec };
         for ext in EXTS {
             let _ = std::fs::remove_file(j.file(ext));
@@ -56,9 +56,9 @@ impl Job {
         v.extend(read_pairs(&self.file(".c")));
         v
     }
-    /// Live processes whose argv carries the marker, other than a sheepdog.
+    /// Live processes whose argv carries the marker, other than a sheepr.
     fn marked(&self) -> Vec<(i32, u64)> {
-        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepdog")).expect("ps failed")
+        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepr")).expect("ps failed")
     }
     /// Recorded processes still alive, plus marked ones.
     fn alive(&self) -> Vec<(i32, u64)> {
@@ -90,7 +90,7 @@ impl Job {
     fn wait_marked(&self, n: usize) {
         wait_for(&format!("{n} marked processes"), Duration::from_secs(15), || self.marked().len() >= n);
     }
-    /// sheepdog's signal log, one entry per line.
+    /// sheepr's signal log, one entry per line.
     fn log(&self) -> Vec<String> {
         std::fs::read_to_string(self.file(".log")).unwrap_or_default().lines().map(String::from).collect()
     }
@@ -151,27 +151,27 @@ fn quiet(c: &mut Command) -> &mut Command {
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
 }
 
-/// `sheepdog run -- ARGS`, started.
-fn under_sheepdog(args: &[&str]) -> Child {
-    quiet(Command::new(sheepdog()).args(["run", "--quiet", "--"]).args(args)).spawn().unwrap()
+/// `sheepr run -- ARGS`, started.
+fn under_sheepr(args: &[&str]) -> Child {
+    quiet(Command::new(sheepr()).args(["run", "--quiet", "--"]).args(args)).spawn().unwrap()
 }
 
-/// `sheepdog run -- ARGS`, run to its end (bounded); the root ends by itself.
-fn run_under_sheepdog(args: &[&str]) -> ExitStatus {
-    let mut c = under_sheepdog(args);
-    wait_bounded(&mut c, Duration::from_secs(30)).expect("sheepdog did not end within 30 s")
+/// `sheepr run -- ARGS`, run to its end (bounded); the root ends by itself.
+fn run_under_sheepr(args: &[&str]) -> ExitStatus {
+    let mut c = under_sheepr(args);
+    wait_bounded(&mut c, Duration::from_secs(30)).expect("sheepr did not end within 30 s")
 }
 
-/// ARGS without sheepdog, run to the end of its first process (bounded).
+/// ARGS without sheepr, run to the end of its first process (bounded).
 fn run_plain(args: &[&str]) -> ExitStatus {
     let mut c = quiet(Command::new(args[0]).args(&args[1..])).spawn().unwrap();
     wait_bounded(&mut c, Duration::from_secs(30)).expect("the shape did not end within 30 s")
 }
 
-/// End a job by TERM to sheepdog, and wait for it.
+/// End a job by TERM to sheepr, and wait for it.
 fn term_and_wait(sd: &mut Child) {
     assert!(send_child(sd, libc::SIGTERM));
-    wait_bounded(sd, Duration::from_secs(30)).expect("sheepdog did not end within 30 s after TERM");
+    wait_bounded(sd, Duration::from_secs(30)).expect("sheepr did not end within 30 s after TERM");
 }
 
 fn bash() -> &'static str {
@@ -181,11 +181,11 @@ fn bash() -> &'static str {
 // ---------------------------------------------------------------------------------------------
 // Escape cells
 
-/// Cell 1: a deep tree (depth 50), ended by TERM to sheepdog: 0 survivors.
+/// Cell 1: a deep tree (depth 50), ended by TERM to sheepr: 0 survivors.
 #[test]
 fn cell1_a_deep_tree_leaves_no_survivor() {
     let j = Job::new();
-    let mut sd = under_sheepdog(&[fixture(), "deep", &j.marker, &j.rec(), "50"]);
+    let mut sd = under_sheepr(&[fixture(), "deep", &j.marker, &j.rec(), "50"]);
     j.wait_recorded(50);
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -206,7 +206,7 @@ fn cell1_control_a_kill_of_the_root_only_leaks() {
 #[test]
 fn cell2_a_setsid_grandchild_leaves_no_survivor() {
     let j = Job::new();
-    let mut sd = under_sheepdog(&[fixture(), "setsid-kid", &j.marker, &j.rec()]);
+    let mut sd = under_sheepr(&[fixture(), "setsid-kid", &j.marker, &j.rec()]);
     j.wait_recorded(3);
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -232,7 +232,7 @@ fn cell2_control_a_group_kill_leaks() {
 fn cell4_nohup_and_disown_leave_no_survivor() {
     let j = Job::new();
     let script = format!("nohup /bin/sleep {} >/dev/null 2>&1 & disown; exit 0", j.marker);
-    run_under_sheepdog(&[bash(), "-c", &script]);
+    run_under_sheepr(&[bash(), "-c", &script]);
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
@@ -254,8 +254,8 @@ fn ignores_term(marker: &str) -> String {
 #[test]
 fn cell5_a_child_that_ignores_term_leaves_no_survivor() {
     let j = Job::new();
-    let mut sd = quiet(Command::new(sheepdog()).args(["run", "--quiet", "--grace", "200ms", "--", "/bin/sh", "-c", &ignores_term(&j.marker)])).spawn().unwrap();
-    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepdog did not end");
+    let mut sd = quiet(Command::new(sheepr()).args(["run", "--quiet", "--grace", "200ms", "--", "/bin/sh", "-c", &ignores_term(&j.marker)])).spawn().unwrap();
+    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepr did not end");
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
@@ -313,7 +313,7 @@ fn zombies_of(ppid: i32) -> usize {
 fn cell7_a_fork_storm_leaves_no_zombie_of_the_supervisor() {
     let j = Job::new();
     let done = j.file(".go");
-    let mut sd = under_sheepdog(&[fixture(), "storm", done.to_str().unwrap(), "3"]);
+    let mut sd = under_sheepr(&[fixture(), "storm", done.to_str().unwrap(), "3"]);
     let sup = sd.id() as i32;
     // during the storm, count the supervisor's children beyond its root: the adopted orphans
     // (without adoption the zero-zombie count below would say nothing)
@@ -330,10 +330,10 @@ fn cell7_a_fork_storm_leaves_no_zombie_of_the_supervisor() {
 }
 
 /// An env-tag sweep (the Jenkins ProcessTreeKiller method): every process of this user whose
-/// environment shows SD_TAG=`tag` (macOS: `ps eww`, which cannot show the environment of an
+/// environment shows SR_TAG=`tag` (macOS: `ps eww`, which cannot show the environment of an
 /// Apple platform binary; Linux: /proc/<pid>/environ).
 fn tag_sweep(tag: &str) -> Vec<(i32, u64)> {
-    let want = format!("SD_TAG={tag}");
+    let want = format!("SR_TAG={tag}");
     let mut v = Vec::new();
     if cfg!(target_os = "macos") {
         // BSD `e` (no dash) appends the environment; `-e` does not
@@ -360,13 +360,13 @@ fn tag_sweep(tag: &str) -> Vec<(i32, u64)> {
     v
 }
 
-/// The control of an env-tag sweep: the escape shape runs with SD_TAG set, next to a tagged
-/// witness (an sd-fixture, whose environment the sweep can read). The sweep kills what it
+/// The control of an env-tag sweep: the escape shape runs with SR_TAG set, next to a tagged
+/// witness (an sr-fixture, whose environment the sweep can read). The sweep kills what it
 /// finds: it must find the witness (it works), and must miss the escapee (`leaks`) or find it
 /// (the paired control). `ready` says when the escapee runs its final program.
 fn tag_sweep_control(j: &Job, escape: &[&str], ready: impl Fn(i32) -> bool, leaks: bool) {
-    let mut witness = quiet(Command::new(fixture()).args(["deep", &j.marker, j.file(".b").to_str().unwrap(), "2"]).env("SD_TAG", &j.marker)).spawn().unwrap();
-    let mut root = quiet(Command::new(fixture()).args(escape).env("SD_TAG", &j.marker)).spawn().unwrap();
+    let mut witness = quiet(Command::new(fixture()).args(["deep", &j.marker, j.file(".b").to_str().unwrap(), "2"]).env("SR_TAG", &j.marker)).spawn().unwrap();
+    let mut root = quiet(Command::new(fixture()).args(escape).env("SR_TAG", &j.marker)).spawn().unwrap();
     wait_bounded(&mut root, Duration::from_secs(15)).expect("the escape root did not exit");
     let g = read_pairs(&j.rec).first().copied().expect("the escapee was not recorded");
     wait_for("the escapee's final program", Duration::from_secs(15), || ready(g.0));
@@ -402,8 +402,8 @@ fn cell8_an_escaped_bash_loop_leaves_no_survivor() {
     let j = Job::new();
     let ready = j.file(".go");
     let script = bash_loop(&ready);
-    let mut sd = quiet(Command::new(sheepdog()).args(["run", "--quiet", "--", fixture(), "escape-exec", &j.rec(), "/bin/bash", "-c", &script, &j.marker]).env("SD_EXEC_READY", &ready)).spawn().unwrap();
-    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepdog did not end");
+    let mut sd = quiet(Command::new(sheepr()).args(["run", "--quiet", "--", fixture(), "escape-exec", &j.rec(), "/bin/bash", "-c", &script, &j.marker]).env("SR_EXEC_READY", &ready)).spawn().unwrap();
+    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepr did not end");
     assert!(ready.exists(), "control: the route did not reach /bin/bash");
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -433,10 +433,10 @@ fn env_route(j: &Job, drop_env: bool) -> Vec<String> {
 fn cell9_an_env_i_escapee_leaves_no_survivor() {
     let j = Job::new();
     let r = env_route(&j, true);
-    // the root exits only once the program after `env -i` runs (on Linux sheepdog would
+    // the root exits only once the program after `env -i` runs (on Linux sheepr would
     // otherwise kill the escapee before it gets there)
-    let mut sd = quiet(Command::new(sheepdog()).args(["run", "--quiet", "--", fixture()]).args(&r).env("SD_EXEC_READY", j.file(".c"))).spawn().unwrap();
-    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepdog did not end");
+    let mut sd = quiet(Command::new(sheepr()).args(["run", "--quiet", "--", fixture()]).args(&r).env("SR_EXEC_READY", j.file(".c"))).spawn().unwrap();
+    wait_bounded(&mut sd, Duration::from_secs(30)).expect("sheepr did not end");
     assert!(!read_pairs(&j.file(".c")).is_empty(), "control: the route did not reach the program after `env -i`");
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -480,7 +480,7 @@ fn cell10_a_script_pty_leaves_no_survivor() {
     let j = Job::new();
     let a = script_args(&hup_proof(&j.marker));
     let a: Vec<&str> = a.iter().map(String::as_str).collect();
-    let mut sd = under_sheepdog(&a);
+    let mut sd = under_sheepr(&a);
     j.wait_sleep();
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -512,7 +512,7 @@ fn cell11_set_m_leaves_no_survivor() {
     let j = Job::new();
     let a = set_m(&j.marker);
     let a: Vec<&str> = a.iter().map(String::as_str).collect();
-    let mut sd = under_sheepdog(&a);
+    let mut sd = under_sheepr(&a);
     j.wait_sleep();
     term_and_wait(&mut sd);
     assert_eq!(j.alive(), vec![], "survivors");
@@ -545,7 +545,7 @@ fn stray(marker: &str) -> String {
 #[test]
 fn cell12_a_clean_exit_with_a_stray_leaves_no_survivor() {
     let j = Job::new();
-    let st = run_under_sheepdog(&["/bin/sh", "-c", &stray(&j.marker)]);
+    let st = run_under_sheepr(&["/bin/sh", "-c", &stray(&j.marker)]);
     assert_eq!(st.code(), Some(0));
     assert_eq!(j.alive(), vec![], "survivors");
 }
@@ -566,40 +566,40 @@ fn harness(j: &Job) -> String {
     format!("( /bin/sleep {m} & : > {go}; wait ) & P=$!; while [ ! -e {go} ]; do /bin/sleep 0.01; done; kill $P; wait $P; exit 0", m = j.marker, go = go.display())
 }
 
-/// Cell 16: the 2026-09-25 harness shape inside sheepdog: 0 survivors.
+/// Cell 16: the 2026-09-25 harness shape inside sheepr: 0 survivors.
 #[test]
 fn cell16_the_2026_09_25_shape_leaves_no_survivor() {
     let j = Job::new();
-    run_under_sheepdog(&["/bin/sh", "-c", &harness(&j)]);
+    run_under_sheepr(&["/bin/sh", "-c", &harness(&j)]);
     assert!(j.file(".go").exists(), "control: the job never started");
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
-/// Cell 16 control: the same shape without sheepdog leaks the orphan.
+/// Cell 16 control: the same shape without sheepr leaks the orphan.
 #[test]
-fn cell16_control_without_sheepdog_leaks() {
+fn cell16_control_without_sheepr_leaks() {
     let j = Job::new();
     run_plain(&["/bin/sh", "-c", &harness(&j)]);
     assert_eq!(j.alive().len(), 1, "control: the orphan should have leaked");
 }
 
 // ---------------------------------------------------------------------------------------------
-// No-setup safety cells: `sheepdog kill` never reaches wider than the target's proved tree.
+// No-setup safety cells: `sheepr kill` never reaches wider than the target's proved tree.
 
-/// Run `sheepdog kill --grace 0 PID` (bounded), with the signal log in the job's `.log`.
+/// Run `sheepr kill --grace 0 PID` (bounded), with the signal log in the job's `.log`.
 fn kill(j: &Job, pid: i32) -> Option<i32> {
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["kill", "--grace", "0", &pid.to_string()])
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", j.file(".log"))
+        .env("SHEEPR_TEST_SIGNAL_LOG", j.file(".log"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(j.file(".err")).unwrap())
         .spawn()
         .unwrap();
-    wait_bounded(&mut c, Duration::from_secs(40)).expect("sheepdog kill did not end").code()
+    wait_bounded(&mut c, Duration::from_secs(40)).expect("sheepr kill did not end").code()
 }
 
-/// Pids sheepdog sent a signal to, from its log (lines "<door> <pid> <sig>").
+/// Pids sheepr sent a signal to, from its log (lines "<door> <pid> <sig>").
 fn signalled(j: &Job) -> Vec<i32> {
     j.log().iter().filter_map(|l| l.split_whitespace().nth(1)?.parse().ok()).collect()
 }
@@ -676,7 +676,7 @@ fn contained(target: i32) {
 
 /// Two concurrent jobs under one shell the test made, in a group of its own: the jobs are
 /// siblings and group-mates (so a kill widened to the group or to siblings would reach the other
-/// job), and nothing outside the cell is. `sheepdog kill` of one job's supervisor leaves the other
+/// job), and nothing outside the cell is. `sheepr kill` of one job's supervisor leaves the other
 /// job whole, its supervisor and the shell included, and signals none of them.
 #[test]
 fn kill_of_one_job_leaves_a_concurrent_job_whole() {
@@ -686,7 +686,7 @@ fn kill_of_one_job_leaves_a_concurrent_job_whole() {
     let mut sh = quiet(Command::new("/bin/sh").args([
         "-c",
         "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\" & \"$0\" run --quiet -- \"$1\" ticker \"$4\" \"$5\" & wait",
-        sheepdog(),
+        sheepr(),
         fixture(),
         &j.marker,
         &j.rec(),

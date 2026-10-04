@@ -8,29 +8,29 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-walls-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-walls-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
 }
 
 /// A fake target layout for the runner: `<d>/p/deps/<name>` is `script` (a shell script), with
-/// the real fixture and sheepdog next to `deps`, as cargo lays them out.
+/// the real fixture and sheepr next to `deps`, as cargo lays them out.
 fn fake_test_binary(d: &Path, name: &str, script: &str) -> PathBuf {
     let deps = d.join("p").join("deps");
     std::fs::create_dir_all(&deps).unwrap();
-    std::os::unix::fs::symlink(fixture(), d.join("p").join("sd-fixture")).unwrap();
-    std::os::unix::fs::symlink(sheepdog(), d.join("p").join("sheepdog")).unwrap();
+    std::os::unix::fs::symlink(fixture(), d.join("p").join("sr-fixture")).unwrap();
+    std::os::unix::fs::symlink(sheepr(), d.join("p").join("sheepr")).unwrap();
     let bin = deps.join(name);
     std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -66,8 +66,8 @@ fn the_runner_checks_the_canary_and_the_sink() {
     let d = scratch("runner");
     let quiet = fake_test_binary(&d.join("q"), "quiet", "exit 0");
     let code = fake_test_binary(&d.join("c"), "code", "exit 7");
-    let canary = fake_test_binary(&d.join("k"), "canary", r#"echo x > "$SHEEPDOG_TEST_STATE/f""#);
-    let sink = fake_test_binary(&d.join("s"), "sink", r#"echo "withheld 42 9" >> "$SHEEPDOG_TEST_SINK""#);
+    let canary = fake_test_binary(&d.join("k"), "canary", r#"echo x > "$SHEEPR_TEST_STATE/f""#);
+    let sink = fake_test_binary(&d.join("s"), "sink", r#"echo "withheld 42 9" >> "$SHEEPR_TEST_SINK""#);
     assert_eq!(run_runner(&quiet), Some(0), "control: a quiet test binary");
     assert_eq!(run_runner(&code), Some(7), "the test binary's own code");
     assert_eq!(run_runner(&canary), Some(1), "a write to the canary fails the run");
@@ -75,9 +75,9 @@ fn the_runner_checks_the_canary_and_the_sink() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// PHASE2.md §0.4: the runner removes an inherited SHEEPDOG_* (here a tag a shell exported by
-/// hand, and a real-looking state directory), adopts only SHEEPDOG_LEG_TAG, and puts the debug
-/// sheepdog first on PATH.
+/// PHASE2.md §0.4: the runner removes an inherited SHEEPR_* (here a tag a shell exported by
+/// hand, and a real-looking state directory), adopts only SHEEPR_LEG_TAG, and puts the debug
+/// sheepr first on PATH.
 #[test]
 fn the_runner_sets_the_test_environment() {
     let d = scratch("env");
@@ -86,17 +86,17 @@ fn the_runner_sets_the_test_environment() {
         &d,
         "show",
         &format!(
-            r#"{{ echo "tag=$SHEEPDOG_TEST_TAG"; echo "state=${{SHEEPDOG_STATE:-unset}}"; echo "xdg=${{XDG_STATE_HOME:-unset}}"; [ "$(command -v sheepdog)" -ef "{}" ] && echo debug-first; }} > "{}""#,
-            sheepdog(),
+            r#"{{ echo "tag=$SHEEPR_TEST_TAG"; echo "state=${{SHEEPR_STATE:-unset}}"; echo "xdg=${{XDG_STATE_HOME:-unset}}"; [ "$(command -v sheepr)" -ef "{}" ] && echo debug-first; }} > "{}""#,
+            sheepr(),
             out.display()
         ),
     );
     let st = Command::new(runner())
         .arg(&bin)
-        .env("SHEEPDOG_TEST_TAG", "0123456789abcdef0123456789abcdef")
-        .env("SHEEPDOG_STATE", d.join("real"))
+        .env("SHEEPR_TEST_TAG", "0123456789abcdef0123456789abcdef")
+        .env("SHEEPR_STATE", d.join("real"))
         .env("XDG_STATE_HOME", d.join("xdg"))
-        .env("SHEEPDOG_LEG_TAG", "feedfacefeedfacefeedfacefeedface")
+        .env("SHEEPR_LEG_TAG", "feedfacefeedfacefeedfacefeedface")
         .status()
         .unwrap();
     assert!(st.success());
@@ -105,9 +105,9 @@ fn the_runner_sets_the_test_environment() {
     assert_eq!(lines[0], "tag=feedfacefeedfacefeedfacefeedface", "the leg tag, not the inherited one");
     assert_eq!(lines[1], "state=unset");
     assert_eq!(lines[2], "xdg=unset");
-    assert_eq!(lines.get(3), Some(&"debug-first"), "the debug sheepdog first on PATH");
+    assert_eq!(lines.get(3), Some(&"debug-first"), "the debug sheepr first on PATH");
     // without a leg tag it makes a fresh one, never the inherited one
-    let st = Command::new(runner()).arg(&bin).env("SHEEPDOG_TEST_TAG", "0123456789abcdef0123456789abcdef").env_remove("SHEEPDOG_LEG_TAG").status().unwrap();
+    let st = Command::new(runner()).arg(&bin).env("SHEEPR_TEST_TAG", "0123456789abcdef0123456789abcdef").env_remove("SHEEPR_LEG_TAG").status().unwrap();
     assert!(st.success());
     let text = std::fs::read_to_string(&out).unwrap();
     let tag = text.lines().next().unwrap().trim_start_matches("tag=");
@@ -166,7 +166,7 @@ fn records(r: &Path, n: usize) -> Vec<(i32, u64)> {
     }
 }
 
-/// Run sheepdog to its end (30 s bound); its exit code.
+/// Run sheepr to its end (30 s bound); its exit code.
 fn finish(mut c: std::process::Child) -> Option<i32> {
     let end = Instant::now() + Duration::from_secs(30);
     loop {
@@ -194,27 +194,27 @@ fn sink_lines(sink: &Path) -> Vec<(String, i32, i32)> {
         .collect()
 }
 
-/// The shape for the door cells: sheepdog's root starts a tagged `sigcount` member (TAGGED, with
+/// The shape for the door cells: sheepr's root starts a tagged `sigcount` member (TAGGED, with
 /// `tag` in its environment; the suite's own tag when None) and an untagged one (`env -i`), waits
 /// for both records, and exits, so the end-of-job kill aims at exactly those two.
-fn two_members(d: &Path, sheepdog_env: &[(&str, &str)], remove_own_tag: bool, tag: Option<&str>) -> (Option<i32>, (i32, u64), (i32, u64)) {
+fn two_members(d: &Path, sheepr_env: &[(&str, &str)], remove_own_tag: bool, tag: Option<&str>) -> (Option<i32>, (i32, u64), (i32, u64)) {
     let (r1, r2) = (d.join("tagged"), d.join("untagged"));
-    let tag_prefix = tag.map(|t| format!("SHEEPDOG_TEST_TAG={t} ")).unwrap_or_default();
+    let tag_prefix = tag.map(|t| format!("SHEEPR_TEST_TAG={t} ")).unwrap_or_default();
     let script = format!(
         r#"{tag_prefix}"$FX" sigcount "$R1" & /usr/bin/env -i "$FX" sigcount "$R2" & while [ ! -s "$R1" ] || [ ! -s "$R2" ]; do sleep 0.01; done"#
     );
-    let mut cmd = Command::new(sheepdog());
+    let mut cmd = Command::new(sheepr());
     cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", &script])
         .env("FX", fixture())
         .env("R1", &r1)
         .env("R2", &r2)
-        .env("SHEEPDOG_TEST_DEADLINE_MS", "1500")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", d.join("log"));
+        .env("SHEEPR_TEST_DEADLINE_MS", "1500")
+        .env("SHEEPR_TEST_SIGNAL_LOG", d.join("log"));
     common::cell_sink(&mut cmd, &d.join("sink"));
     if remove_own_tag {
-        cmd.env_remove("SHEEPDOG_TEST_TAG");
+        cmd.env_remove("SHEEPR_TEST_TAG");
     }
-    for (k, v) in sheepdog_env {
+    for (k, v) in sheepr_env {
         cmd.env(k, v);
     }
     let code = finish(cmd.spawn().unwrap());
@@ -251,12 +251,12 @@ fn without_the_latch_both_members_die() {
 }
 
 /// PHASE2.md §0.1: with the latch on, the door signals only a target whose environment carries
-/// sheepdog's own tag. The untagged member gets no signal at all (its own counter stays 0, it is
+/// sheepr's own tag. The untagged member gets no signal at all (its own counter stays 0, it is
 /// alive and not stopped); every withheld line names it; the tagged member dies.
 #[test]
 fn the_latch_withholds_every_signal_to_an_untagged_target() {
     let d = scratch("latch");
-    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1")], false, None);
+    let (code, t, u) = two_members(&d, &[("SHEEPR_TEST_LATCH", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
     let (tagged_alive, untagged_alive, untagged_stopped) = (common::alive(t), common::alive(u), common::stopped(u));
     common::send(t.0, t.1, libc::SIGKILL);
@@ -276,7 +276,7 @@ fn the_latch_withholds_every_signal_to_an_untagged_target() {
 #[test]
 fn the_panic_path_goes_through_the_door() {
     let d = scratch("panic");
-    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_PANIC_AFTER_STOP", "1")], false, None);
+    let (code, t, u) = two_members(&d, &[("SHEEPR_TEST_LATCH", "1"), ("SHEEPR_TEST_PANIC_AFTER_STOP", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
     let (tagged_alive, untagged_alive) = (common::alive(t), common::alive(u));
     common::send(t.0, t.1, libc::SIGKILL);
@@ -294,8 +294,8 @@ fn the_panic_path_goes_through_the_door() {
 #[test]
 fn a_door_without_its_own_tag_withholds_everything() {
     let d = scratch("notag");
-    let own = std::env::var("SHEEPDOG_TEST_TAG").unwrap();
-    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1")], true, Some(&own));
+    let own = std::env::var("SHEEPR_TEST_TAG").unwrap();
+    let (code, t, u) = two_members(&d, &[("SHEEPR_TEST_LATCH", "1")], true, Some(&own));
     let lines = sink_lines(&d.join("sink"));
     let (ta, ua) = (common::alive(t), common::alive(u));
     common::send(t.0, t.1, libc::SIGKILL);
@@ -321,13 +321,13 @@ fn the_latch_never_withholds_from_a_tagged_member_that_is_dying() {
         let sink = d.join(format!("sink{i}"));
         // even runs: members that die of the kill (TERM, STOP, KILL, CONT); odd runs: members
         // that exit by themselves, 0.2 ms apart, while the kill freezes them (grace 0)
-        let mut cmd = Command::new(sheepdog());
+        let mut cmd = Command::new(sheepr());
         if i % 2 == 0 {
             cmd.args(["run", "--grace", "0.05", "--", fixture(), "swarm", "50"]).arg(&r);
         } else {
             cmd.args(["run", "--grace", "0", "--", fixture(), "swarm", "50"]).arg(&r).arg("200");
         }
-        cmd.env("SHEEPDOG_TEST_LATCH", "1");
+        cmd.env("SHEEPR_TEST_LATCH", "1");
         common::cell_sink(&mut cmd, &sink);
         let c = cmd.spawn().unwrap();
         let code = finish(c);
@@ -350,7 +350,7 @@ fn the_latch_never_withholds_from_a_tagged_member_that_is_dying() {
 #[test]
 fn the_verdict_is_taken_once_per_identity() {
     let d = scratch("once");
-    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST", "1")], false, None);
+    let (code, t, u) = two_members(&d, &[("SHEEPR_TEST_LATCH", "1"), ("SHEEPR_TEST_ENV_EMPTY_AFTER_FIRST", "1")], false, None);
     let lines = sink_lines(&d.join("sink"));
     let tagged_alive = common::alive(t);
     common::send(t.0, t.1, libc::SIGKILL);
@@ -361,15 +361,15 @@ fn the_verdict_is_taken_once_per_identity() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// PHASE2.md §0.4: a fixture script that calls `sheepdog` by name gets this debug build (the
+/// PHASE2.md §0.4: a fixture script that calls `sheepr` by name gets this debug build (the
 /// test PATH), never an installed release: the nested run writes the debug start note.
 #[test]
-fn a_nested_sheepdog_found_by_name_is_this_debug_build() {
+fn a_nested_sheepr_found_by_name_is_this_debug_build() {
     let d = scratch("nested");
     let t = d.join("trace");
     let st = Command::new("/bin/sh")
-        .args(["-c", "sheepdog run -- true"])
-        .env("SHEEPDOG_TEST_TRACE", &t)
+        .args(["-c", "sheepr run -- true"])
+        .env("SHEEPR_TEST_TRACE", &t)
         .status()
         .unwrap();
     assert!(st.success(), "{st:?}");
@@ -391,12 +391,12 @@ fn the_rollback_cont_is_not_withheld() {
     let s = records(&rec, 1).first().copied();
     let code = s.map(|s| {
         // one tagged member, so the kill reaches its freeze pass (where the seam acts)
-        let mut cmd = Command::new(sheepdog());
+        let mut cmd = Command::new(sheepr());
         cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", r#""$FX" sigcount "$R2" & while [ ! -s "$R2" ]; do sleep 0.01; done"#])
             .env("FX", fixture())
             .env("R2", d.join("member"))
-            .env("SHEEPDOG_TEST_LATCH", "1")
-            .env("SHEEPDOG_TEST_WRONG_FREEZE", s.0.to_string());
+            .env("SHEEPR_TEST_LATCH", "1")
+            .env("SHEEPR_TEST_WRONG_FREEZE", s.0.to_string());
         common::cell_sink(&mut cmd, &d.join("sink"));
         finish(cmd.spawn().unwrap())
     });
@@ -427,8 +427,8 @@ fn a_panic_writes_the_status_line() {
     let code = finish(
         Command::new("/bin/sh")
             .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'exit 0' 3>"{}""#, out.display())])
-            .env("SD", sheepdog())
-            .env("SHEEPDOG_TEST_PANIC_IN_RUN", "1")
+            .env("SD", sheepr())
+            .env("SHEEPR_TEST_PANIC_IN_RUN", "1")
             .spawn()
             .unwrap(),
     );
@@ -445,7 +445,7 @@ fn a_panic_writes_the_status_line() {
 #[test]
 fn an_empty_environment_is_read_again_before_it_counts() {
     let d = scratch("reread");
-    let (code, t, u) = two_members(&d, &[("SHEEPDOG_TEST_LATCH", "1"), ("SHEEPDOG_TEST_ENV_EMPTY_READS", "4")], false, None);
+    let (code, t, u) = two_members(&d, &[("SHEEPR_TEST_LATCH", "1"), ("SHEEPR_TEST_ENV_EMPTY_READS", "4")], false, None);
     let lines = sink_lines(&d.join("sink"));
     let tagged_alive = common::alive(t);
     common::send(t.0, t.1, libc::SIGKILL);

@@ -1,4 +1,4 @@
-//! Phase-2 P4b: the auto-sweep before every `sheepdog run` (PLAN.md §3.5; PHASE2.md §3.5-§3.7):
+//! Phase-2 P4b: the auto-sweep before every `sheepr run` (PLAN.md §3.5; PHASE2.md §3.5-§3.7):
 //! the same owner's dead jobs, no grace, a 500 ms deadline per pass (what it stopped is continued
 //! when a pass misses it), a live inner supervisor and its set left for an explicit `sweep`,
 //! `--no-sweep`, `--owner`.
@@ -10,17 +10,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-as-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-as-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -29,7 +29,7 @@ fn scratch(name: &str) -> PathBuf {
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     s
 }
 
@@ -76,11 +76,11 @@ fn counted(r: &Path) -> usize {
     std::fs::read_to_string(format!("{}.sig", r.display())).map(|s| s.lines().count()).unwrap_or(0)
 }
 
-/// A dead job: `sheepdog run [flags] -- escapee-and-wait R`, SIGKILLed once its escapee is
+/// A dead job: `sheepr run [flags] -- escapee-and-wait R`, SIGKILLed once its escapee is
 /// journaled. Returns the escapee.
 fn dead_job(d: &Path, s: &Path, name: &str, flags: &[&str]) -> ((i32, u64), PathBuf) {
     let r = d.join(name);
-    let mut c: Child = Command::new(sheepdog()).arg("run").args(flags).arg("--").arg(fixture()).arg("escapee-and-wait").arg(&r).env("SHEEPDOG_TEST_STATE", s).spawn().unwrap();
+    let mut c: Child = Command::new(sheepr()).arg("run").args(flags).arg("--").arg(fixture()).arg("escapee-and-wait").arg(&r).env("SHEEPR_TEST_STATE", s).spawn().unwrap();
     assert!(wait_until(15, || !records(&r).is_empty()), "{name}: the escapee started");
     let g = records(&r)[0];
     assert!(wait_until(10, || journaled(s).contains(&g.0)), "{name}: the escapee was journaled");
@@ -121,11 +121,11 @@ fn cleanup(recs: &[&Path]) {
     }
 }
 
-/// `sheepdog run --status-fd 3 FLAGS -- CMD...` with this state; (exit code, status).
+/// `sheepr run --status-fd 3 FLAGS -- CMD...` with this state; (exit code, status).
 fn run(d: &Path, s: &Path, name: &str, flags: &str, cmd: &str, env: &[(&str, &str)]) -> (Option<i32>, Option<Json>) {
     let out = d.join(format!("{name}.status"));
     let mut c = Command::new("/bin/sh");
-    c.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {flags} -- {cmd} 3>"{}""#, out.display())]).env("SD", sheepdog()).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", s);
+    c.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 {flags} -- {cmd} 3>"{}""#, out.display())]).env("SD", sheepr()).env("FX", fixture()).env("SHEEPR_TEST_STATE", s);
     for (k, v) in env {
         c.env(k, v);
     }
@@ -182,7 +182,7 @@ fn a_partial_pass_leaves_nothing_stopped() {
     let s = state(&d);
     let (g, r) = dead_job(&d, &s, "a", &[]);
     let ran = d.join("ran");
-    let (code, st) = run(&d, &s, "p", "", &format!(r#"/bin/sh -c 'touch "{}"'"#, ran.display()), &[("SHEEPDOG_TEST_UNKILLABLE", &g.0.to_string())]);
+    let (code, st) = run(&d, &s, "p", "", &format!(r#"/bin/sh -c 'touch "{}"'"#, ran.display()), &[("SHEEPR_TEST_UNKILLABLE", &g.0.to_string())]);
     let (alive, stopped) = (common::alive(g), common::stopped(g));
     cleanup(&[&r]);
     assert_eq!(code, Some(0));
@@ -204,7 +204,7 @@ fn the_auto_sweep_journals_a_member_born_during_its_kill() {
     let (go, r, rr, log, ready, release) = (d.join("go"), d.join("rec"), d.join("root"), d.join("log"), d.join("ready"), d.join("release"));
     let _left = Leftovers(vec![r.clone(), rr.clone()], vec![]);
     let script = format!(r#""$FX" spawn-on "{}" "{}" & exec "$FX" sigcount "{}""#, go.display(), r.display(), rr.display());
-    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
+    let mut c = Outer(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
     assert!(wait_until(15, || !records(&r).is_empty() && !records(&rr).is_empty()), "the job did not start");
     let parent = records(&r)[0];
     assert!(wait_until(10, || journaled(&s).contains(&parent.0) && journaled(&s).contains(&records(&rr)[0].0)), "the job did not journal its members");
@@ -213,10 +213,10 @@ fn the_auto_sweep_journals_a_member_born_during_its_kill() {
     let (d2, s2, l2, rd2, rl2) = (d.clone(), s.clone(), log.clone(), ready.clone(), release.clone());
     let t = std::thread::spawn(move || {
         let env = [
-            ("SHEEPDOG_TEST_SIGNAL_LOG", l2.to_str().unwrap()),
-            ("SHEEPDOG_TEST_DEADLINE_MS", "5000"),
-            ("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", rl2.to_str().unwrap()),
-            ("SHEEPDOG_TEST_READY_FILE", rd2.to_str().unwrap()),
+            ("SHEEPR_TEST_SIGNAL_LOG", l2.to_str().unwrap()),
+            ("SHEEPR_TEST_DEADLINE_MS", "5000"),
+            ("SHEEPR_TEST_HOLD_AFTER_FREEZE", rl2.to_str().unwrap()),
+            ("SHEEPR_TEST_READY_FILE", rd2.to_str().unwrap()),
         ];
         run(&d2, &s2, "new", "", "/bin/sh -c 'exit 0'", &env)
     });
@@ -259,7 +259,7 @@ fn the_timeout_starts_after_the_auto_sweep() {
         "c",
         "--timeout 1.5s",
         &format!(r#"/bin/sh -c '"$FX" sleep-ms 500 && touch "{}"'"#, ran.display()),
-        &[("SHEEPDOG_TEST_UNKILLABLE", &g.0.to_string()), ("SHEEPDOG_TEST_DEADLINE_MS", "2000")],
+        &[("SHEEPR_TEST_UNKILLABLE", &g.0.to_string()), ("SHEEPR_TEST_DEADLINE_MS", "2000")],
     );
     let took = t0.elapsed();
     cleanup(&[&r]);
@@ -280,7 +280,7 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
     let (r, rr) = (d.join("rec"), d.join("root"));
     let inner_state = state(&d.join("inner"));
     let script = format!(
-        r#"SHEEPDOG_TEST_STATE="{}" sheepdog run -- "$FX" escapee-and-wait "{}" & echo $! > "{}"; exec "$FX" sigcount "{}""#,
+        r#"SHEEPR_TEST_STATE="{}" sheepr run -- "$FX" escapee-and-wait "{}" & echo $! > "{}"; exec "$FX" sigcount "{}""#,
         inner_state.display(),
         r.display(),
         d.join("innerpid").display(),
@@ -288,7 +288,7 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
     );
     // the inner run and its escapee carry r's path in their argv
     let _left = Leftovers(vec![r.clone(), rr.clone()], vec![r.display().to_string()]);
-    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
+    let mut c = Outer(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
     assert!(wait_until(15, || !records(&r).is_empty()));
     let g = records(&r)[0];
     // the outer supervisor has journaled the inner one (readiness, not a fixed wait)
@@ -302,7 +302,7 @@ fn the_auto_sweep_defers_a_live_inner_supervisor() {
     let (alive, n) = (common::alive(g), counted(&gr));
     let deferred = notes(&st).iter().any(|n| n.starts_with("deferred"));
     // control: an explicit sweep ends the inner supervisor, and with it its job
-    let _ = Command::new(sheepdog()).arg("sweep").env("SHEEPDOG_TEST_STATE", &s).status();
+    let _ = Command::new(sheepr()).arg("sweep").env("SHEEPR_TEST_STATE", &s).status();
     let gone = wait_until(5, || !common::alive(g));
     cleanup(&[&r, &rr]);
     assert_eq!(code, Some(0));
@@ -341,7 +341,7 @@ fn the_auto_sweep_is_not_the_new_runs_kill() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Review P2-7: the auto-sweep of a `sheepdog run` started inside a dead job (from its member W)
+/// Review P2-7: the auto-sweep of a `sheepr run` started inside a dead job (from its member W)
 /// skips that job whole: W and the job's witness live, the inner run's command runs, and a note
 /// names the skipped job.
 #[test]
@@ -351,7 +351,7 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
     let (go, ran, out, me, wit, rr) = (d.join("go"), d.join("ran"), d.join("inner.status"), d.join("me"), d.join("witness"), d.join("root"));
     let m = format!("29.{}", std::process::id());
     let w = format!(
-        r#"echo $$ > "{}"; while [ ! -e "{}" ]; do sleep 0.02; done; sheepdog run --status-fd 9 -- /bin/sh -c 'touch "{}"' 9>"{}"; sleep {m}"#,
+        r#"echo $$ > "{}"; while [ ! -e "{}" ]; do sleep 0.02; done; sheepr run --status-fd 9 -- /bin/sh -c 'touch "{}"' 9>"{}"; sleep {m}"#,
         me.display(),
         go.display(),
         ran.display(),
@@ -359,7 +359,7 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
     );
     let script = format!(r#"/bin/sh -c '{}' & "$FX" sigcount "{}" & exec "$FX" sigcount "{}""#, w.replace('\'', r#"'\''"#), wit.display(), rr.display());
     let _left = Leftovers(vec![wit.clone(), rr.clone()], vec![m.clone()]);
-    let mut c = Outer(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
+    let mut c = Outer(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
     let wpid: Option<i32> = wait_until(15, || std::fs::read_to_string(&me).is_ok_and(|t| !t.trim().is_empty())).then(|| std::fs::read_to_string(&me).unwrap().trim().parse().unwrap());
     assert!(wpid.is_some_and(|p| wait_until(10, || journaled(&s).contains(&p))) && wait_until(10, || !records(&wit).is_empty()));
     let witness = records(&wit)[0];
@@ -371,7 +371,7 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
     let st = std::fs::read_to_string(&out).ok().and_then(|t| json::parse(t.trim_end()).ok());
     let (wit_alive, n) = (common::alive(witness), counted(&wit));
     let noted = wpid.is_some_and(|w| notes(&st).iter().any(|n| n.starts_with("auto-sweep skipped job j-") && n.contains(&w.to_string())));
-    let wid = wpid.and_then(sheepdog::ident::identity);
+    let wid = wpid.and_then(sheepr::ident::identity);
     if let Some(p) = wpid.zip(wid) {
         common::send(p.0, p.1, libc::SIGKILL);
     }

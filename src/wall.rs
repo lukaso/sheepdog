@@ -3,15 +3,15 @@
 //!
 //! The latch is one-way: it only ever becomes true. It is set by the gate call, which every
 //! phase-2 source must make before its first fact can reach the door (the token it returns is
-//! the only way to get one), or by the debug seam SHEEPDOG_TEST_LATCH=1. While it is on, the door
+//! the only way to get one), or by the debug seam SHEEPR_TEST_LATCH=1. While it is on, the door
 //! signals a target only if the target's environment block carries the whole entry
-//! `SHEEPDOG_TEST_TAG=<this process's own tag>`. A process without a tag of its own withholds
+//! `SHEEPR_TEST_TAG=<this process's own tag>`. A process without a tag of its own withholds
 //! every target. The verdict is taken once per (pid, identity read at the moment of the check),
 //! so the CONT after a KILL does not re-read a dying process, and a pid reused by another process
 //! gets a verdict of its own.
 
-use sheepdog::envtag::{self, EnvRead, TagVerdict};
-use sheepdog::ident::identity;
+use sheepr::envtag::{self, EnvRead, TagVerdict};
+use sheepr::ident::identity;
 use std::collections::{HashMap, HashSet};
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,19 +50,19 @@ pub fn gate_with(latch: &Latch, opt_out: bool) -> Option<Token> {
     Some(Token(()))
 }
 
-/// The gate call every phase-2 source makes (the phase-1 opt-out is SHEEPDOG_TEST_PHASE1=1).
+/// The gate call every phase-2 source makes (the phase-1 opt-out is SHEEPR_TEST_PHASE1=1).
 #[allow(dead_code)]
 pub fn gate() -> Option<Token> {
-    let t = gate_with(&LATCH, crate::seam_flag("SHEEPDOG_TEST_PHASE1"));
+    let t = gate_with(&LATCH, crate::seam_flag("SHEEPR_TEST_PHASE1"));
     if t.is_none() {
         crate::note("source disabled".to_string());
     }
     t
 }
 
-/// The latch, with the debug seam SHEEPDOG_TEST_LATCH=1 applied (in one place, for every reader).
+/// The latch, with the debug seam SHEEPR_TEST_LATCH=1 applied (in one place, for every reader).
 fn latched() -> bool {
-    if crate::seam_flag("SHEEPDOG_TEST_LATCH") {
+    if crate::seam_flag("SHEEPR_TEST_LATCH") {
         LATCH.set();
     }
     LATCH.on()
@@ -70,11 +70,11 @@ fn latched() -> bool {
 
 fn own_tag() -> Option<&'static str> {
     static TAG: OnceLock<Option<String>> = OnceLock::new();
-    TAG.get_or_init(|| std::env::var("SHEEPDOG_TEST_TAG").ok().filter(|t| !t.is_empty())).as_deref()
+    TAG.get_or_init(|| std::env::var("SHEEPR_TEST_TAG").ok().filter(|t| !t.is_empty())).as_deref()
 }
 
 /// Verdicts taken, by (pid, identity at the check); and the targets already signalled once
-/// (for the debug seam SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST).
+/// (for the debug seam SHEEPR_TEST_ENV_EMPTY_AFTER_FIRST).
 fn cache() -> &'static Mutex<(HashMap<(i32, u64), TagVerdict>, HashSet<(i32, u64)>)> {
     static C: OnceLock<Mutex<(HashMap<(i32, u64), TagVerdict>, HashSet<(i32, u64)>)>> = OnceLock::new();
     C.get_or_init(|| Mutex::new((HashMap::new(), HashSet::new())))
@@ -93,10 +93,10 @@ fn verdict_for(pid: i32, id: u64, tag: &str) -> TagVerdict {
             return v;
         }
         // debug seam: a read after this target's first signal finds an empty environment
-        crate::seam_flag("SHEEPDOG_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live))
+        crate::seam_flag("SHEEPR_TEST_ENV_EMPTY_AFTER_FIRST") && c.1.contains(&(pid, live))
     }; // the lock is not held while the reads below wait
-    // debug seam SHEEPDOG_TEST_ENV_EMPTY_READS=N: the first N reads of a target are empty
-    let mut empty_reads = crate::seam_ms("SHEEPDOG_TEST_ENV_EMPTY_READS").unwrap_or(0);
+    // debug seam SHEEPR_TEST_ENV_EMPTY_READS=N: the first N reads of a target are empty
+    let mut empty_reads = crate::seam_ms("SHEEPR_TEST_ENV_EMPTY_READS").unwrap_or(0);
     let mut read_once = || {
         if seam_empty {
             return EnvRead::Block(Vec::new());
@@ -159,7 +159,7 @@ pub fn rollback_tripwire(pid: i32, id: u64) {
     {
         let line = format!("{word} {pid} {}", libc::SIGCONT);
         crate::trace(line.clone());
-        if let Ok(p) = std::env::var("SHEEPDOG_TEST_SINK") {
+        if let Ok(p) = std::env::var("SHEEPR_TEST_SINK") {
             crate::trace_to(std::path::Path::new(&p), &line);
         }
     }
@@ -189,7 +189,7 @@ pub fn admit(pid: i32, id: u64, sig: c_int) -> bool {
     };
     let line = format!("{word} {pid} {sig}");
     crate::trace(line.clone());
-    if let Ok(p) = std::env::var("SHEEPDOG_TEST_SINK") {
+    if let Ok(p) = std::env::var("SHEEPR_TEST_SINK") {
         crate::trace_to(std::path::Path::new(&p), &line);
     }
     false

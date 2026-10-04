@@ -11,9 +11,9 @@
 
 #![allow(dead_code)] // each test file uses a different part
 
-pub use sheepdog::json;
+pub use sheepr::json;
 
-use sheepdog::ident::{identity, same};
+use sheepr::ident::{identity, same};
 use std::process::{Child, Command};
 
 /// A pid the test found, with its identity read now. None if it is already gone, pid <= 1, or
@@ -84,11 +84,11 @@ pub fn kill_marked(markers: &[&str]) {
     }
 }
 
-/// PHASE2.md §0.4: the ONE place a cell points sheepdog's withheld lines at a sink of its own
+/// PHASE2.md §0.4: the ONE place a cell points sheepr's withheld lines at a sink of its own
 /// (a wall-control cell that expects a line); every other run writes to the run's sink, which
 /// the runner requires empty. Grep for `cell_sink` to find every override.
 pub fn cell_sink(cmd: &mut Command, sink: &std::path::Path) {
-    cmd.env("SHEEPDOG_TEST_SINK", sink);
+    cmd.env("SHEEPR_TEST_SINK", sink);
 }
 
 /// Whether a recorded process is stopped now (state T in `ps`).
@@ -102,20 +102,20 @@ pub fn stopped(p: (i32, u64)) -> bool {
 
 /// The test environment (PHASE2.md §0.4) is in place: the cargo runner (`scripts/test-env`)
 /// started this binary with a test tag, a canary state directory (no sentinel), a withheld sink,
-/// and the debug `sheepdog` first on PATH, so a nested `sheepdog` found by name is this build.
+/// and the debug `sheepr` first on PATH, so a nested `sheepr` found by name is this build.
 /// Checked once per test binary; every helper that names a binary calls it.
 pub fn test_env() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         assert!(cfg!(debug_assertions), "the tests need a debug build: its test walls do not exist in a release build");
-        let tag = std::env::var("SHEEPDOG_TEST_TAG").unwrap_or_default();
+        let tag = std::env::var("SHEEPR_TEST_TAG").unwrap_or_default();
         assert!(tag.len() >= 16 && tag.bytes().all(|b| b.is_ascii_hexdigit()), "no test tag: run the tests through cargo (the runner in .cargo/config.toml)");
-        let canary = std::path::PathBuf::from(std::env::var_os("SHEEPDOG_TEST_STATE").unwrap_or_default());
-        assert!(canary.is_dir() && !canary.join(".sheepdog-test").exists(), "no canary state directory");
-        assert!(std::env::var_os("SHEEPDOG_TEST_SINK").is_some(), "no withheld sink");
+        let canary = std::path::PathBuf::from(std::env::var_os("SHEEPR_TEST_STATE").unwrap_or_default());
+        assert!(canary.is_dir() && !canary.join(".sheepr-test").exists(), "no canary state directory");
+        assert!(std::env::var_os("SHEEPR_TEST_SINK").is_some(), "no withheld sink");
         let path = std::env::var("PATH").unwrap_or_default();
-        let first = std::path::Path::new(path.split(':').next().unwrap_or("")).join("sheepdog");
-        let ours = std::fs::canonicalize(env!("CARGO_BIN_EXE_sheepdog")).ok();
-        assert!(ours.is_some() && std::fs::canonicalize(&first).ok() == ours, "the first sheepdog on PATH is not this debug build");
+        let first = std::path::Path::new(path.split(':').next().unwrap_or("")).join("sheepr");
+        let ours = std::fs::canonicalize(env!("CARGO_BIN_EXE_sheepr")).ok();
+        assert!(ours.is_some() && std::fs::canonicalize(&first).ok() == ours, "the first sheepr on PATH is not this debug build");
     });
 }

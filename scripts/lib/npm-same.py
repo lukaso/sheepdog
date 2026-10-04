@@ -15,14 +15,14 @@
 #   npm-same.py packages DIR VERSION REF   the four .tgz files in DIR: that shape; exactly the files
 #       npm-pack.sh writes; the license texts and the main package's launcher equal the files in
 #       REF (a directory: the tag's LICENSE-MIT, LICENSE-APACHE and launcher); each Linux
-#       package's binary equals DIR's sheepdog-linux-<arch>; modes exactly 0755 for the
+#       package's binary equals DIR's sheepr-linux-<arch>; modes exactly 0755 for the
 #       executable and 0644 for every other file (no setuid bits anywhere); each package.json
 #       equals, key for key, the one `pkgjson` writes (no scripts; the main one's bin and optional
 #       dependencies pinned to VERSION)
 #   npm-same.py pkgjson KIND VERSION        prints the package.json of KIND (main, darwin,
 #       linux-arm64, linux-x64): npm-pack.sh writes each package's from this, and `packages`
 #       compares against it
-#   npm-same.py same TGZ ARCHIVE           the darwin package's Sheepdog.app equals the release
+#   npm-same.py same TGZ ARCHIVE           the darwin package's Sheepr.app equals the release
 #       archive's, file by file: path, mode and content (`packages` has fixed the package's modes)
 # Exit 0, or 1 with the reason on stderr.
 import sys, hashlib, json, os, re, zlib
@@ -100,36 +100,36 @@ def ref(p): return open(p, "rb").read()
 
 LIC = ["LICENSE-MIT", "LICENSE-APACHE"]
 # every package links the repository and its home page (the npm page shows both)
-LINKS = {"repository": {"type": "git", "url": "git+https://github.com/lukaso/sheepdog.git"},
-         "homepage": "https://github.com/lukaso/sheepdog#readme"}
+LINKS = {"repository": {"type": "git", "url": "git+https://github.com/lukaso/sheepr.git"},
+         "homepage": "https://github.com/lukaso/sheepr#readme"}
 def pkgjson(kind, nv):
     """The package.json npm-pack.sh writes for KIND, as a dict (key order is the file's order)."""
     lic = "MIT OR Apache-2.0"
     if kind == "main":
-        return {"name": "@lukaso/sheepdog", "version": nv,
+        return {"name": "sheepr", "version": nv,
                 "description": "Run a command and kill every process it started, escapees included",
-                "license": lic, **LINKS, "bin": {"sheepdog": "bin/sheepdog"}, "files": ["bin"] + LIC,
-                "optionalDependencies": {"@lukaso/sheepdog-" + k: nv for k in ("darwin-universal", "linux-arm64", "linux-x64")}}
+                "license": lic, **LINKS, "bin": {"sheepr": "bin/sheepr"}, "files": ["bin"] + LIC,
+                "optionalDependencies": {"sheepr-" + k: nv for k in ("darwin-universal", "linux-arm64", "linux-x64")}}
     if kind == "darwin":
-        return {"name": "@lukaso/sheepdog-darwin-universal", "version": nv,
-                "description": "The macOS build of @lukaso/sheepdog; install that package, not this one",
-                "license": lic, **LINKS, "os": ["darwin"], "cpu": ["arm64", "x64"], "files": ["Sheepdog.app"] + LIC}
+        return {"name": "sheepr-darwin-universal", "version": nv,
+                "description": "The macOS build of sheepr; install that package, not this one",
+                "license": lic, **LINKS, "os": ["darwin"], "cpu": ["arm64", "x64"], "files": ["Sheepr.app"] + LIC}
     if kind in ("linux-arm64", "linux-x64"):
-        return {"name": "@lukaso/sheepdog-" + kind, "version": nv,
-                "description": "The Linux %s build of @lukaso/sheepdog; install that package, not this one" % kind[len("linux-"):],
+        return {"name": "sheepr-" + kind, "version": nv,
+                "description": "The Linux %s build of sheepr; install that package, not this one" % kind[len("linux-"):],
                 "license": lic, **LINKS, "os": ["linux"], "cpu": [kind[len("linux-"):]], "files": ["bin"] + LIC}
     die("no package kind %s" % kind)
 
 def packages(d, nv, r):
     lic = {n: ref(os.path.join(r, n)) for n in LIC}
     for kind, arch in (("main", None), ("darwin", None), ("linux-arm64", "aarch64"), ("linux-x64", "x86_64")):
-        pk = "sheepdog" if kind == "main" else "sheepdog-darwin-universal" if kind == "darwin" else "sheepdog-" + kind
+        pk = "sheepr" if kind == "main" else "sheepr-darwin-universal" if kind == "darwin" else "sheepr-" + kind
         fn = "lukaso-%s-%s.tgz" % (pk, nv)
         f = plain(os.path.join(d, fn), fn, False, canonical=True)
         for n in f:
             if not n.startswith("package/"): die("%s: an entry outside package/: %s" % (fn, n))
         want = {"package/package.json"} | {"package/" + n for n in LIC} | ({"package/README.md"} if kind == "main" else set())
-        want |= {n for n in f if n.startswith("package/Sheepdog.app/")} if kind == "darwin" else {"package/bin/sheepdog"}
+        want |= {n for n in f if n.startswith("package/Sheepr.app/")} if kind == "darwin" else {"package/bin/sheepr"}
         if set(f) != want: die("%s: the files are %s, not %s" % (fn, sorted(f), sorted(want)))
         for n, b in lic.items():
             if f["package/" + n][2] != b: die("%s: %s differs from the repo's (at the tag)" % (fn, n))
@@ -139,20 +139,20 @@ def packages(d, nv, r):
         except ValueError: die("%s: package.json is not JSON" % fn)
         if pj != pkgjson(kind, nv): die("%s: package.json is not the one npm-pack.sh writes: %s" % (fn, json.dumps(pj, sort_keys=True)))
         # exact modes: 0755 for the executable, 0644 for everything else
-        exe = "package/Sheepdog.app/Contents/MacOS/sheepdog" if kind == "darwin" else "package/bin/sheepdog"
+        exe = "package/Sheepr.app/Contents/MacOS/sheepr" if kind == "darwin" else "package/bin/sheepr"
         for n, (m, _, _b) in f.items():
             want = 0o755 if n == exe else 0o644
             if m != want: die("%s: %s's mode is %o, not %o" % (fn, n[len("package/"):], m, want))
         if kind == "darwin": continue
         exp, src = (ref(os.path.join(r, "launcher")), "the repo's launcher (at the tag)") if kind == "main" \
-            else (ref(os.path.join(d, "sheepdog-linux-" + arch)), "sheepdog-linux-" + arch)
-        if f["package/bin/sheepdog"][2] != exp: die("%s: bin/sheepdog differs from %s" % (fn, src))
+            else (ref(os.path.join(d, "sheepr-linux-" + arch)), "sheepr-linux-" + arch)
+        if f["package/bin/sheepr"][2] != exp: die("%s: bin/sheepr differs from %s" % (fn, src))
 
 def same(tgz, arc):
-    p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False, canonical=True).items() if n.startswith("package/Sheepdog.app/")}
+    p = {n[len("package/"):]: v[:2] for n, v in plain(tgz, "the darwin package", False, canonical=True).items() if n.startswith("package/Sheepr.app/")}
     a = {n: v[:2] for n, v in plain(arc, "the release archive", True).items()}
     for n in a:
-        if not n.startswith("Sheepdog.app/"): die("the release archive: an entry outside Sheepdog.app/: %s" % n)
+        if not n.startswith("Sheepr.app/"): die("the release archive: an entry outside Sheepr.app/: %s" % n)
     if sorted(p) != sorted(a):
         die("the darwin package's bundle is not the release archive's bundle: files %s differ" % sorted(set(p) ^ set(a)))
     for n in sorted(p):

@@ -27,7 +27,7 @@
 # imports no shell functions from the environment; started as `bash exec-guard.sh`, it re-runs
 # itself so), and it judges in a subshell with PATH=/usr/bin:/bin and no DEVELOPER_DIR, SDKROOT or
 # TOOLCHAINS (/usr/bin/lipo follows DEVELOPER_DIR). The one input it takes from the environment is
-# SD_EXEC_RECORD: when it names a file, `exec` appends "would exec PATH" to it instead of running
+# SR_EXEC_RECORD: when it names a file, `exec` appends "would exec PATH" to it instead of running
 # PATH (the test seam; it can only stop a run).
 # Stated limits: call the door by its path. `bash exec-guard.sh` with an exported `exec` function
 # or a BASH_ENV runs the caller's code before the door can re-run itself; no script can defend
@@ -52,19 +52,19 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
   LIPO=/usr/bin/lipo
   conf=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/release.conf
   . "$conf" || exit 2
-  rel=$(printf %s "$SD_RELEASE_ID" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  rel=$(printf %s "$SR_RELEASE_ID" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
   # the temp dir is named and the traps set before it is made, so a signal at any point finds a
   # trap that knows it (only SIGKILL can leave it behind)
-  tmp=/private/tmp/sd-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
-  [ -d /private/tmp ] || tmp=/tmp/sd-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  tmp=/private/tmp/sr-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  [ -d /private/tmp ] || tmp=/tmp/sr-exec-guard.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$tmp"' EXIT
   trap 'rm -rf "$tmp"; exit 1' HUP INT TERM
   mkdir -m 700 "$tmp" || exit 2
   nl='
 '
-  refuse() { echo "sheepdog exec-guard: refused $typed: $*" >&2; exit 1; }
+  refuse() { echo "sheepr exec-guard: refused $typed: $*" >&2; exit 1; }
   is_rel() { [ "$(printf %s "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" = "$rel" ]; }
-  meets() { /usr/bin/codesign -v -R="$SD_RELEASE_REQUIREMENT" "$1" >/dev/null 2>&1; }
+  meets() { /usr/bin/codesign -v -R="$SR_RELEASE_REQUIREMENT" "$1" >/dev/null 2>&1; }
 
   # the real path, symlinks followed (no `readlink -f` or `realpath`: not on every macOS)
   resolve() {
@@ -179,7 +179,7 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
       fi
     done
     if [ $release = yes ]; then
-      meets "$real" || refuse "$why, and it lacks the release signature ($SD_RELEASE_ID requirement)"
+      meets "$real" || refuse "$why, and it lacks the release signature ($SR_RELEASE_ID requirement)"
       printf '%s\n' "$all" | while IFS= read -r b; do
         [ -n "$b" ] || continue
         meets "$b" || exit 1
@@ -204,5 +204,5 @@ case $target in /*) typed=$target ;; *) typed=$(pwd -P)/$target ;; esac
 
 [ "$mode" = check ] && exit 0
 shift 2
-if [ -n "${SD_EXEC_RECORD:-}" ]; then echo "would exec $typed" >> "$SD_EXEC_RECORD"; exit 0; fi
+if [ -n "${SR_EXEC_RECORD:-}" ]; then echo "would exec $typed" >> "$SR_EXEC_RECORD"; exit 0; fi
 exec "$typed" "$@"

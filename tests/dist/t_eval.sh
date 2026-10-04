@@ -1,5 +1,5 @@
 #!/bin/sh
-# PLAN.md §10.9: the eval fixture. hang.sh under `sheepdog run --timeout 3s` (a release build):
+# PLAN.md §10.9: the eval fixture. hang.sh under `sheepr run --timeout 3s` (a release build):
 # check.sh PASSES. Control: hang.sh under a plain `timeout 3` (which kills only its child): check.sh
 # FAILS (the escapee lives). An incomplete record (a live pid, no start time) is not a PASS: exit 2.
 # Every escapee this cell made is killed at exit, by its recorded identity only.
@@ -15,14 +15,14 @@ reap() { # record files: kill each pid whose start time is still the recorded on
 }
 trap 'reap "$FX/e1" "$FX/eval/escapee"; [ -n "${sp:-}" ] && kill "$sp" 2>/dev/null; rm -rf "$FX"' EXIT
 trap 'exit 143' TERM; trap 'exit 130' INT
-(cd "$SD_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepdog) || { fail "release build"; finish; }
-cp -R "$SD_ROOT/eval" "$FX/eval"; mkdir -p "$FX/h"
-env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPDOG_STATE="$FX/h/s" \
-  "$FX/target/release/sheepdog" run --no-sweep --timeout 3s -- "$FX/eval/hang.sh" >/dev/null 2>&1; r=$?
-[ $r = 124 ] && pass "sheepdog run --timeout: exit 124" || fail "exit $r, want 124"
+(cd "$SR_ROOT" && env CARGO_TARGET_DIR="$FX/target" timeout 1200 cargo build -q --release --locked --bin sheepr) || { fail "release build"; finish; }
+cp -R "$SR_ROOT/eval" "$FX/eval"; mkdir -p "$FX/h"
+env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPR_STATE="$FX/h/s" \
+  "$FX/target/release/sheepr" run --no-sweep --timeout 3s -- "$FX/eval/hang.sh" >/dev/null 2>&1; r=$?
+[ $r = 124 ] && pass "sheepr run --timeout: exit 124" || fail "exit $r, want 124"
 cp "$FX/eval/escapee" "$FX/e1" 2>/dev/null
 sh "$FX/eval/check.sh" > "$FX/c" 2>&1; r=$?
-[ $r = 0 ] && pass "check.sh passes after sheepdog" || fail "check after sheepdog: $(cat "$FX/c")"
+[ $r = 0 ] && pass "check.sh passes after sheepr" || fail "check after sheepr: $(cat "$FX/c")"
 timeout 3 "$FX/eval/hang.sh" >/dev/null 2>&1
 sh "$FX/eval/check.sh" > "$FX/c" 2>&1; r=$?
 [ $r = 1 ] && pass "control: after a plain timeout, check.sh fails (the escapee lives)" || fail "control: check $r $(cat "$FX/c")"

@@ -17,7 +17,7 @@
 //! `cmd` text: at most 256 bytes; a backslash is written `\\` and a byte that is not UTF-8
 //! `\xHH`, so the text is never ambiguous; then JSON-escaped.
 
-use sheepdog::ident::identity;
+use sheepr::ident::identity;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::File;
@@ -128,10 +128,10 @@ pub fn pidns() -> String {
     }
 }
 
-/// A job id: `j-` + 8 random hex digits from /dev/urandom (debug seam SHEEPDOG_TEST_JOB_ID forces the first one).
+/// A job id: `j-` + 8 random hex digits from /dev/urandom (debug seam SHEEPR_TEST_JOB_ID forces the first one).
 fn new_id(first: bool) -> Option<String> {
     if first && cfg!(debug_assertions) {
-        if let Ok(forced) = std::env::var("SHEEPDOG_TEST_JOB_ID") {
+        if let Ok(forced) = std::env::var("SHEEPR_TEST_JOB_ID") {
             return Some(format!("j-{forced}"));
         }
     }
@@ -176,7 +176,7 @@ impl Journal {
         let n = format!("journal-failed: {what}");
         if !self.warned {
             self.warned = true;
-            crate::say!("sheepdog: cannot keep the job journal ({what}); the job runs, but `sweep` cannot clean up after it if sheepdog is killed");
+            crate::say!("sheepr: cannot keep the job journal ({what}); the job runs, but `sweep` cannot clean up after it if sheepr is killed");
         }
         crate::note(n.clone());
         crate::status::add_note(&n);
@@ -186,7 +186,7 @@ impl Journal {
     /// Publish this job's journal (after the macOS SETEXEC, before the root runs).
     pub fn open(owner: &str, argv: &[OsString]) -> Journal {
         // the phase-1 opt-out disables state outright (PHASE2.md §0.1)
-        if crate::seam_flag("SHEEPDOG_TEST_PHASE1") {
+        if crate::seam_flag("SHEEPR_TEST_PHASE1") {
             return Journal::off("journal-disabled");
         }
         let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else {
@@ -242,7 +242,7 @@ impl Journal {
             match std::fs::hard_link(&tmp, &fin) {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&tmp);
-                    crate::seam_hold("SHEEPDOG_TEST_HOLD_AFTER_LINK");
+                    crate::seam_hold("SHEEPR_TEST_HOLD_AFTER_LINK");
                     j.file = Some(f);
                     j.path = Some(fin);
                     j.job = Some(id);
@@ -268,7 +268,7 @@ impl Journal {
         if self.dead || self.file.is_none() {
             return false;
         }
-        let r = if crate::seam_flag("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL") {
+        let r = if crate::seam_flag("SHEEPR_TEST_JOURNAL_WRITE_FAIL") {
             Err(std::io::Error::other("test seam"))
         } else {
             // write_all completes a short write
@@ -313,7 +313,7 @@ impl Journal {
         }
     }
 
-    /// Journal the root, whose command is sheepdog's own arguments (never read back from the
+    /// Journal the root, whose command is sheepr's own arguments (never read back from the
     /// process). Called before the root runs.
     pub fn record_root(&mut self, pid: i32, id: u64, cmd: &[OsString]) {
         if self.file.is_some() {
@@ -330,7 +330,7 @@ impl Journal {
                 crate::trace(format!("journal {pid}"));
             }
         }
-        if crate::seam_flag("SHEEPDOG_TEST_KILL_AFTER_ROOT_JOURNAL") {
+        if crate::seam_flag("SHEEPR_TEST_KILL_AFTER_ROOT_JOURNAL") {
             unsafe { libc::raise(libc::SIGKILL) }; // raw signal site: this process (PHASE2.md §0.3)
         }
     }
@@ -343,9 +343,9 @@ impl Journal {
     }
 
     /// The end: after a clean kill the journal is unlinked, then the lock released by closing
-    /// the fd; otherwise it is kept for `sweep` (debug seam SHEEPDOG_TEST_KEEP_JOURNAL keeps it).
+    /// the fd; otherwise it is kept for `sweep` (debug seam SHEEPR_TEST_KEEP_JOURNAL keeps it).
     pub fn finish(mut self, clean: bool) {
-        if clean && !crate::seam_flag("SHEEPDOG_TEST_KEEP_JOURNAL") {
+        if clean && !crate::seam_flag("SHEEPR_TEST_KEEP_JOURNAL") {
             if let Some(p) = &self.path {
                 let _ = std::fs::remove_file(p); // before the lock is released below
             }

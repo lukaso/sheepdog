@@ -7,7 +7,7 @@
 use crate::{cstrings, kill_tree, say, Args};
 use std::ffi::OsString;
 use std::io::Write;
-use sheepdog::ident::identity;
+use sheepr::ident::identity;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -40,7 +40,7 @@ fn group_pids(pg: i32) -> Vec<i32> {
     v
 }
 
-/// `sheepdog kill`: an inner supervisor that is a subreaper (the default mode) adopts its
+/// `sheepr kill`: an inner supervisor that is a subreaper (the default mode) adopts its
 /// escapees, so they are its descendants: even if it does not end on the TERM (its caller ignores
 /// TERM), `kill` proves them and kills them with its tree, and exits 0. An inner supervisor without
 /// its subreaper (`--mode none`, or its prctl failed: degraded) whose caller ignores TERM can
@@ -48,7 +48,7 @@ fn group_pids(pg: i32) -> Vec<i32> {
 /// still exits 0, without a report (stated in PHASE1.md, S6 review round 7).
 pub const ADOPTS_ESCAPEES: bool = true;
 
-/// Every live (not zombie) process, for `sheepdog kill` (S6). The parent, state and start time
+/// Every live (not zombie) process, for `sheepr kill` (S6). The parent, state and start time
 /// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
 /// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
 /// (`pbi_uid`): a setuid program the user runs is not the user's.
@@ -408,22 +408,22 @@ fn read_line(fd: i32, ms: i32) -> Option<String> {
 }
 
 /// Start the root through the shim with every signal blocked; it runs its command only after
-/// `Root::go`. Its signal dispositions are the caller's (sheepdog changes none except SIGCHLD,
+/// `Root::go`. Its signal dispositions are the caller's (sheepr changes none except SIGCHLD,
 /// `#![no_main]`, see main.rs); the shim restores the caller's mask as its last step before the
 /// exec (PLAN.md §3.1, cell 23). posix_spawn also avoids running Rust code in a forked child.
 fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
     let argv: Vec<CString> = cstrings(cmd).map_err(|e| {
-        say!("sheepdog: {e}");
+        say!("sheepr: {e}");
         125
     })?;
     let Some(exe) = self_exe() else {
-        say!("sheepdog: cannot find its own executable to start the command");
+        say!("sheepr: cannot find its own executable to start the command");
         return Err(125);
     };
     let (mut go, mut er) = ([0i32; 2], [0i32; 2]);
     unsafe {
         if libc::pipe2(go.as_mut_ptr(), libc::O_CLOEXEC) != 0 || libc::pipe2(er.as_mut_ptr(), libc::O_CLOEXEC) != 0 {
-            say!("sheepdog: cannot make a pipe: {}", std::io::Error::last_os_error());
+            say!("sheepr: cannot make a pipe: {}", std::io::Error::last_os_error());
             return Err(125);
         }
         // the shim's ends cross its exec; the shim sets them CLOEXEC again before the command's
@@ -435,7 +435,7 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
     let nonce = hex(&nonce);
     let mask = hex(unsafe { std::slice::from_raw_parts(caller_mask as *const _ as *const u8, std::mem::size_of::<libc::sigset_t>()) });
     let me = unsafe { libc::getpid() };
-    let mut shim: Vec<CString> = ["sheepdog", "__root", &go[0].to_string(), &er[1].to_string(), &me.to_string(), &mask, &nonce, "--"]
+    let mut shim: Vec<CString> = ["sheepr", "__root", &go[0].to_string(), &er[1].to_string(), &me.to_string(), &mask, &nonce, "--"]
         .iter()
         .map(|s| CString::new(*s).unwrap())
         .collect();
@@ -461,9 +461,9 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
             libc::close(go[1]);
             libc::close(er[0]);
         }
-        say!("sheepdog: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
+        say!("sheepr: cannot start the command: {}", std::io::Error::from_raw_os_error(rc));
         // phase 1's posix_spawnp reported a spawn without resources (EAGAIN, ENOMEM) or with too
-        // long arguments (E2BIG) as 126; any other failure is sheepdog's own (it cannot run its
+        // long arguments (E2BIG) as 126; any other failure is sheepr's own (it cannot run its
         // own binary)
         return Err(if rc == libc::EAGAIN || rc == libc::ENOMEM || rc == libc::E2BIG { 126 } else { 125 });
     }
@@ -483,14 +483,14 @@ fn spawn(cmd: &[OsString], caller_mask: &libc::sigset_t) -> Result<Root, i32> {
             Some(_) => "an unexpected answer".to_string(),
             None => "no answer".to_string(),
         };
-        say!("sheepdog: the command could not be started ({why}); it did not run");
+        say!("sheepr: the command could not be started ({why}); it did not run");
         return Err(125);
     }
     unsafe { libc::fcntl(er[0], libc::F_SETFL, libc::O_NONBLOCK) };
     Ok(Root { pid, go: go[1], err: er[0] })
 }
 
-/// `sheepdog __root GO ERR SUP MASK NONCE -- cmd...` (PHASE2.md §1 decision 7): the root before
+/// `sheepr __root GO ERR SUP MASK NONCE -- cmd...` (PHASE2.md §1 decision 7): the root before
 /// its exec. Every signal is blocked on entry (the supervisor's spawn attribute). It sets
 /// PR_SET_PDEATHSIG(SIGKILL), checks that its parent is the supervisor, answers the handshake,
 /// waits for the go byte (EOF: the supervisor is gone, so it never execs), closes its pipe ends
@@ -515,11 +515,11 @@ pub fn root_shim(a: &[OsString]) -> i32 {
         tell(&format!("F{what}\n"));
         unsafe { libc::_exit(125) }
     };
-    let no_pdeath = crate::seam_flag("SHEEPDOG_TEST_SHIM_NO_PDEATHSIG");
-    if crate::seam_flag("SHEEPDOG_TEST_SHIM_PRCTL_FAIL") || (!no_pdeath && unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0) {
+    let no_pdeath = crate::seam_flag("SHEEPR_TEST_SHIM_NO_PDEATHSIG");
+    if crate::seam_flag("SHEEPR_TEST_SHIM_PRCTL_FAIL") || (!no_pdeath && unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } != 0) {
         fail("cannot set PR_SET_PDEATHSIG");
     }
-    if crate::seam_flag("SHEEPDOG_TEST_SHIM_WRONG_PARENT") || unsafe { libc::getppid() } != sup {
+    if crate::seam_flag("SHEEPR_TEST_SHIM_WRONG_PARENT") || unsafe { libc::getppid() } != sup {
         fail("its parent is not the supervisor");
     }
     tell(&format!("H{nonce} 1\n"));
@@ -538,7 +538,7 @@ pub fn root_shim(a: &[OsString]) -> i32 {
         libc::close(go);
         libc::fcntl(err, libc::F_SETFD, libc::FD_CLOEXEC);
     }
-    crate::seam_hold("SHEEPDOG_TEST_HOLD_SHIM");
+    crate::seam_hold("SHEEPR_TEST_HOLD_SHIM");
     let argv = match cstrings(cmd) {
         Ok(v) => v,
         Err(_) => unsafe { libc::_exit(125) },
@@ -581,7 +581,7 @@ pub fn root_shim(a: &[OsString]) -> i32 {
     if eacces && goes_on(last) {
         last = libc::EACCES;
     }
-    say!("sheepdog: cannot run {}: {}", crate::shown(&cmd[0]), std::io::Error::from_raw_os_error(last));
+    say!("sheepr: cannot run {}: {}", crate::shown(&cmd[0]), std::io::Error::from_raw_os_error(last));
     tell(&format!("E{last}\n"));
     unsafe { libc::_exit(if last == libc::ENOENT { 127 } else { 126 }) }
 }
@@ -642,7 +642,7 @@ fn poll_fd(fd: i32, ms: i32) {
     unsafe { libc::poll(&mut p, 1, ms) };
 }
 
-/// If sheepdog starts with children it did not create, it must not become their subreaper, or
+/// If sheepr starts with children it did not create, it must not become their subreaper, or
 /// it adopts them and their orphans as members (review round 3). So it forks once, before
 /// anything else: the child is a fresh supervisor with no children; this process becomes the
 /// relay. Returns Some(code) in the relay, None in the supervisor.
@@ -666,7 +666,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
     }
     // A TERM that is pending now would stay in the relay (pending signals are not inherited
     // across fork) and reach the supervisor only later, possibly after it started the root.
-    // So it ends sheepdog here, before any fork or root (S1 review, P2-1). Remaining window,
+    // So it ends sheepr here, before any fork or root (S1 review, P2-1). Remaining window,
     // accepted: a TERM that reaches the relay after this check and before the fork is
     // forwarded, and if it reaches the supervisor after its own pre-spawn check, the root may
     // start and is then killed at once, never left running (the same as a TERM arriving just
@@ -695,7 +695,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
             }
             -1 => {
                 libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
-                say!("sheepdog: fork failed: {}", std::io::Error::last_os_error());
+                say!("sheepr: fork failed: {}", std::io::Error::last_os_error());
                 Err(125)
             }
             sup => {
@@ -707,12 +707,12 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                 // The supervisor's stop wakes it at once: SIGCHLD is on its signalfd.
                 // the relay's own loop on a signalfd (PHASE1.md S1), created after the fork
                 let fd = signal_fd(&set);
-                crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
+                crate::seam_sleep("SHEEPR_TEST_SLEEP_RELAY_BEFORE_FORWARD_MS");
                 loop {
                     let mut st = 0;
                     if libc::waitpid(sup, &mut st, libc::WNOHANG | libc::WUNTRACED) == sup {
                         if libc::WIFSTOPPED(st) {
-                            crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS");
+                            crate::seam_sleep("SHEEPR_TEST_SLEEP_RELAY_BEFORE_MIRROR_MS");
                             // a TERM (or HUP as leader) already pending is forwarded first, on the
                             // next pass, instead of stopping with it pending (TERM+CONT from
                             // `timeout` in this window would otherwise leave both stopped)
@@ -725,7 +725,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
                             if !(sig.watch_term && crate::pending(libc::SIGTERM)) && !hup && stopped(sup) {
                                 // debug seam: hold between that check and the raise (the supervisor
                                 // can be continued here; the level-triggered continue then frees it)
-                                crate::seam_sleep("SHEEPDOG_TEST_SLEEP_RELAY_BEFORE_RAISE_MS");
+                                crate::seam_sleep("SHEEPR_TEST_SLEEP_RELAY_BEFORE_RAISE_MS");
                                 crate::self_stop(libc::WSTOPSIG(st));
                                 // resumed: the supervisor too, if it is still stopped (a CONT to
                                 // the relay's pid alone); never a CONT to a running supervisor,
@@ -781,7 +781,7 @@ fn relay_if_needed(sig: &crate::Signals) -> Result<Option<i32>, i32> {
 
 pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     if let Some(why) = proc_problem() {
-        say!("sheepdog: {why}, so sheepdog cannot tell which processes are this job's. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was started.");
+        say!("sheepr: {why}, so sheepr cannot tell which processes are this job's. Mount a /proc for this pid namespace (for example unshare --mount-proc). Nothing was started.");
         return 125;
     }
     // PHASE2.md §1 decision 7: an inherited PR_SET_PDEATHSIG (this run is another run's command)
@@ -806,7 +806,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         None | Some("subreaper") => true,
         Some("none") => false,
         Some(m) => {
-            say!("sheepdog: unknown mode {m}");
+            say!("sheepr: unknown mode {m}");
             return 125;
         }
     };
@@ -814,7 +814,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     let is_subreaper = subreaper && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0;
     crate::status::set_tracking(if is_subreaper { "subreaper" } else { "none" });
     if subreaper && !is_subreaper {
-        say!("sheepdog: cannot become a subreaper; tracking is degraded");
+        say!("sheepr: cannot become a subreaper; tracking is degraded");
         crate::trace("degraded".into());
         crate::status::set_degraded("cannot become a subreaper");
     }
@@ -834,15 +834,15 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     crate::status::set_root_pid(root);
     crate::status::set_root("signaled"); // until the root's own end is known
     // the root is journaled before it runs: the shim waits for the go byte
-    if let Some(id) = sheepdog::ident::identity(root) {
+    if let Some(id) = sheepr::ident::identity(root) {
         journal.borrow_mut().record_root(root, id, &a.cmd);
     }
-    crate::seam_hold("SHEEPDOG_TEST_HOLD_BEFORE_GO");
+    crate::seam_hold("SHEEPR_TEST_HOLD_BEFORE_GO");
     // a TERM that came while the root was being journaled: the command never runs (closing the
     // go pipe unsent makes the shim exit without its exec)
     if sig.watch_term && crate::term_pending() {
         shim.abandon();
-        // bounded: a shim that something else stopped never hangs sheepdog; after 2 s it gets
+        // bounded: a shim that something else stopped never hangs sheepr; after 2 s it gets
         // SIGKILL (it is this supervisor's own unreaped child, so its pid cannot be reused)
         let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while unsafe { libc::waitpid(root, std::ptr::null_mut(), libc::WNOHANG) } == 0 {
@@ -871,7 +871,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
     // events coincide (round-7 P3-F4): TERM, then the root's exit, then INT/HUP. No signalfd:
     // poll every 50 ms (a blocked signal stays pending, so nothing is lost).
     let fd = signal_fd(&sig.wait_set());
-    crate::seam_sleep("SHEEPDOG_TEST_SLEEP_AFTER_REGISTER_MS");
+    crate::seam_sleep("SHEEPR_TEST_SLEEP_AFTER_REGISTER_MS");
     let mut exited: Option<libc::c_int> = None;
     // membership while running (PLAN.md §3.2): a member seen on any tick is killed at the end
     // even if it is no longer a descendant by then (sticky, by identity)
@@ -948,7 +948,7 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
         }
         jobs.keep_relay_running(stopped);
         ints.tick(&mut |pg| crate::only_ours(&group_pids(pg), relay, &tracker.known));
-        crate::seam_sleep("SHEEPDOG_TEST_SLEEP_BEFORE_WAIT_MS");
+        crate::seam_sleep("SHEEPR_TEST_SLEEP_BEFORE_WAIT_MS");
         if fd >= 0 {
             poll_fd(fd, tick);
         } else {

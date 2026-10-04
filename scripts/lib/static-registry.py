@@ -6,7 +6,7 @@
 # `python3 -m http.server PORT --bind 127.0.0.1` from DIR. Its cell: tests/dist/t_static_registry.sh.
 import sys, os, json, hashlib, base64, tarfile, shutil
 d, port, skip, tg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-os.makedirs(os.path.join(d, "@lukaso"), exist_ok=True); os.makedirs(os.path.join(d, "t"), exist_ok=True)
+os.makedirs(os.path.join(d, "t"), exist_ok=True)
 for f in sorted(os.listdir(tg)):
     if skip and "darwin" in f: continue
     b = open(os.path.join(tg, f), "rb").read()

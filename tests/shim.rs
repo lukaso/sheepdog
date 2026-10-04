@@ -1,5 +1,5 @@
 //! Phase-2 P1b: the Linux root shim (PHASE2.md §1 decision 7): the root is started through
-//! `sheepdog __root`, which sets PR_SET_PDEATHSIG(SIGKILL), checks its parent, answers a
+//! `sheepr __root`, which sets PR_SET_PDEATHSIG(SIGKILL), checks its parent, answers a
 //! handshake, waits for the go byte (sent after the root is journaled), restores the caller's
 //! mask and searches PATH as posix_spawnp did.
 #![cfg(target_os = "linux")]
@@ -11,17 +11,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-shim-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-shim-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -30,7 +30,7 @@ fn scratch(name: &str) -> PathBuf {
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     s
 }
 
@@ -87,9 +87,9 @@ fn the_root_dies_with_its_supervisor() {
     let d = scratch("pdeath");
     let s = state(&d);
     let ready = d.join("ready");
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--", "/bin/sh", "-c", &format!(r#"touch "{}"; exec sleep 30"#, ready.display())])
-        .env("SHEEPDOG_TEST_STATE", &s)
+        .env("SHEEPR_TEST_STATE", &s)
         .spawn()
         .unwrap();
     let started = wait_for(&ready, 20);
@@ -119,12 +119,12 @@ fn a_shim_that_loses_its_supervisor_never_execs() {
     let d = scratch("eof");
     let s = state(&d);
     let (rel, ready, ran) = (d.join("release"), d.join("ready"), d.join("ran"));
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())])
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
-        .env("SHEEPDOG_TEST_SHIM_NO_PDEATHSIG", "1")
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_SHIM_NO_PDEATHSIG", "1")
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
@@ -144,16 +144,16 @@ fn a_shim_that_loses_its_supervisor_never_execs() {
 }
 
 /// A shim that cannot set PDEATHSIG, or that finds another parent than its supervisor, never
-/// runs the command: the root is `not-started` and sheepdog exits 125 (never 127, "not found").
+/// runs the command: the root is `not-started` and sheepr exits 125 (never 127, "not found").
 #[test]
 fn a_shim_failure_is_not_started() {
-    for seam in ["SHEEPDOG_TEST_SHIM_PRCTL_FAIL", "SHEEPDOG_TEST_SHIM_WRONG_PARENT"] {
+    for seam in ["SHEEPR_TEST_SHIM_PRCTL_FAIL", "SHEEPR_TEST_SHIM_WRONG_PARENT"] {
         let d = scratch(&seam.to_lowercase());
         let (out, ran) = (d.join("status"), d.join("ran"));
         let code = finish(
             Command::new("/bin/sh")
                 .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'touch "{}"' 3>"{}""#, ran.display(), out.display())])
-                .env("SD", sheepdog())
+                .env("SD", sheepr())
                 .env(seam, "1")
                 .spawn()
                 .unwrap(),
@@ -185,7 +185,7 @@ fn the_path_search_matches_phase_one() {
     w(&d.join("b/tool"), "#!/bin/sh\necho ran-b\n", 0o755);
     w(&d.join("c/cwdtool"), "#!/bin/sh\necho ran-cwd\n", 0o755);
     let run = |path: Option<String>, cwd: &Path, cmd: &str| -> (Option<i32>, String) {
-        let mut c = Command::new(sheepdog());
+        let mut c = Command::new(sheepr());
         c.args(["run", "--", cmd]).current_dir(cwd).stdout(std::process::Stdio::piped());
         match path {
             Some(p) => c.env("PATH", p),
@@ -206,11 +206,11 @@ fn the_path_search_matches_phase_one() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// The command holds no fd of sheepdog's (the shim's go and error pipes, the journal): a command
+/// The command holds no fd of sheepr's (the shim's go and error pipes, the journal): a command
 /// that lists its own open fds (`exec ls -l /proc/self/fd`) finds no fd from 3 up that is a pipe,
-/// a socket or a journal. The same listing without sheepdog is the control (it must pass the same
+/// a socket or a journal. The same listing without sheepr is the control (it must pass the same
 /// check, or the harness hands out such fds itself). Under an emulator the translator keeps fds
-/// of the binaries it ran (measured under Rosetta: busybox, sheepdog); those are files, not pipes.
+/// of the binaries it ran (measured under Rosetta: busybox, sheepr); those are files, not pipes.
 #[test]
 fn the_command_holds_no_shim_fd() {
     let d = scratch("fds");
@@ -218,7 +218,7 @@ fn the_command_holds_no_shim_fd() {
         let out = d.join(if under { "under" } else { "plain" });
         let script = format!(r#"exec ls -l /proc/self/fd > "{}""#, out.display());
         let code = if under {
-            finish(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).spawn().unwrap())
+            finish(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).spawn().unwrap())
         } else {
             finish(Command::new("/bin/sh").args(["-c", &script]).spawn().unwrap())
         };
@@ -236,11 +236,11 @@ fn the_command_holds_no_shim_fd() {
     };
     assert!(leaked(false).is_empty(), "control: the harness itself hands the command a pipe");
     let under = leaked(true);
-    assert!(under.is_empty(), "the command holds sheepdog's fds: {under:?}");
+    assert!(under.is_empty(), "the command holds sheepr's fds: {under:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// An inner `sheepdog run` replaces the PDEATHSIG(SIGKILL) it inherits from the outer's shim
+/// An inner `sheepr run` replaces the PDEATHSIG(SIGKILL) it inherits from the outer's shim
 /// with SIGTERM: when the outer is SIGKILLed, the inner gets TERM and kills its own job (its
 /// escapee dies although the inner's root would run for 30 s more). The inner is the outer's
 /// command itself (`exec`): a forked child inherits no PDEATHSIG (stated, PHASE2.md decision 7),
@@ -250,8 +250,8 @@ fn an_inner_run_kills_its_job_when_the_outer_is_sigkilled() {
     let d = scratch("nested");
     let r = d.join("rec");
     let m = format!("29.{:09}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
-    let inner = format!(r#"exec sheepdog run -- /bin/sh -c '"$FX" escape {m} "$R"; sleep 30'"#);
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &inner]).env("FX", fixture()).env("R", &r).spawn().unwrap();
+    let inner = format!(r#"exec sheepr run -- /bin/sh -c '"$FX" escape {m} "$R"; sleep 30'"#);
+    let mut c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &inner]).env("FX", fixture()).env("R", &r).spawn().unwrap();
     let end = Instant::now() + Duration::from_secs(20);
     let mut g = None;
     while g.is_none() && Instant::now() < end {
@@ -280,10 +280,10 @@ fn a_signal_in_the_shim_window_is_the_root_s_death() {
     let (rel, ready, ran, out) = (d.join("release"), d.join("ready"), d.join("ran"), d.join("status"));
     let c = Command::new("/bin/sh")
         .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'touch "{}"' 3>"{}""#, ran.display(), out.display())])
-        .env("SD", sheepdog())
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_SHIM", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SD", sheepr())
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_SHIM", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
@@ -303,8 +303,8 @@ fn a_signal_in_the_shim_window_is_the_root_s_death() {
 
 /// A root killed before its go byte (a SIGKILL from outside while the supervisor journals it)
 /// never takes the supervisor with it: the go byte to a dead reader must not raise SIGPIPE in
-/// sheepdog. The run ends as a root killed by SIGKILL (137), with its status line written.
-/// SIGPIPE is at its default in sheepdog here, as for a shell's command (the test binary ignores
+/// sheepr. The run ends as a root killed by SIGKILL (137), with its status line written.
+/// SIGPIPE is at its default in sheepr here, as for a shell's command (the test binary ignores
 /// it, and a disposition ignored on entry would hide the defect).
 #[test]
 fn a_root_killed_before_its_go_byte_does_not_kill_the_supervisor() {
@@ -321,10 +321,10 @@ fn a_root_killed_before_its_go_byte_does_not_kill_the_supervisor() {
     }
     let c = cmd
         .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'exit 0' 3>"{}""#, out.display())])
-        .env("SD", sheepdog())
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SD", sheepr())
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
@@ -337,18 +337,18 @@ fn a_root_killed_before_its_go_byte_does_not_kill_the_supervisor() {
     let code = finish(c);
     let st = json::parse(std::fs::read_to_string(&out).unwrap_or_default().trim_end()).ok();
     assert!(held && root.is_some());
-    assert_eq!(code, Some(128 + libc::SIGKILL), "sheepdog itself died (SIGPIPE?)");
+    assert_eq!(code, Some(128 + libc::SIGKILL), "sheepr itself died (SIGPIPE?)");
     assert_eq!(st.as_ref().and_then(|j| j.get("root")).and_then(Json::str), Some("signaled"));
     let _ = std::fs::remove_dir_all(&d);
 }
 
 /// With PATH unset, the shim searches the libc's own default, as phase 1's posix_spawnp did: a
-/// tool that exists only in /usr/local/bin gives the same exit code under sheepdog as under a
+/// tool that exists only in /usr/local/bin gives the same exit code under sheepr as under a
 /// direct posix_spawnp (the fixture's `spawnp`) on this libc (musl searches /usr/local/bin,
 /// glibc does not). Runs where /usr/local/bin is writable (the containers' root).
 #[test]
 fn an_unset_path_searches_what_posix_spawnp_searches() {
-    let name = format!("sd-localtool-{}", std::process::id());
+    let name = format!("sr-localtool-{}", std::process::id());
     let tool = Path::new("/usr/local/bin").join(&name);
     if std::fs::write(&tool, "#!/bin/sh\nexit 7\n").is_err() {
         // only the unprivileged leg may lack it; as root this is a red, never a skip
@@ -359,23 +359,23 @@ fn an_unset_path_searches_what_posix_spawnp_searches() {
     std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let code = |prog: &str, args: &[&str]| Command::new(prog).args(args).env_remove("PATH").status().unwrap().code();
     let direct = code(fixture(), &["spawnp", &name]);
-    let under = code(sheepdog(), &["run", "--", &name]);
+    let under = code(sheepr(), &["run", "--", &name]);
     let _ = std::fs::remove_file(&tool);
     assert!(direct == Some(7) || direct == Some(127), "control: {direct:?}");
-    assert_eq!(under, direct, "sheepdog {under:?}, posix_spawnp {direct:?}");
+    assert_eq!(under, direct, "sheepr {under:?}, posix_spawnp {direct:?}");
 }
 
 /// An empty command name is "not found" (127), as posix_spawnp gives it.
 #[test]
 fn an_empty_command_name_is_not_found() {
-    let under = Command::new(sheepdog()).args(["run", "--", ""]).status().unwrap().code();
+    let under = Command::new(sheepr()).args(["run", "--", ""]).status().unwrap().code();
     let direct = Command::new(fixture()).args(["spawnp", ""]).status().unwrap().code();
-    assert_eq!(under, direct, "sheepdog {under:?}, posix_spawnp {direct:?}");
+    assert_eq!(under, direct, "sheepr {under:?}, posix_spawnp {direct:?}");
     assert_eq!(under, Some(127));
 }
 
-/// A TERM that reaches sheepdog before the go byte (while it journals the root) ends the job
-/// before the command runs: the root is `not-started` and sheepdog dies of that TERM.
+/// A TERM that reaches sheepr before the go byte (while it journals the root) ends the job
+/// before the command runs: the root is `not-started` and sheepr dies of that TERM.
 #[test]
 fn a_term_before_the_go_byte_means_the_command_never_runs() {
     let d = scratch("lateterm");
@@ -383,16 +383,16 @@ fn a_term_before_the_go_byte_means_the_command_never_runs() {
     let (rel, ready, ran, out) = (d.join("release"), d.join("ready"), d.join("ran"), d.join("status"));
     let c = Command::new("/bin/sh")
         .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c 'touch "{}"' 3>"{}""#, ran.display(), out.display())])
-        .env("SD", sheepdog())
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SD", sheepr())
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
-    let sd = c.id() as i32; // the shell exec'd sheepdog: same pid
-    let sd_id = sheepdog::ident::identity(sd);
-    if let Some(id) = sd_id {
+    let sd = c.id() as i32; // the shell exec'd sheepr: same pid
+    let sr_id = sheepr::ident::identity(sd);
+    if let Some(id) = sr_id {
         common::send(sd, id, libc::SIGTERM);
     }
     std::thread::sleep(Duration::from_millis(100));
@@ -400,26 +400,26 @@ fn a_term_before_the_go_byte_means_the_command_never_runs() {
     let code = finish(c);
     std::thread::sleep(Duration::from_millis(200));
     let st = json::parse(std::fs::read_to_string(&out).unwrap_or_default().trim_end()).ok();
-    assert!(held && sd_id.is_some());
+    assert!(held && sr_id.is_some());
     assert!(!ran.exists(), "the command ran after the TERM");
-    assert_eq!(code, None, "sheepdog dies of the TERM");
+    assert_eq!(code, None, "sheepr dies of the TERM");
     assert_eq!(st.as_ref().and_then(|j| j.get("root")).and_then(Json::str), Some("not-started"));
     let _ = std::fs::remove_dir_all(&d);
 }
 
 /// The TERM-before-go path never hangs on a shim that something else stopped: the shim is
-/// SIGSTOPped while the go byte is held, then sheepdog gets TERM; it still ends (bounded wait,
+/// SIGSTOPped while the go byte is held, then sheepr gets TERM; it still ends (bounded wait,
 /// then SIGKILL to the shim, its own unreaped child).
 #[test]
 fn a_term_before_go_ends_even_with_a_stopped_shim() {
     let d = scratch("stoppedshim");
     let s = state(&d);
     let (rel, ready) = (d.join("release"), d.join("ready"));
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--", "/bin/sh", "-c", "exit 0"])
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_BEFORE_GO", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_BEFORE_GO", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
@@ -446,7 +446,7 @@ fn a_term_before_go_ends_even_with_a_stopped_shim() {
         common::send(r.0, r.1, libc::SIGKILL);
     }
     assert!(held && root.is_some());
-    assert!(ended, "sheepdog hung on the stopped shim");
+    assert!(ended, "sheepr hung on the stopped shim");
     let _ = std::fs::remove_dir_all(&d);
 }
 

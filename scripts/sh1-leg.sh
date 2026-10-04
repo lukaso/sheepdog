@@ -7,27 +7,27 @@ set -u
 T=/tgt/debug
 [ "$$" = 1 ] || { echo "this shell is not PID 1 ($$)"; exit 3; }
 # the test environment: every process here carries the tag, so the wall lets kill act
-export SHEEPDOG_TEST_TAG=sh1leg
+export SHEEPR_TEST_TAG=sh1leg
 W=sdstrshone
 D=/tmp/$W
 mkdir -p $D
-$T/sd-fixture sigcount $D/child &
-$T/sd-fixture stray $D orphan
+$T/sr-fixture sigcount $D/child &
+$T/sr-fixture stray $D orphan
 i=0; while [ ! -s $D/child ] && [ $i -lt 500 ]; do sleep 0.02; i=$((i+1)); done
 child=$(cut -d' ' -f1 $D/child); cid=$(cut -d' ' -f2 $D/child)
 orphan=$(cut -d' ' -f1 $D/orphan)
-$T/sheepdog strays --json --cmd $W > $D/list
+$T/sheepr strays --json --cmd $W > $D/list
 echo "listed: $(wc -l < $D/list) row(s)"; cat $D/list | cut -c1-200
 grep -q "\"pid\":$child,.*\"pid1_child\":true" $D/list || { echo "FAIL: the child of PID 1 is not listed as pid1-child"; exit 1; }
 # strays never lists its own process (here a child of PID 1, so it would match)
-if grep -q '"cmd":"[^"]*sheepdog strays' $D/list; then echo "FAIL: strays listed itself"; exit 1; fi
-$T/sheepdog strays --kill --yes --cmd $W; echo "strays --kill: exit $?"
+if grep -q '"cmd":"[^"]*sheepr strays' $D/list; then echo "FAIL: strays listed itself"; exit 1; fi
+$T/sheepr strays --kill --yes --cmd $W; echo "strays --kill: exit $?"
 sleep 1
 rc=0
 if [ -d /proc/$child ] && [ ! -s $D/child.sig ]; then echo "child of PID 1: alive, no signal"; else echo "FAIL: the child of PID 1 was signalled or killed"; rc=1; fi
 if [ -d /proc/$orphan ]; then echo "adopted orphan: alive (skipped as well)"; else echo "FAIL: the adopted orphan was killed without being named"; rc=1; fi
 # control: named, the child is killed
-$T/sheepdog strays --kill --yes --pid "$child:$cid" --cmd $W; echo "named: exit $?"
+$T/sheepr strays --kill --yes --pid "$child:$cid" --cmd $W; echo "named: exit $?"
 i=0; while [ -d /proc/$child ] && [ "$(cut -d' ' -f3 /proc/$child/stat 2>/dev/null)" != Z ] && [ $i -lt 250 ]; do sleep 0.02; i=$((i+1)); done
 if [ -d /proc/$child ] && [ "$(cut -d' ' -f3 /proc/$child/stat)" != Z ]; then echo "FAIL (control): named with --pid, the child survived"; rc=1; else echo "control: named, the child is gone"; fi
 exit $rc

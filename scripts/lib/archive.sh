@@ -1,14 +1,14 @@
 #!/bin/sh
 # The macOS release archive (PHASE3.md §1.5).
 #
-#   archive.sh make APP OUT.tar.gz          tar APP (Sheepdog.app) with no xattrs, ACLs or mac
+#   archive.sh make APP OUT.tar.gz          tar APP (Sheepr.app) with no xattrs, ACLs or mac
 #                                           metadata, owners 0/0 with no names
 #   archive.sh check ARCHIVE [--signed|--signed-unstapled]
 #                                           exit 0 only if ARCHIVE holds exactly the bundle
 #
 # The default macOS tar stores com.apple.provenance and any com.apple.quarantine in pax headers
 # that `tar -t` does not show, and extraction restores them; it also stores the user's name.
-# check: the regular files are exactly Sheepdog.app/Contents/Info.plist and .../MacOS/sheepdog
+# check: the regular files are exactly Sheepr.app/Contents/Info.plist and .../MacOS/sheepr
 # (with --signed also .../_CodeSignature/CodeResources and the staple ticket .../CodeResources;
 # with --signed-unstapled, the control mode's, the signature and no ticket),
 # the directories exactly their parents, every entry owned 0/0 with no names, no xattr pax header,
@@ -22,24 +22,24 @@ case $1 in
   make)
     [ $# -eq 3 ] || usage
     app=$2 outf=$3
-    [ "$(basename "$app")" = Sheepdog.app ] && [ -d "$app" ] || bad "not a Sheepdog.app: $app"
+    [ "$(basename "$app")" = Sheepr.app ] && [ -d "$app" ] || bad "not a Sheepr.app: $app"
     (cd "$(dirname "$app")" && tar --no-xattrs --no-mac-metadata --no-acls --uid 0 --gid 0 --uname '' --gname '' \
-      -czf "$outf" Sheepdog.app) || bad "tar failed"
+      -czf "$outf" Sheepr.app) || bad "tar failed"
     ;;
   check)
     arc=$2 signed=no
     [ $# -le 3 ] || usage
     [ $# -eq 3 ] && case $3 in --signed) signed=yes ;; --signed-unstapled) signed=unstapled ;; *) usage ;; esac
     [ -f "$arc" ] || bad "no archive $arc"
-    t=$(mktemp -d /private/tmp/sd-archive.XXXXXX 2>/dev/null || mktemp -d) || exit 1
+    t=$(mktemp -d /private/tmp/sr-archive.XXXXXX 2>/dev/null || mktemp -d) || exit 1
     trap 'rm -rf "$t"' EXIT
     trap 'rm -rf "$t"; exit 1' HUP INT TERM
-    want="Sheepdog.app/Contents/Info.plist
-Sheepdog.app/Contents/MacOS/sheepdog"
+    want="Sheepr.app/Contents/Info.plist
+Sheepr.app/Contents/MacOS/sheepr"
     [ $signed != no ] && want="$want
-Sheepdog.app/Contents/_CodeSignature/CodeResources"
+Sheepr.app/Contents/_CodeSignature/CodeResources"
     [ $signed = yes ] && want="$want
-Sheepdog.app/Contents/CodeResources"
+Sheepr.app/Contents/CodeResources"
     want=$(printf '%s\n' "$want" | sort)
     wantdirs=$(printf '%s\n' "$want" | while IFS= read -r f; do d=$(dirname "$f"); while [ "$d" != . ]; do echo "$d/"; d=$(dirname "$d"); done; done | sort -u)
     # the listing: regular files and directories, owners

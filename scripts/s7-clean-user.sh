@@ -3,10 +3,10 @@
 # `prep` has run. Its cell: tests/dist/t_s7_clean_user.sh.
 #
 #   The operator (an admin), from the repo:
-#     s7-clean-user.sh prep RC-DIR     make /Users/Shared/sd-s7 from a signed rc's output directory
+#     s7-clean-user.sh prep RC-DIR     make /Users/Shared/sr-s7 from a signed rc's output directory
 #     s7-clean-user.sh brew-after      after the leg: nothing of it reached /opt/homebrew or your
-#                                      own Sheepdog files
-#   The test user (a standard user), as `sh /Users/Shared/sd-s7/s7-clean-user.sh ...`:
+#                                      own Sheepr files
+#   The test user (a standard user), as `sh /Users/Shared/sr-s7/s7-clean-user.sh ...`:
 #     tools                            Homebrew, node and pnpm (pinned, checked) into this home
 #     channel npm|pnpm|cask|install-sh install one way, check it, then the Full Disk Access steps
 #     uninstall CHANNEL                remove it again (run it again to finish an interrupted one;
@@ -14,10 +14,10 @@
 #     finish                           leave this user ready for the post-publish check (§5 step 6)
 #
 # The wall: `prep` and `brew-after` refuse a user not in `admin`; every other subcommand refuses a
-# user in `admin`, the owner of /Users/Shared/sd-s7, or a missing /Users/Shared/sd-s7, with exit 3,
+# user in `admin`, the owner of /Users/Shared/sr-s7, or a missing /Users/Shared/sr-s7, with exit 3,
 # before it writes anything. Its inputs come from /usr/bin/id and /usr/bin/stat only.
-# SD_S7_DIR and SD_S7_BREW move `prep`'s and `brew-after`'s directory and Homebrew prefix (for
-# the cell); the test user's subcommands always use /Users/Shared/sd-s7. SD_S7_LIB=1 when the file
+# SR_S7_DIR and SR_S7_BREW move `prep`'s and `brew-after`'s directory and Homebrew prefix (for
+# the cell); the test user's subcommands always use /Users/Shared/sr-s7. SR_S7_LIB=1 when the file
 # is sourced defines the functions and runs nothing.
 # The state, ~/.s7-channel: `channel=`, `entry=`, a `bundle=` per bundle found, and `granted=yes`
 # whenever a grant may be live. The flag lives in that file only: every read sets it first and only
@@ -27,8 +27,8 @@
 # when the entry is gone, only `uninstall CHANNEL --operator-removed-grant`, the operator's
 # statement, recorded first, clears it.
 set -u
-S7_ID=com.lukaso.sheepdog
-S7_DIR=/Users/Shared/sd-s7
+S7_ID=com.lukaso.sheepr
+S7_DIR=/Users/Shared/sr-s7
 S7_LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 # pinned, measured 2026-10-02 (PHASE3.md S7)
 S7_BREW_TAG=7.0.7
@@ -63,7 +63,7 @@ s7_wall_inputs() {
   /usr/bin/id -Gn; /usr/bin/id -u
   if [ -d "$1" ] && [ ! -L "$1" ]; then /usr/bin/stat -f %u "$1"; else echo; fi
 }
-# s7_walled ROLE DIR: exit 3 unless the wall allows this user (the entry passes /Users/Shared/sd-s7)
+# s7_walled ROLE DIR: exit 3 unless the wall allows this user (the entry passes /Users/Shared/sr-s7)
 s7_walled() {
   w_i=$(s7_wall_inputs "$2"; echo .)
   w_g=$(printf '%s\n' "$w_i" | sed -n 1p) w_u=$(printf '%s\n' "$w_i" | sed -n 2p) w_o=$(printf '%s\n' "$w_i" | sed -n 3p)
@@ -148,7 +148,7 @@ s7_uninstall() {
       u_t=$(mktemp -d "${TMPDIR:-/tmp}/s7-un.XXXXXX") || return 1
       u_k=$(s7_read_one "$u_e" "$u_t"); rm -rf "$u_t"
       if [ "$u_k" != denied ]; then
-        echo "s7: a Full Disk Access grant for Sheepdog may remain (the read: $u_k). Remove the Sheepdog row with − in Full Disk Access; if no row shows, the operator runs, in their own account: tccutil reset SystemPolicyAllFiles $S7_ID. Then run 'uninstall $1' again." >&2
+        echo "s7: a Full Disk Access grant for Sheepr may remain (the read: $u_k). Remove the Sheepr row with − in Full Disk Access; if no row shows, the operator runs, in their own account: tccutil reset SystemPolicyAllFiles $S7_ID. Then run 'uninstall $1' again." >&2
         return 1
       fi
       s7_flag no || return 1
@@ -158,27 +158,27 @@ s7_uninstall() {
         || { echo "s7: the statement cannot be recorded in $S7_DIR/results: the grant flag stays" >&2; return 1; }
       s7_flag no || return 1
     else
-      echo "s7: a Full Disk Access grant for Sheepdog may remain, and the entry ($u_e) is gone, so no read can show it is not. When the operator has removed it (tccutil reset SystemPolicyAllFiles $S7_ID in their own account, or − in their own System Settings), run: uninstall $1 --operator-removed-grant" >&2
+      echo "s7: a Full Disk Access grant for Sheepr may remain, and the entry ($u_e) is gone, so no read can show it is not. When the operator has removed it (tccutil reset SystemPolicyAllFiles $S7_ID in their own account, or − in their own System Settings), run: uninstall $1 --operator-removed-grant" >&2
       return 1
     fi
   fi
   printf '%s\n' "$u_bl" | while IFS= read -r u_b; do [ -n "$u_b" ] && [ -d "$u_b" ] && "$S7_LSREG" -u "$u_b"; done
   case $1 in
-    install-sh) rm -rf "${HOME:?}/Applications/Sheepdog.app" "${HOME:?}/.local/bin/sheepdog" ;;
-    cask) if [ -d "$HOME/homebrew/Caskroom/sheepdog" ]; then
+    install-sh) rm -rf "${HOME:?}/Applications/Sheepr.app" "${HOME:?}/.local/bin/sheepr" ;;
+    cask) if [ -d "$HOME/homebrew/Caskroom/sheepr" ]; then
             u_o=$(mktemp "${TMPDIR:-/tmp}/s7-brew.XXXXXX") || return 1
-            s7_brew uninstall --cask s7/local/sheepdog > "$u_o" 2>&1 || { cat "$u_o" >&2; rm -f "$u_o"; return 1; }
+            s7_brew uninstall --cask s7/local/sheepr > "$u_o" 2>&1 || { cat "$u_o" >&2; rm -f "$u_o"; return 1; }
             cat "$u_o"; s7_deprecations "$u_o" || u_dep=$(tr '\n' ' ' < "$u_o"); rm -f "$u_o"
           fi ;;
-    npm) if [ -d "$HOME/npm-global/lib/node_modules/@lukaso/sheepdog" ]; then s7_npm rm -g @lukaso/sheepdog || return 1; fi ;;
+    npm) if [ -d "$HOME/npm-global/lib/node_modules/sheepr" ]; then s7_npm rm -g sheepr || return 1; fi ;;
     pnpm)
-      for u_x in "${HOME:?}"/pnpm/global/*/node_modules/@lukaso/sheepdog; do
+      for u_x in "${HOME:?}"/pnpm/global/*/node_modules/sheepr; do
         [ -e "$u_x" ] || [ -L "$u_x" ] || continue
-        s7_pnpm rm -g @lukaso/sheepdog || return 1; break
+        s7_pnpm rm -g sheepr || return 1; break
       done
       # pnpm rm -g leaves both packages in its global virtual store (measured, pnpm 10.18.2), the
       # bundle included: recorded (the README's line leaves it too), then removed
-      for u_x in "${HOME:?}"/pnpm/global/*/.pnpm/@lukaso+sheepdog@* "${HOME:?}"/pnpm/global/*/.pnpm/@lukaso+sheepdog-darwin-universal@*; do
+      for u_x in "${HOME:?}"/pnpm/global/*/.pnpm/sheepr@* "${HOME:?}"/pnpm/global/*/.pnpm/sheepr-darwin-universal@*; do
         [ -e "$u_x" ] || continue
         echo "s7: pnpm rm -g left $u_x: removing it"
         [ ! -w "$S7_DIR/results" ] || echo "  uninstall: pnpm rm -g left $u_x (removed by the helper)" >> "$S7_DIR/results/pnpm.txt"
@@ -225,10 +225,10 @@ s7_listing() {
       echo "entry Library/Taps/${l_u##*/}"
       for l_r in "$l_u"/*; do [ -e "$l_r" ] && echo "entry Library/Taps/${l_u##*/}/${l_r##*/}"; done
     done
-    if [ -L "$2/.local/bin/sheepdog" ]; then echo "ophome-link $(readlink "$2/.local/bin/sheepdog")"
-    elif [ -e "$2/.local/bin/sheepdog" ]; then echo "ophome-link a file"; else echo "ophome-link absent"; fi
+    if [ -L "$2/.local/bin/sheepr" ]; then echo "ophome-link $(readlink "$2/.local/bin/sheepr")"
+    elif [ -e "$2/.local/bin/sheepr" ]; then echo "ophome-link a file"; else echo "ophome-link absent"; fi
   } > "$l_t" || { rm -f "$l_t"; return 1; }
-  python3 - "$2/Applications/Sheepdog.app" >> "$l_t" <<'PY' || { rm -f "$l_t"; return 1; }
+  python3 - "$2/Applications/Sheepr.app" >> "$l_t" <<'PY' || { rm -f "$l_t"; return 1; }
 import os, sys, stat, hashlib
 r = sys.argv[1]
 if not os.path.lexists(r): print("ophome-app absent"); sys.exit()
@@ -252,7 +252,7 @@ s7_cmd_prep() {
   s7_walled operator "$S7_DIR"
   [ $# = 1 ] || { echo "usage: s7-clean-user.sh prep RC-DIR" >&2; exit 2; }
   p_rc=$(cd "$1" 2>/dev/null && pwd -P) || s7_die "no directory $1"
-  p_d=${SD_S7_DIR:-/Users/Shared/sd-s7} p_b=${SD_S7_BREW:-/opt/homebrew}
+  p_d=${SR_S7_DIR:-/Users/Shared/sr-s7} p_b=${SR_S7_BREW:-/opt/homebrew}
   p_root=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)
   for p_f in scripts/lib/exec-guard.sh scripts/release.conf scripts/lib/static-registry.py scripts/lib/render-cask.sh scripts/smoke.sh tests/lib/tree-same.py; do
     [ -f "$p_root/$p_f" ] || s7_die "run prep from the repo's scripts/s7-clean-user.sh (no $p_f)"
@@ -266,25 +266,25 @@ tag = os.path.basename(d)
 if m.get("mode") != "signed" or m.get("control") is not False: sys.exit("the manifest is not a signed release's (mode %r, control %r)" % (m.get("mode"), m.get("control")))
 if m.get("tag") != tag: sys.exit("the manifest's tag %r is not the directory's name %r" % (m.get("tag"), tag))
 v = m["tag"][1:]; files = {f["name"]: f["sha256"] for f in m["files"]}
-need = ["sheepdog-macos-universal.tar.gz", "install.sh"] + ["lukaso-%s-%s.tgz" % (p, v) for p in ("sheepdog", "sheepdog-darwin-universal", "sheepdog-linux-arm64", "sheepdog-linux-x64")]
+need = ["sheepr-macos-universal.tar.gz", "install.sh"] + ["lukaso-%s-%s.tgz" % (p, v) for p in ("sheepr", "sheepr-darwin-universal", "sheepr-linux-arm64", "sheepr-linux-x64")]
 for n in need:
     if n not in files: sys.exit("the manifest does not list %s" % n)
     if hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest() != files[n]: sys.exit("%s is not the manifest's" % n)
-print(v, files["sheepdog-macos-universal.tar.gz"])
+print(v, files["sheepr-macos-universal.tar.gz"])
 PY
 ) || s7_die "$p_rc: refused"
   p_v=${p_m% *} p_sha=${p_m#* }
   (cd "$p_rc" && /usr/bin/shasum -a 256 --strict -c SHA256SUMS > /dev/null 2>&1) || s7_die "$p_rc: SHA256SUMS does not hold"
   p_t=$(mktemp -d "${TMPDIR:-/tmp}/s7-prep.XXXXXX") || exit 1
-  /usr/bin/tar -xzOf "$p_rc/sheepdog-macos-universal.tar.gz" Sheepdog.app/Contents/Info.plist > "$p_t/Info.plist" 2>/dev/null || { rm -rf "$p_t"; s7_die "$p_rc: no Info.plist in the archive"; }
-  if /usr/bin/plutil -extract SheepdogControlBuild raw "$p_t/Info.plist" > /dev/null 2>&1; then rm -rf "$p_t"; s7_die "$p_rc: the archive's bundle carries the control marker"; fi
-  sh "$p_root/scripts/lib/render-cask.sh" "$p_v" "$p_sha" "$p_t/sheepdog.rb" && cmp -s "$p_t/sheepdog.rb" "$p_rc/sheepdog.rb" \
-    || { rm -rf "$p_t"; s7_die "$p_rc: sheepdog.rb is not the cask rendered for $p_v"; }
+  /usr/bin/tar -xzOf "$p_rc/sheepr-macos-universal.tar.gz" Sheepr.app/Contents/Info.plist > "$p_t/Info.plist" 2>/dev/null || { rm -rf "$p_t"; s7_die "$p_rc: no Info.plist in the archive"; }
+  if /usr/bin/plutil -extract SheeprControlBuild raw "$p_t/Info.plist" > /dev/null 2>&1; then rm -rf "$p_t"; s7_die "$p_rc: the archive's bundle carries the control marker"; fi
+  sh "$p_root/scripts/lib/render-cask.sh" "$p_v" "$p_sha" "$p_t/sheepr.rb" && cmp -s "$p_t/sheepr.rb" "$p_rc/sheepr.rb" \
+    || { rm -rf "$p_t"; s7_die "$p_rc: sheepr.rb is not the cask rendered for $p_v"; }
   rm -rf "$p_t"
   mkdir "$p_d" || s7_die "cannot make $p_d"
   mkdir "$p_d/lib" "$p_d/door" "$p_d/door/lib" "$p_d/npm" "$p_d/results" || s7_die "cannot fill $p_d"
-  cp "$p_rc/install.sh" "$p_rc/SHA256SUMS" "$p_rc/MANIFEST.json" "$p_rc/sheepdog-macos-universal.tar.gz" "$p_rc/sheepdog.rb" "$p_d/" \
-    && cp "$p_rc/lukaso-sheepdog-$p_v.tgz" "$p_rc/lukaso-sheepdog-darwin-universal-$p_v.tgz" "$p_rc/lukaso-sheepdog-linux-arm64-$p_v.tgz" "$p_rc/lukaso-sheepdog-linux-x64-$p_v.tgz" "$p_d/npm/" \
+  cp "$p_rc/install.sh" "$p_rc/SHA256SUMS" "$p_rc/MANIFEST.json" "$p_rc/sheepr-macos-universal.tar.gz" "$p_rc/sheepr.rb" "$p_d/" \
+    && cp "$p_rc/sheepr-$p_v.tgz" "$p_rc/sheepr-darwin-universal-$p_v.tgz" "$p_rc/sheepr-linux-arm64-$p_v.tgz" "$p_rc/sheepr-linux-x64-$p_v.tgz" "$p_d/npm/" \
     && cp "$p_root/scripts/smoke.sh" "$p_d/smoke.sh" && cp "$0" "$p_d/s7-clean-user.sh" \
     && cp "$p_root/scripts/lib/static-registry.py" "$p_root/tests/lib/tree-same.py" "$p_d/lib/" \
     && cp "$p_root/scripts/lib/exec-guard.sh" "$p_d/door/lib/exec-guard.sh" && cp "$p_root/scripts/release.conf" "$p_d/door/release.conf" \
@@ -297,19 +297,19 @@ PY
 
 s7_cmd_brew_after() {
   s7_walled operator "$S7_DIR"
-  a_d=${SD_S7_DIR:-/Users/Shared/sd-s7} a_b=${SD_S7_BREW:-/opt/homebrew}
+  a_d=${SR_S7_DIR:-/Users/Shared/sr-s7} a_b=${SR_S7_BREW:-/opt/homebrew}
   [ -f "$a_d/brew-before.txt" ] || s7_die "no $a_d/brew-before.txt"
   a_p=$(sed -n 's/^prefix //p' "$a_d/brew-before.txt")
   echo "s7: reading $a_b"
   [ "$a_p" = "$a_b" ] || { echo "s7: brew-before.txt was taken from $a_p, not $a_b" >&2; exit 2; }
-  a_now=$(s7_listing "$a_b" "$HOME") || s7_die "cannot list $a_b or your own Sheepdog files"
+  a_now=$(s7_listing "$a_b" "$HOME") || s7_die "cannot list $a_b or your own Sheepr files"
   a_diff=$(printf '%s\n' "$a_now" | diff "$a_d/brew-before.txt" - | grep '^[<>]')
-  [ -n "$a_diff" ] || { echo "s7: nothing changed in $a_b or in your own Sheepdog files"; return 0; }
-  a_pat='sheepdog|Library/Taps/s7(/|$)|^[<>] ophome-|^[<>] prefix '
+  [ -n "$a_diff" ] || { echo "s7: nothing changed in $a_b or in your own Sheepr files"; return 0; }
+  a_pat='sheepr|Library/Taps/s7(/|$)|^[<>] ophome-|^[<>] prefix '
   printf '%s\n' "$a_diff" | grep -viE "$a_pat" | sed 's/^/s7: information, not the leg'"'"'s: /'
   a_hard=$(printf '%s\n' "$a_diff" | grep -iE "$a_pat")
   [ -z "$a_hard" ] || { printf '%s\n' "$a_hard" | sed 's/^/s7: CHANGED: /' >&2; exit 1; }
-  echo "s7: nothing of the leg's in $a_b or in your own Sheepdog files"
+  echo "s7: nothing of the leg's in $a_b or in your own Sheepr files"
 }
 
 s7_fetch() { # url sha256 out
@@ -421,65 +421,65 @@ s7_cmd_channel() {
       /usr/bin/python3 "$S7_DIR/lib/static-registry.py" "$HOME/s7-reg" "$c_port" "" "$S7_DIR/npm" || s7_stop "install: the registry"
       printf 'registry=http://127.0.0.1:%s/\n' "$c_port" > "$HOME/s7-reg/npmrc"
       if [ "$c_c" = npm ]; then
-        c_e=$HOME/npm-global/bin/sheepdog c_root=$HOME/npm-global; s7_save
-        (export npm_config_userconfig="$HOME/s7-reg/npmrc"; s7_npm i -g --registry "http://127.0.0.1:$c_port/" "@lukaso/sheepdog@$c_ver") > "$c_t/inst" 2>&1 \
+        c_e=$HOME/npm-global/bin/sheepr c_root=$HOME/npm-global; s7_save
+        (export npm_config_userconfig="$HOME/s7-reg/npmrc"; s7_npm i -g --registry "http://127.0.0.1:$c_port/" "sheepr@$c_ver") > "$c_t/inst" 2>&1 \
           || { cat "$c_t/inst" >&2; s7_stop "install: npm i -g failed"; }
       else
-        c_e=$HOME/pnpm/sheepdog c_root=$HOME/pnpm; s7_save
-        (export npm_config_userconfig="$HOME/s7-reg/npmrc"; s7_pnpm add -g --registry "http://127.0.0.1:$c_port/" "@lukaso/sheepdog@$c_ver") > "$c_t/inst" 2>&1 \
+        c_e=$HOME/pnpm/sheepr c_root=$HOME/pnpm; s7_save
+        (export npm_config_userconfig="$HOME/s7-reg/npmrc"; s7_pnpm add -g --registry "http://127.0.0.1:$c_port/" "sheepr@$c_ver") > "$c_t/inst" 2>&1 \
           || { cat "$c_t/inst" >&2; s7_stop "install: pnpm add -g failed"; }
       fi
       kill "$c_srv" 2>/dev/null; c_srv=""
-      c_bl=$(find "$c_root" -name Sheepdog.app -type d -prune | while IFS= read -r c_x; do (cd -P "$c_x" && pwd -P); done); s7_save
-      [ "$(printf '%s\n' "$c_bl" | grep -c .)" = 1 ] || s7_stop "install: not exactly one Sheepdog.app under $c_root: $(printf '%s ' $c_bl)"
+      c_bl=$(find "$c_root" -name Sheepr.app -type d -prune | while IFS= read -r c_x; do (cd -P "$c_x" && pwd -P); done); s7_save
+      [ "$(printf '%s\n' "$c_bl" | grep -c .)" = 1 ] || s7_stop "install: not exactly one Sheepr.app under $c_root: $(printf '%s ' $c_bl)"
       c_b=$c_bl
-      /usr/bin/tar -xzOf "$S7_DIR/npm/lukaso-sheepdog-$c_ver.tgz" package/bin/sheepdog > "$c_t/launcher" || s7_stop "install: no launcher in the package"
-      find "$c_root" -path '*/@lukaso/sheepdog/bin/sheepdog' -type f > "$c_t/launchers"
+      /usr/bin/tar -xzOf "$S7_DIR/npm/sheepr-$c_ver.tgz" package/bin/sheepr > "$c_t/launcher" || s7_stop "install: no launcher in the package"
+      find "$c_root" -path '*/sheepr/bin/sheepr' -type f > "$c_t/launchers"
       [ -s "$c_t/launchers" ] || s7_stop "install: no launcher under $c_root"
       while IFS= read -r c_l; do cmp -s "$c_l" "$c_t/launcher" || s7_stop "install: the launcher $c_l is not the package's"; done < "$c_t/launchers" ;;
     cask)
-      c_e=$HOME/homebrew/bin/sheepdog c_b=$HOME/Applications/Sheepdog.app; c_bl=$c_b; s7_save
+      c_e=$HOME/homebrew/bin/sheepr c_b=$HOME/Applications/Sheepr.app; c_bl=$c_b; s7_save
       c_tap=$HOME/homebrew/Library/Taps/s7/homebrew-local
       [ -d "$c_tap" ] || s7_brew tap-new --no-git s7/local > "$c_t/tap" 2>&1 || { cat "$c_t/tap" >&2; s7_stop "install: brew tap-new"; }
-      mkdir -p "$c_tap/Casks" && cp "$S7_DIR/sheepdog.rb" "$c_tap/Casks/sheepdog.rb" || s7_stop "install: the tap's Casks/"
-      s7_brew audit --cask --strict s7/local/sheepdog > "$c_t/audit" 2>&1; c_ar=$?
+      mkdir -p "$c_tap/Casks" && cp "$S7_DIR/sheepr.rb" "$c_tap/Casks/sheepr.rb" || s7_stop "install: the tap's Casks/"
+      s7_brew audit --cask --strict s7/local/sheepr > "$c_t/audit" 2>&1; c_ar=$?
       s7_rec "  brew audit --cask --strict (the shipped text): exit $c_ar: $(tr '\n' ' ' < "$c_t/audit")"
       s7_deprecations "$c_t/audit" || s7_stop "audit: brew printed a deprecation; the shipped cask must load without one"
-      s7_cask_local "$S7_DIR/sheepdog.rb" "file://$S7_DIR/sheepdog-macos-universal.tar.gz" "$c_tap/Casks/sheepdog.rb" || s7_stop "install: the cask's local copy"
-      s7_brew install --cask --appdir="$HOME/Applications" s7/local/sheepdog > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: brew install --cask"; }
+      s7_cask_local "$S7_DIR/sheepr.rb" "file://$S7_DIR/sheepr-macos-universal.tar.gz" "$c_tap/Casks/sheepr.rb" || s7_stop "install: the cask's local copy"
+      s7_brew install --cask --appdir="$HOME/Applications" s7/local/sheepr > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: brew install --cask"; }
       s7_deprecations "$c_t/inst" || { cat "$c_t/inst" >&2; s7_stop "install: brew printed a deprecation (above); the shipped cask must load without one"; } ;;
     install-sh)
-      c_e=$HOME/.local/bin/sheepdog c_b=$HOME/Applications/Sheepdog.app; c_bl=$c_b; s7_save
+      c_e=$HOME/.local/bin/sheepr c_b=$HOME/Applications/Sheepr.app; c_bl=$c_b; s7_save
       rm -rf "$HOME/s7-serve"; mkdir -p "$HOME/s7-serve"
-      cp "$S7_DIR/SHA256SUMS" "$S7_DIR/sheepdog-macos-universal.tar.gz" "$HOME/s7-serve/" || s7_stop "install: the served copy"
+      cp "$S7_DIR/SHA256SUMS" "$S7_DIR/sheepr-macos-universal.tar.gz" "$HOME/s7-serve/" || s7_stop "install: the served copy"
       s7_serve "$HOME/s7-serve"
-      SHEEPDOG_INSTALL_BASE="http://127.0.0.1:$c_port" sh "$S7_DIR/install.sh" > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: install.sh"; }
+      SHEEPR_INSTALL_BASE="http://127.0.0.1:$c_port" sh "$S7_DIR/install.sh" > "$c_t/inst" 2>&1 || { cat "$c_t/inst" >&2; s7_stop "install: install.sh"; }
       kill "$c_srv" 2>/dev/null; c_srv=""; rm -rf "$HOME/s7-serve" ;;
   esac
   s7_rec "  installed: entry $c_e, bundle $c_b"
   # judged before its first run: the door, then the bundle against the rc archive's
-  /bin/sh -p "$S7_DIR/door/lib/exec-guard.sh" check "$c_b/Contents/MacOS/sheepdog" 2> "$c_t/door" || s7_stop "the door refuses $c_b: $(cat "$c_t/door")"
-  mkdir "$c_t/ref.noindex" && /usr/bin/tar -xzf "$S7_DIR/sheepdog-macos-universal.tar.gz" -C "$c_t/ref.noindex" \
-    && /usr/bin/python3 "$S7_DIR/lib/tree-same.py" "$c_b" "$c_t/ref.noindex/Sheepdog.app" > "$c_t/ts" 2>&1 || s7_stop "the bundle is not the rc archive's: $(cat "$c_t/ts")"
+  /bin/sh -p "$S7_DIR/door/lib/exec-guard.sh" check "$c_b/Contents/MacOS/sheepr" 2> "$c_t/door" || s7_stop "the door refuses $c_b: $(cat "$c_t/door")"
+  mkdir "$c_t/ref.noindex" && /usr/bin/tar -xzf "$S7_DIR/sheepr-macos-universal.tar.gz" -C "$c_t/ref.noindex" \
+    && /usr/bin/python3 "$S7_DIR/lib/tree-same.py" "$c_b" "$c_t/ref.noindex/Sheepr.app" > "$c_t/ts" 2>&1 || s7_stop "the bundle is not the rc archive's: $(cat "$c_t/ts")"
   rm -rf "$c_t/ref.noindex"
-  [ "$(command -v sheepdog)" = "$c_e" ] || s7_stop "the PATH's sheepdog is $(command -v sheepdog), not $c_e"
+  [ "$(command -v sheepr)" = "$c_e" ] || s7_stop "the PATH's sheepr is $(command -v sheepr), not $c_e"
   c_vo=$("$c_e" --version 2>&1)
-  case $c_vo in "sheepdog ${c_ver%%-*} ($c_commit, macos, responsibility API: active)"*) s7_rec "  --version: $c_vo" ;; *) s7_stop "--version: $c_vo" ;; esac
+  case $c_vo in "sheepr ${c_ver%%-*} ($c_commit, macos, responsibility API: active)"*) s7_rec "  --version: $c_vo" ;; *) s7_stop "--version: $c_vo" ;; esac
   sh "$S7_DIR/smoke.sh" "$c_e" < /dev/null > "$c_t/smoke" 2>&1 || { cat "$c_t/smoke" >&2; s7_stop "smoke.sh"; }
   s7_rec "  smoke.sh: passed"
   # the Full Disk Access steps
   s7_rec "  (a) Launch Services records of $S7_ID: $(s7_dump | tr '\n' ' ')"
   s7_dump > /dev/null || s7_stop "(a): a record of $S7_ID that is not this channel's bundle"
   s7_say "Open System Settings > Privacy & Security > Full Disk Access."
-  c_row=$(s7_ask "(b) Is there a Sheepdog row in the list?") || s7_stop "(b): no answer"
+  c_row=$(s7_ask "(b) Is there a Sheepr row in the list?") || s7_stop "(b): no answer"
   [ "$c_row" = n ] || { s7_ask "(b) Is it switched on?" > /dev/null || s7_stop "(b): no answer"; }
   s7_need denied "(c)" "the read with no grant is not denied (an earlier grant may answer)"
-  c_row=$(s7_ask "(c) After that denied read: is there a Sheepdog row now?") || s7_stop "(c): no answer"
+  c_row=$(s7_ask "(c) After that denied read: is there a Sheepr row now?") || s7_stop "(c): no answer"
   [ "$c_row" = n ] || { s7_ask "(c) Is it switched on?" > /dev/null || s7_stop "(c): no answer"; }
   s7_flag yes || s7_stop "(d): cannot record the grant flag"   # from here until a read is denied, a grant may remain
-  s7_say "Grant it: click +, press Cmd-Shift-G, paste $c_b, choose Open (or switch on the Sheepdog row that is there). Enter your admin name and password when asked."
+  s7_say "Grant it: click +, press Cmd-Shift-G, paste $c_b, choose Open (or switch on the Sheepr row that is there). Enter your admin name and password when asked."
   s7_ask "(d) Did you add it with + (y), not by switching on a row that was there (n)?" > /dev/null || s7_stop "(d): no answer"
-  s7_ask "(d) Is the Sheepdog row shown now?" > /dev/null || s7_stop "(d): no answer"
+  s7_ask "(d) Is the Sheepr row shown now?" > /dev/null || s7_stop "(d): no answer"
   s7_need allowed "(e)" "the read with the grant is not allowed" keep
   s7_rec "  (f) Launch Services records before the reset: $(s7_dump | tr '\n' ' ')"
   s7_rec "  (f) mdfind (Spotlight, information only): $("$S7_MDFIND" "kMDItemCFBundleIdentifier == '$S7_ID'" 2>&1 | tr '\n' ' ')"
@@ -492,7 +492,7 @@ s7_cmd_channel() {
       s7_rec "  (g) the reset did not take: the read is still allowed"
       i=0
       while :; do
-        s7_say "Remove the Sheepdog row with − in Full Disk Access. If no row shows here, ask the operator to remove it in their own account: tccutil reset SystemPolicyAllFiles $S7_ID there, or else − in their own System Settings."
+        s7_say "Remove the Sheepr row with − in Full Disk Access. If no row shows here, ask the operator to remove it in their own account: tccutil reset SystemPolicyAllFiles $S7_ID there, or else − in their own System Settings."
         s7_done "(g)"
         c_k=$(s7_read_clear)
         case $c_k in
@@ -506,7 +506,7 @@ s7_cmd_channel() {
       done ;;
     *) s7_stop "(g): $(s7_why "$c_k" "the read after the reset is not a clear answer, so nothing is recorded about the reset, and a grant may remain")" ;;
   esac
-  c_row=$(s7_ask "(h) Is the Sheepdog row still shown?") || s7_stop "(h): no answer"
+  c_row=$(s7_ask "(h) Is the Sheepr row still shown?") || s7_stop "(h): no answer"
   if [ "$c_row" = y ]; then
     s7_say "Remove it with − ."
     s7_done "(h)"
@@ -524,7 +524,7 @@ s7_cmd_finish() {
   if [ -d "$HOME/homebrew/Library/Taps/s7" ]; then s7_brew untap s7/local || s7_die "brew untap s7/local failed"; fi
   s7_brew developer off > /dev/null 2>&1   # audit turns it on (an untar install cannot keep it; off either way)
   if grep -q 's7/local' "$HOME/.homebrew/trust.json" 2>/dev/null; then
-    s7_brew untrust --cask s7/local/sheepdog > /dev/null 2>&1; s7_brew untrust --tap s7/local > /dev/null 2>&1
+    s7_brew untrust --cask s7/local/sheepr > /dev/null 2>&1; s7_brew untrust --tap s7/local > /dev/null 2>&1
     ! grep -q 's7/local' "$HOME/.homebrew/trust.json" 2>/dev/null || s7_die "~/.homebrew/trust.json still names s7/local"
   fi
   rm -rf "$HOME/s7-reg" "$HOME/s7-serve"
@@ -533,7 +533,7 @@ s7_cmd_finish() {
   echo "s7: this user is ready for the post-publish check (§5 step 6): . ~/s7-env.sh, one channel at a time, ~/s7-smoke.sh"
 }
 
-[ -z "${SD_S7_LIB:-}" ] || return 0 2>/dev/null || exit 0
+[ -z "${SR_S7_LIB:-}" ] || return 0 2>/dev/null || exit 0
 case ${1:-} in
   prep) shift; s7_cmd_prep "$@" ;;
   brew-after) s7_cmd_brew_after ;;

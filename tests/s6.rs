@@ -1,10 +1,10 @@
-//! Phase 1, step S6 (PHASE1.md): `sheepdog kill <pid>`, the proved part. Target checks, the
+//! Phase 1, step S6 (PHASE1.md): `sheepr kill <pid>`, the proved part. Target checks, the
 //! proved set (the ppid closure; macOS also `puniq`), `--dry-run`, exit codes 0 / 1 / 2 / 125,
 //! and a supervisor in the kill set ended first.
 //!
-//! Safety: every cell whose target is not a tree it built (pid 1, the test process, sheepdog
-//! itself, another user's process, a pid that may have been reused) runs sheepdog with the debug
-//! seam SHEEPDOG_TEST_INERT=1: sheepdog then sends no signal at all and logs each one it would
+//! Safety: every cell whose target is not a tree it built (pid 1, the test process, sheepr
+//! itself, another user's process, a pid that may have been reused) runs sheepr with the debug
+//! seam SHEEPR_TEST_INERT=1: sheepr then sends no signal at all and logs each one it would
 //! have sent. A control cell shows that the seam logs them. So a broken target check shows as a
 //! logged signal, never as a signal. Readiness only; cleanup only by recorded identity or the
 //! iteration's marker.
@@ -12,7 +12,7 @@
 mod common;
 
 use common::{found, scan, send, send_child};
-use sheepdog::ident::same;
+use sheepr::ident::same;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,13 +20,13 @@ use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 /// One tree's marker and record file; dropping it kills what is left of the tree.
@@ -39,7 +39,7 @@ impl Job {
     fn new() -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let marker = format!("26.{}{:06}", std::process::id(), n);
-        let rec = std::env::temp_dir().join(format!("sd-s6-{marker}"));
+        let rec = std::env::temp_dir().join(format!("sr-s6-{marker}"));
         for ext in ["", ".tick", ".root", ".log", ".out", ".err"] {
             let _ = std::fs::remove_file(format!("{}{ext}", rec.display()));
         }
@@ -54,10 +54,10 @@ impl Job {
     fn recorded(&self) -> Vec<(i32, u64)> {
         read_pairs(&self.rec)
     }
-    /// Processes whose argv carries the marker, other than a sheepdog and a holding shell
+    /// Processes whose argv carries the marker, other than a sheepr and a holding shell
     /// (`Held`: its argv carries the target's command line).
     fn marked(&self) -> Vec<(i32, u64)> {
-        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepdog") && w[1] != "/bin/sh").expect("ps failed")
+        scan(&self.marker, |w| w.len() >= 2 && !w[1].ends_with("sheepr") && w[1] != "/bin/sh").expect("ps failed")
     }
     /// Recorded processes still alive, plus marked ones.
     fn alive(&self) -> Vec<(i32, u64)> {
@@ -72,7 +72,7 @@ impl Job {
     fn wait_recorded(&self, n: usize) {
         wait_for(&format!("{n} recorded processes"), Duration::from_secs(15), || self.recorded().len() >= n);
     }
-    /// The signal log sheepdog wrote (SHEEPDOG_TEST_SIGNAL_LOG), one entry per line.
+    /// The signal log sheepr wrote (SHEEPR_TEST_SIGNAL_LOG), one entry per line.
     fn log(&self) -> Vec<String> {
         std::fs::read_to_string(self.file(".log")).unwrap_or_default().lines().map(String::from).collect()
     }
@@ -127,7 +127,7 @@ fn wait_bounded(c: &mut Child, limit: Duration) -> Option<ExitStatus> {
     }
 }
 
-/// The result of one `sheepdog kill` run.
+/// The result of one `sheepr kill` run.
 struct Kill {
     code: Option<i32>,
     out: String,
@@ -146,10 +146,10 @@ impl Kill {
     }
 }
 
-/// Start `sheepdog kill ARGS` with `env` (plus the signal log in the job's `.log`).
+/// Start `sheepr kill ARGS` with `env` (plus the signal log in the job's `.log`).
 fn spawn_kill(j: &Job, args: &[&str], env: &[(&str, &str)]) -> Child {
-    let mut c = Command::new(sheepdog());
-    c.arg("kill").args(args).env("SHEEPDOG_TEST_SIGNAL_LOG", j.file(".log"));
+    let mut c = Command::new(sheepr());
+    c.arg("kill").args(args).env("SHEEPR_TEST_SIGNAL_LOG", j.file(".log"));
     for (k, v) in env {
         c.env(k, v);
     }
@@ -160,15 +160,15 @@ fn spawn_kill(j: &Job, args: &[&str], env: &[(&str, &str)]) -> Child {
         .unwrap()
 }
 
-/// Run `sheepdog kill ARGS` with `env`, bounded.
+/// Run `sheepr kill ARGS` with `env`, bounded.
 fn kill(j: &Job, args: &[&str], env: &[(&str, &str)]) -> Kill {
     finish(j, spawn_kill(j, args, env))
 }
 
-/// Wait (bounded) for a `sheepdog kill` started by `spawn_kill`.
+/// Wait (bounded) for a `sheepr kill` started by `spawn_kill`.
 fn finish(j: &Job, mut c: Child) -> Kill {
     let (out, err) = (j.file(".out"), j.file(".err"));
-    let st = wait_bounded(&mut c, Duration::from_secs(40)).expect("sheepdog kill did not end within 40 s");
+    let st = wait_bounded(&mut c, Duration::from_secs(40)).expect("sheepr kill did not end within 40 s");
     Kill {
         code: st.code(),
         out: std::fs::read_to_string(&out).unwrap_or_default(),
@@ -176,20 +176,20 @@ fn finish(j: &Job, mut c: Child) -> Kill {
     }
 }
 
-const INERT: (&str, &str) = ("SHEEPDOG_TEST_INERT", "1");
+const INERT: (&str, &str) = ("SHEEPR_TEST_INERT", "1");
 
 /// The inert seam exists only in debug builds; a cell aimed at a process it must never signal
 /// refuses to run against a build without it.
 fn assert_inert_seam_is_live() {
-    assert!(cfg!(debug_assertions), "SHEEPDOG_TEST_INERT needs a debug build: refusing to aim sheepdog at processes it must not signal");
+    assert!(cfg!(debug_assertions), "SHEEPR_TEST_INERT needs a debug build: refusing to aim sheepr at processes it must not signal");
 }
 
 /// A shape started under a shell the test made, in a process group of its own, never under the
-/// test binary or in its group (phase-1 review, the S7 class): a regression that widens `sheepdog
+/// test binary or in its group (phase-1 review, the S7 class): a regression that widens `sheepr
 /// kill` (to the target's group, its siblings, its parent's children) then reaches only this
 /// cell's processes, and the cell goes red instead of killing a neighbour. `id()` is the target:
 /// the shell's background command, found by the pid the shell wrote. Note: a non-interactive
-/// shell starts a background command with INT and QUIT ignored, so a held `sheepdog run` does not
+/// shell starts a background command with INT and QUIT ignored, so a held `sheepr run` does not
 /// watch them; a cell about INT or QUIT must not use `Held`.
 struct Held {
     sh: Child,
@@ -202,7 +202,7 @@ impl Held {
     fn start(prelude: &str, args: &[&str]) -> Held {
         use std::os::unix::process::CommandExt;
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        let pidfile = std::env::temp_dir().join(format!("sd-s6-held-{}-{n}", std::process::id()));
+        let pidfile = std::env::temp_dir().join(format!("sr-s6-held-{}-{n}", std::process::id()));
         let _ = std::fs::remove_file(&pidfile);
         let script = format!("{prelude} \"$@\" & echo $! > '{}'; wait", pidfile.display());
         let sh = Command::new("/bin/sh")
@@ -291,7 +291,7 @@ fn s6_a_setsid_grandchild_whose_parent_lives_is_killed() {
     assert_eq!(j.alive(), vec![], "survivors");
 }
 
-/// macOS `puniq` (PHASE1.md S6, amended cell 28(b)): a member that sheepdog has seen forks an
+/// macOS `puniq` (PHASE1.md S6, amended cell 28(b)): a member that sheepr has seen forks an
 /// escapee in a new session on TERM and exits at once. The escapee's parent is gone before any
 /// scan can see it as a child; its original parent's uniqueid, a member seen alive, proves it.
 /// (Linux has no such fact: there the escapee survives, a stated limit.)
@@ -360,13 +360,13 @@ fn s6_a_missed_deadline_exits_125() {
     let j = Job::new();
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "2"]);
     j.wait_recorded(2);
-    let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[("SHEEPDOG_TEST_NEVER_EMPTY", "1"), ("SHEEPDOG_TEST_DEADLINE_MS", "300")]);
+    let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[("SHEEPR_TEST_NEVER_EMPTY", "1"), ("SHEEPR_TEST_DEADLINE_MS", "300")]);
     let _ = wait_held(&mut c, Duration::from_secs(5));
     assert_eq!(j.alive(), vec![], "control: the kill did not run (a usage error also exits 125)");
     assert_eq!(k.code, Some(125), "stderr: {}", k.err);
 }
 
-/// Control for the refusal cells: under SHEEPDOG_TEST_INERT sheepdog sends nothing, and logs
+/// Control for the refusal cells: under SHEEPR_TEST_INERT sheepr sends nothing, and logs
 /// every signal it would have sent. So an empty log in a refusal cell means that no signal was
 /// attempted.
 #[test]
@@ -375,7 +375,7 @@ fn s6_control_the_inert_seam_logs_the_signals_it_withholds() {
     let j = Job::new();
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
     j.wait_recorded(3);
-    let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[INERT, ("SHEEPDOG_TEST_DEADLINE_MS", "300")]);
+    let k = kill(&j, &["--grace", "0", &c.id().to_string()], &[INERT, ("SHEEPR_TEST_DEADLINE_MS", "300")]);
     let alive = j.alive().len();
     let log = j.log();
     c.signal(libc::SIGKILL);
@@ -400,7 +400,7 @@ fn refused(j: &Job, pid: i32) {
 fn refused_with(j: &Job, pid: i32, env: &[(&str, &str)]) -> Kill {
     assert_inert_seam_is_live();
     let _ = std::fs::remove_file(j.file(".log"));
-    let mut e = vec![INERT, ("SHEEPDOG_TEST_DEADLINE_MS", "300")];
+    let mut e = vec![INERT, ("SHEEPR_TEST_DEADLINE_MS", "300")];
     e.extend_from_slice(env);
     let k = kill(j, &["--grace", "0", &pid.to_string()], &e);
     assert_eq!(k.code, Some(1), "pid {pid} was not refused: stderr {}", k.err);
@@ -413,30 +413,30 @@ fn s6_pid_1_is_refused() {
     refused(&Job::new(), 1);
 }
 
-/// sheepdog's parent (here the test process; in a shell, `sheepdog kill $$`) is an ancestor.
+/// sheepr's parent (here the test process; in a shell, `sheepr kill $$`) is an ancestor.
 #[test]
 fn s6_the_callers_process_is_refused() {
     refused(&Job::new(), std::process::id() as i32);
 }
 
-/// sheepdog itself (`exec sheepdog kill $$`).
+/// sheepr itself (`exec sheepr kill $$`).
 #[test]
-fn s6_sheepdog_itself_is_refused() {
+fn s6_sheepr_itself_is_refused() {
     assert_inert_seam_is_live();
     let j = Job::new();
     let st = Command::new("/bin/sh")
-        .args(["-c", "exec \"$0\" kill --grace 0 $$", sheepdog()])
-        .env("SHEEPDOG_TEST_INERT", "1")
-        .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", j.file(".log"))
+        .args(["-c", "exec \"$0\" kill --grace 0 $$", sheepr()])
+        .env("SHEEPR_TEST_INERT", "1")
+        .env("SHEEPR_TEST_DEADLINE_MS", "300")
+        .env("SHEEPR_TEST_SIGNAL_LOG", j.file(".log"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map(|mut c| wait_bounded(&mut c, Duration::from_secs(40)))
         .unwrap()
-        .expect("sheepdog kill did not end");
+        .expect("sheepr kill did not end");
     assert_eq!(st.code(), Some(1));
-    assert_eq!(j.log(), Vec::<String>::new(), "signals were attempted for sheepdog itself");
+    assert_eq!(j.log(), Vec::<String>::new(), "signals were attempted for sheepr itself");
 }
 
 /// Another user's process: as root, a sleep started as `nobody`; otherwise any live process
@@ -471,11 +471,11 @@ fn s6_another_users_process_is_refused() {
     }
 }
 
-/// Start `sheepdog run -- sd-fixture ticker M R` and wait until the job is complete: the root
+/// Start `sheepr run -- sr-fixture ticker M R` and wait until the job is complete: the root
 /// has named itself and the escapee has its five ticking children (seven recorded: the root,
 /// the escapee and its children).
 fn ticker_job(j: &Job) -> Held {
-    let sup = Held::start("", &[sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
+    let sup = Held::start("", &[sheepr(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     sup
@@ -488,13 +488,13 @@ fn job_gone(j: &Job) -> Vec<(i32, u64)> {
     v
 }
 
-/// Cell 29(f): `kill <outer pid>` with an inner `sheepdog run` in the tree. The inner job's
+/// Cell 29(f): `kill <outer pid>` with an inner `sheepr run` in the tree. The inner job's
 /// escapee (its own session, its parent gone) is not provable by `kill`; the inner supervisor,
 /// ended first, kills it.
 #[test]
 fn s6_an_inner_supervisor_is_ended_first_so_its_escapees_die() {
     let j = Job::new();
-    let mut outer = Held::start("", &["/bin/sh", "-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\"; exit 0", sheepdog(), fixture(), &j.marker, &j.rec()]);
+    let mut outer = Held::start("", &["/bin/sh", "-c", "\"$0\" run --quiet -- \"$1\" ticker \"$2\" \"$3\"; exit 0", sheepr(), fixture(), &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     let k = kill(&j, &["--grace", "0", &outer.id().to_string()], &[]);
@@ -522,7 +522,7 @@ fn s6_a_stopped_supervisor_is_continued_after_its_term() {
     let j = Job::new();
     let mut sup = ticker_job(&j);
     assert!(sup.signal(libc::SIGSTOP));
-    let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "3000")]);
+    let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPR_TEST_DEADLINE_MS", "3000")]);
     let _ = wait_held(&mut sup, Duration::from_secs(5));
     assert_eq!(k.code, Some(0), "stderr: {}", k.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
@@ -554,9 +554,9 @@ fn s6_kill_of_a_member_kills_its_subtree_only_and_names_the_supervisor() {
     assert!(k.err_numbers().contains(&(sup.id() as i32)), "stderr does not name the supervisor {}: {}", sup.id(), k.err);
 }
 
-/// A ctrl-C (INT) or a TERM to `sheepdog kill` between its freeze and its SIGKILL must not leave
-/// the tree stopped for good: the kill finishes, then sheepdog dies of the signal. A debug seam
-/// holds sheepdog right after its first freeze (it creates the ready file there) until the test
+/// A ctrl-C (INT) or a TERM to `sheepr kill` between its freeze and its SIGKILL must not leave
+/// the tree stopped for good: the kill finishes, then sheepr dies of the signal. A debug seam
+/// holds sheepr right after its first freeze (it creates the ready file there) until the test
 /// creates the release file, after its signal.
 #[test]
 fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
@@ -565,10 +565,10 @@ fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
         let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
         j.wait_recorded(3);
         let (ready, release) = (j.file(".tick"), j.file(".root"));
-        let mut k = Command::new(sheepdog())
+        let mut k = Command::new(sheepr())
             .args(["kill", "--grace", "0", &c.id().to_string()])
-            .env("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", &release)
-            .env("SHEEPDOG_TEST_READY_FILE", &ready)
+            .env("SHEEPR_TEST_HOLD_AFTER_FREEZE", &release)
+            .env("SHEEPR_TEST_READY_FILE", &ready)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -576,13 +576,13 @@ fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
             .unwrap();
         wait_for("the freeze", Duration::from_secs(15), || ready.exists());
         assert!(send_child(&mut k, sig));
-        // the window closes only now: the signal is sent while sheepdog holds after its freeze
+        // the window closes only now: the signal is sent while sheepr holds after its freeze
         std::fs::File::create(&release).unwrap();
         let st = wait_bounded(&mut k, Duration::from_secs(20));
         let _ = wait_held(&mut c, Duration::from_secs(5));
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(j.alive(), vec![], "signal {sig}: members were left (stopped)");
-        assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
+        assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepr did not die of it: {st:?}");
     }
 }
 
@@ -593,12 +593,12 @@ fn s6_an_interrupt_during_the_freeze_leaves_nothing_stopped() {
 #[test]
 fn s6_a_supervisor_that_ignores_term_is_not_claimed_clean() {
     let j = Job::new();
-    // the shell ignores TERM, and so does its background sheepdog (an ignored signal stays
+    // the shell ignores TERM, and so does its background sheepr (an ignored signal stays
     // ignored across fork and exec)
-    let mut sup = Held::start("trap '' TERM;", &[sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
+    let mut sup = Held::start("trap '' TERM;", &[sheepr(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
-    let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPDOG_TEST_DEADLINE_MS", "1000")]);
+    let k = kill(&j, &["--grace", "0", &sup.id().to_string()], &[("SHEEPR_TEST_DEADLINE_MS", "1000")]);
     let _ = wait_held(&mut sup, Duration::from_secs(5));
     if cfg!(target_os = "macos") {
         assert_eq!(k.code, Some(125), "stderr: {}", k.err);
@@ -640,7 +640,7 @@ fn s6_the_tree_is_scanned_while_a_supervisor_is_awaited() {
             "/bin/sh",
             "-c",
             "\"$0\" run --quiet --grace 3s -- \"$1\" fork-on-term \"$2\" \"$3\" & \"$1\" linger-on \"$2\" \"$3\" \"$4\"; wait",
-            sheepdog(),
+            sheepr(),
             fixture(),
             &j.marker,
             &j.rec(),
@@ -665,11 +665,11 @@ fn ps_parent(pid: i32) -> Option<i32> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-/// Every ancestor of sheepdog (the test process, its parent, and so on up to pid 1, whatever
+/// Every ancestor of sheepr (the test process, its parent, and so on up to pid 1, whatever
 /// their uid: in a macOS terminal the chain passes through a root-owned `login`, and the
 /// terminal's own processes above it are the caller's again) is refused with no signal.
 #[test]
-fn s6_every_ancestor_of_sheepdog_is_refused() {
+fn s6_every_ancestor_of_sheepr_is_refused() {
     let j = Job::new();
     let mut p = std::process::id() as i32;
     let mut n = 0;
@@ -680,7 +680,7 @@ fn s6_every_ancestor_of_sheepdog_is_refused() {
     }
 }
 
-/// Fail closed: when sheepdog cannot read part of its own chain of ancestors (a debug seam makes
+/// Fail closed: when sheepr cannot read part of its own chain of ancestors (a debug seam makes
 /// the test process's parent unreadable), a process above that point may still be an ancestor,
 /// so it is refused.
 #[test]
@@ -694,7 +694,7 @@ fn s6_an_unreadable_ancestor_chain_refuses_the_kill() {
     let uid = Command::new("ps").args(["-o", "uid=", "-p", &grandparent.to_string()]).output().unwrap();
     let uid: u32 = String::from_utf8_lossy(&uid.stdout).trim().parse().expect("the parent's uid");
     assert_eq!(uid, unsafe { libc::geteuid() }, "control: the test process's parent must be this user's");
-    let k = refused_with(&j, grandparent, &[("SHEEPDOG_TEST_PARENT_UNREADABLE", &me)]);
+    let k = refused_with(&j, grandparent, &[("SHEEPR_TEST_PARENT_UNREADABLE", &me)]);
     // the refusal names the process whose parent could not be read (the operator's lead)
     assert!(k.err_numbers().contains(&(std::process::id() as i32)), "the refusal does not name the unreadable link: {}", k.err);
 }
@@ -725,8 +725,8 @@ fn s6_a_signal_during_the_grace_ends_kill_at_once() {
         c.signal(libc::SIGKILL);
         let _ = wait_held(&mut c, Duration::from_secs(5));
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepdog did not die of it: {st:?}");
-        assert!(took < Duration::from_secs(2), "signal {sig}: sheepdog took {took:?} to act on it");
+        assert_eq!(st.and_then(|s| s.signal()), Some(sig), "signal {sig}: sheepr did not die of it: {st:?}");
+        assert!(took < Duration::from_secs(2), "signal {sig}: sheepr took {took:?} to act on it");
         assert_eq!(stopped, Vec::<i32>::new(), "signal {sig}: members were left stopped");
     }
 }
@@ -735,21 +735,21 @@ fn ps_stat(pid: i32) -> String {
     Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
-/// The relay path (`job & exec sheepdog run -- cmd`): the relay's older child, the background
-/// job, is not part of the running job: stderr names the relay (its nearest `sheepdog`), and only
+/// The relay path (`job & exec sheepr run -- cmd`): the relay's older child, the background
+/// job, is not part of the running job: stderr names the relay (its nearest `sheepr`), and only
 /// the background job dies. Killing the real root then ends the job, and stderr names the
-/// root's nearest `sheepdog`, the supervisor, not the relay.
+/// root's nearest `sheepr`, the supervisor, not the relay.
 #[test]
 fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     let j = Job::new();
-    let mut relay = Held::start("", &[fixture(), "bg-then-exec", &j.marker, sheepdog(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
+    let mut relay = Held::start("", &[fixture(), "bg-then-exec", &j.marker, sheepr(), "run", "--quiet", "--", fixture(), "ticker", &j.marker, &j.rec()]);
     wait_for("the ticker root", Duration::from_secs(15), || j.file(".root").exists());
     j.wait_recorded(7);
     let bg = scan(&j.marker, |w| w.len() >= 2 && w[1] == "/bin/sleep").expect("ps failed");
     assert_eq!(bg.len(), 1, "control: one background job: {bg:?}");
     let (bgp, bgid) = bg[0];
     let root = read_pairs(&j.file(".root"))[0];
-    // the supervisor: the root's parent, the relay's sheepdog child
+    // the supervisor: the root's parent, the relay's sheepr child
     let sup = ps_parent(root.0).expect("the root's parent");
     let k = kill(&j, &["--grace", "0", &bgp.to_string()], &[]);
     let (bg_alive, root_alive) = (same(bgp, bgid), same(root.0, root.1));
@@ -761,14 +761,14 @@ fn s6_on_the_relay_path_a_background_job_is_killed_alone() {
     assert!(k.err_numbers().contains(&(relay.id() as i32)), "stderr does not name the relay {} for the background job: {}", relay.id(), k.err);
     assert_eq!(k2.code, Some(0), "stderr: {}", k2.err);
     assert!(st.is_some(), "the job did not end with its root");
-    // the root's line names its nearest sheepdog, the supervisor, not the relay above it
+    // the root's line names its nearest sheepr, the supervisor, not the relay above it
     assert_ne!(sup, relay.id() as i32, "control: the root's parent is the supervisor, not the relay");
     assert!(k2.err_numbers().contains(&sup), "stderr does not name the supervisor {sup} for the root: {}", k2.err);
     assert!(!k2.err_numbers().contains(&(relay.id() as i32)), "stderr names the relay for the root: {}", k2.err);
     assert_eq!(job_gone(&j), vec![], "survivors of the job");
 }
 
-/// A supervisor is recognised by its executable's name, `sheepdog`, which `--dry-run` lists
+/// A supervisor is recognised by its executable's name, `sheepr`, which `--dry-run` lists
 /// next to each pid. Under an emulator (Rosetta runs amd64 containers on Apple silicon) the
 /// kernel's executable link names the translator, not the program.
 #[test]
@@ -779,12 +779,12 @@ fn s6_dry_run_names_a_supervisor_by_its_program() {
     sup.signal(libc::SIGTERM);
     let _ = wait_held(&mut sup, Duration::from_secs(10));
     let line = k.out.lines().find(|l| l.split_whitespace().next() == Some(&sup.id().to_string())).map(String::from);
-    assert_eq!(line.as_deref().and_then(|l| l.split('\t').nth(1)), Some("sheepdog"), "the supervisor's row: {line:?}");
+    assert_eq!(line.as_deref().and_then(|l| l.split('\t').nth(1)), Some("sheepr"), "the supervisor's row: {line:?}");
 }
 
 
 /// Phase-1 review (safety F2), Linux: under `unshare --pid --fork` without `--mount-proc`, /proc
-/// belongs to another pid namespace, so every pid, parent and start time sheepdog would read
+/// belongs to another pid namespace, so every pid, parent and start time sheepr would read
 /// names someone else's process (a signal would reach whoever has that pid here). `run` refuses
 /// (125) and `kill` refuses (1). Control: with its own /proc (`--mount-proc`) the same job runs.
 /// Needs root (the Linux legs of ./test-all run as root).
@@ -805,21 +805,21 @@ fn s6_linux_a_proc_from_another_pid_namespace_is_refused() {
         if mount_proc {
             c.arg("--mount-proc");
         }
-        c.arg(sheepdog()).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        c.arg(sheepr()).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         let mut c = c.spawn().expect("unshare (util-linux) is needed");
         wait_bounded(&mut c, Duration::from_secs(30)).and_then(|s| s.code())
     };
     assert_eq!(run(true, &["run", "--", "/bin/true"]), Some(0), "control: with its own /proc the job runs");
     assert_eq!(run(false, &["run", "--", "/bin/true"]), Some(125), "run with a foreign /proc was not refused");
     // kill: the target is a sleep started inside the new namespace (a live process there, not an
-    // ancestor: the shell execs sheepdog); with its own /proc the same dry run lists it (0)
+    // ancestor: the shell execs sheepr); with its own /proc the same dry run lists it (0)
     let kill_in_ns = |mount_proc: bool| -> Option<i32> {
         let mut c = Command::new("unshare");
         c.args(["--pid", "--fork"]);
         if mount_proc {
             c.arg("--mount-proc");
         }
-        c.args(["/bin/sh", "-c", "/bin/sleep 20 & exec \"$0\" kill --dry-run $!", sheepdog()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        c.args(["/bin/sh", "-c", "/bin/sleep 20 & exec \"$0\" kill --dry-run $!", sheepr()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         let mut c = c.spawn().expect("unshare");
         wait_bounded(&mut c, Duration::from_secs(30)).and_then(|s| s.code())
     };
@@ -827,7 +827,7 @@ fn s6_linux_a_proc_from_another_pid_namespace_is_refused() {
     assert_eq!(kill_in_ns(false), Some(1), "kill with a foreign /proc was not refused");
 }
 
-/// Phase-1 review round 2 (P3): SIGPIPE is blocked for sheepdog, so a write to a closed stdout
+/// Phase-1 review round 2 (P3): SIGPIPE is blocked for sheepr, so a write to a closed stdout
 /// gets EPIPE. `--dry-run` into a reader that has gone must end quietly (exit 0: nothing was to
 /// be signalled), not panic (the C main then answers 125, which means "not clean").
 #[test]
@@ -835,14 +835,14 @@ fn s6_dry_run_into_a_closed_pipe_ends_quietly() {
     let j = Job::new();
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
     j.wait_recorded(3);
-    let mut k = Command::new(sheepdog())
+    let mut k = Command::new(sheepr())
         .args(["kill", "--dry-run", &c.id().to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(j.file(".err")).unwrap())
         .spawn()
         .unwrap();
-    drop(k.stdout.take()); // the reader is gone before sheepdog writes
+    drop(k.stdout.take()); // the reader is gone before sheepr writes
     let st = wait_bounded(&mut k, Duration::from_secs(20));
     c.signal(libc::SIGKILL);
     let _ = wait_held(&mut c, Duration::from_secs(5));
@@ -850,7 +850,7 @@ fn s6_dry_run_into_a_closed_pipe_ends_quietly() {
     assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(0), None)), "stderr: {}", std::fs::read_to_string(j.file(".err")).unwrap_or_default());
 }
 
-/// Phase-1 review round 2 (P2): `sheepdog kill` blocks every signal but the faults for itself.
+/// Phase-1 review round 2 (P2): `sheepr kill` blocks every signal but the faults for itself.
 /// A USR1 between its freeze and its SIGKILL is not acted on: the kill finishes (exit 0) and
 /// nothing is left stopped or alive. (INT and TERM there: the hold, see the cell above.)
 #[test]
@@ -859,10 +859,10 @@ fn s6_a_usr1_during_the_freeze_is_not_acted_on() {
     let mut c = spawn_fixture(&["deep", &j.marker, &j.rec(), "3"]);
     j.wait_recorded(3);
     let (ready, release) = (j.file(".tick"), j.file(".root"));
-    let mut k = Command::new(sheepdog())
+    let mut k = Command::new(sheepr())
         .args(["kill", "--grace", "0", &c.id().to_string()])
-        .env("SHEEPDOG_TEST_HOLD_AFTER_FREEZE", &release)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_HOLD_AFTER_FREEZE", &release)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -878,7 +878,7 @@ fn s6_a_usr1_during_the_freeze_is_not_acted_on() {
     assert_eq!(st.map(|s| (s.code(), s.signal())), Some((Some(0), None)), "a USR1 in the freeze ended `kill`: {st:?}");
 }
 
-/// Phase-1 review round 2 (P2): `sheepdog kill` whose stderr is a pipe nobody reads still does
+/// Phase-1 review round 2 (P2): `sheepr kill` whose stderr is a pipe nobody reads still does
 /// its work (its "runs under" line gets EPIPE, never SIGPIPE, and is printed before any signal).
 #[test]
 fn s6_kill_with_a_closed_stderr_still_kills() {
@@ -886,7 +886,7 @@ fn s6_kill_with_a_closed_stderr_still_kills() {
     let mut sup = ticker_job(&j);
     let tick: i32 = std::fs::read_to_string(j.file(".tick")).unwrap().lines().next().unwrap().trim().parse().unwrap();
     let (tp, tid) = found(tick).expect("a ticking member");
-    let mut k = Command::new(sheepdog()).args(["kill", "--grace", "0", &tp.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut k = Command::new(sheepr()).args(["kill", "--grace", "0", &tp.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     drop(k.stderr.take());
     let st = wait_bounded(&mut k, Duration::from_secs(20));
     let gone = !same(tp, tid);

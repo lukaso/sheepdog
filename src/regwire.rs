@@ -1,5 +1,5 @@
-//! The registration wire (PLAN.md §3.2, PHASE2.md D5), shared by sheepdog, the fixture and the
-//! tests: the `SHEEPDOG_OUTER` chain and the record an inner run sends.
+//! The registration wire (PLAN.md §3.2, PHASE2.md D5), shared by sheepr, the fixture and the
+//! tests: the `SHEEPR_OUTER` chain and the record an inner run sends.
 //!
 //! The chain is one entry per line: 32 hex digits (the outer job's nonce), one space, the socket
 //! path verbatim. The record is 24 bytes: `SDR1`, the 16 nonce bytes, the sender's own pid
@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 /// The env var that carries the chain of enclosing supervisors.
-pub const VAR: &str = "SHEEPDOG_OUTER";
+pub const VAR: &str = "SHEEPR_OUTER";
 /// At most this many entries; an inner run that finds this many does not append its own.
 pub const MAX: usize = 16;
 /// The record's size and its first four bytes.

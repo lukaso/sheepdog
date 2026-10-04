@@ -1,4 +1,4 @@
-//! Phase-2 P9: the rest of the CLI surface (PLAN.md §10.5): the help screen, `sheepdog help
+//! Phase-2 P9: the rest of the CLI surface (PLAN.md §10.5): the help screen, `sheepr help
 //! <command>`, a non-subcommand as a usage error, exit 2 for every usage error but `run`'s (125),
 //! `"v": 1` on every JSON line and JSON errors `{"v":1,"error":{"code","message","fix"}}`.
 
@@ -7,14 +7,14 @@ mod common;
 use common::json::{self, Json};
 use std::process::{Command, Stdio};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 struct Out {
@@ -24,7 +24,7 @@ struct Out {
 }
 
 fn sd(args: &[&str]) -> Out {
-    let o = Command::new(sheepdog()).args(args).stdin(Stdio::null()).output().unwrap();
+    let o = Command::new(sheepr()).args(args).stdin(Stdio::null()).output().unwrap();
     Out { code: o.status.code(), out: String::from_utf8_lossy(&o.stdout).into_owned(), err: String::from_utf8_lossy(&o.stderr).into_owned() }
 }
 
@@ -43,33 +43,33 @@ fn the_help_screen_names_every_command() {
     }
     let bare = sd(&[]);
     assert_eq!(bare.code, Some(2));
-    assert!(bare.err.contains("sheepdog run"), "no screen for a bare call:\n{}", bare.err);
+    assert!(bare.err.contains("sheepr run"), "no screen for a bare call:\n{}", bare.err);
 }
 
-/// `sheepdog help <command>` shows that command's usage (exit 0); an unknown one is a usage
+/// `sheepr help <command>` shows that command's usage (exit 0); an unknown one is a usage
 /// error (2).
 #[test]
 fn help_for_each_command() {
     for c in COMMANDS {
         let o = sd(&["help", c]);
         assert_eq!(o.code, Some(0), "help {c}: {}", o.err);
-        assert!(o.out.contains(&format!("sheepdog {c}")), "help {c}:\n{}", o.out);
+        assert!(o.out.contains(&format!("sheepr {c}")), "help {c}:\n{}", o.out);
     }
     assert_eq!(sd(&["help", "bogus"]).code, Some(2));
 }
 
-/// A command that is not a sheepdog subcommand is a usage error (2) that shows the fix built
+/// A command that is not a sheepr subcommand is a usage error (2) that shows the fix built
 /// from what was typed, and it does not run.
 #[test]
 fn a_non_subcommand_is_a_usage_error_that_shows_the_fix() {
-    let d = std::env::temp_dir().join(format!("sd-surface-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-surface-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let f = d.join("ran");
     let o = sd(&["/usr/bin/touch", f.to_str().unwrap()]);
     assert_eq!(o.code, Some(2), "{}", o.err);
     assert!(!f.exists(), "the command ran");
-    assert!(o.err.contains(&format!("sheepdog run -- /usr/bin/touch {}", f.display())), "no fix:\n{}", o.err);
+    assert!(o.err.contains(&format!("sheepr run -- /usr/bin/touch {}", f.display())), "no fix:\n{}", o.err);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -120,7 +120,7 @@ fn version_names_version_commit_and_platform() {
     let o = sd(&["--version"]);
     assert_eq!(o.code, Some(0));
     let line = o.out.trim();
-    assert!(line.starts_with(&format!("sheepdog {} ", env!("CARGO_PKG_VERSION"))), "{line}");
+    assert!(line.starts_with(&format!("sheepr {} ", env!("CARGO_PKG_VERSION"))), "{line}");
     assert!(line.contains(std::env::consts::OS), "no platform: {line}");
 }
 
@@ -131,7 +131,7 @@ fn version_names_version_commit_and_platform() {
 fn the_help_durations_parse() {
     assert_eq!(sd(&["run", "--timeout", "5m", "--", "true"]).code, Some(0));
     assert_eq!(sd(&["run", "--timeout", "5x", "--", "true"]).code, Some(125));
-    let strays = |v: &str| Command::new(sheepdog()).args(["strays", "--older-than", v]).env("SHEEPDOG_TEST_INERT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code();
+    let strays = |v: &str| Command::new(sheepr()).args(["strays", "--older-than", v]).env("SHEEPR_TEST_INERT", "1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code();
     assert_eq!(strays("1h"), Some(0));
     assert_eq!(strays("2d"), Some(0));
     assert_eq!(strays("5x"), Some(2));
@@ -146,21 +146,21 @@ fn the_json_error_message_is_the_error_line() {
     assert_eq!(o.code, Some(2));
     let j = json::parse(o.out.lines().last().unwrap_or("")).unwrap_or_else(|e| panic!("not JSON ({e:?}): {}", o.out));
     let m = j.get("error").and_then(|e| e.get("message")).and_then(Json::str).unwrap_or("").to_string();
-    assert!(m.starts_with("sheepdog: kill: no target"), "message: {m:?}");
+    assert!(m.starts_with("sheepr: kill: no target"), "message: {m:?}");
 }
 
 /// A call that starts with `--` or an option is a usage error whose fix puts `run` in front
-/// and keeps what was typed runnable: `sheepdog -- true` suggests `sheepdog run -- true` (never
+/// and keeps what was typed runnable: `sheepr -- true` suggests `sheepr run -- true` (never
 /// `run -- --`), and the suggestion, run, works.
 #[test]
 fn a_flag_first_call_suggests_a_fix_that_runs() {
     for (typed, fix) in [
-        (&["--", "true"][..], "sheepdog run -- true"),
-        (&["--timeout", "5m", "--", "true"][..], "sheepdog run --timeout 5m -- true"),
+        (&["--", "true"][..], "sheepr run -- true"),
+        (&["--timeout", "5m", "--", "true"][..], "sheepr run --timeout 5m -- true"),
     ] {
         let o = sd(typed);
         assert_eq!(o.code, Some(2), "{typed:?}");
-        let line = o.err.lines().find(|l| l.contains("sheepdog run")).unwrap_or_else(|| panic!("{typed:?}: no fix:\n{}", o.err));
+        let line = o.err.lines().find(|l| l.contains("sheepr run")).unwrap_or_else(|| panic!("{typed:?}: no fix:\n{}", o.err));
         assert!(line.ends_with(fix), "{typed:?}: {line}");
         let args: Vec<&str> = fix.split(' ').skip(1).collect();
         assert_eq!(sd(&args).code, Some(0), "the suggested fix does not run: {fix}");
@@ -200,7 +200,7 @@ fn json_mode_does_not_depend_on_argument_order() {
 #[test]
 fn a_ps_usage_error_names_ps() {
     // ps refuses kill's own options itself, before its parse
-    for (args, want) in [(&["ps", "--json"][..], "sheepdog: ps: "), (&["ps", "--json", "--grace", "1", "5"][..], "sheepdog: ps: "), (&["kill", "--json"][..], "sheepdog: kill: ")] {
+    for (args, want) in [(&["ps", "--json"][..], "sheepr: ps: "), (&["ps", "--json", "--grace", "1", "5"][..], "sheepr: ps: "), (&["kill", "--json"][..], "sheepr: kill: ")] {
         let sub = args[0];
         let o = sd(args);
         let j = json::parse(o.out.trim()).unwrap_or_else(|e| panic!("{sub}: ({e:?}) {:?}", o.out));
@@ -210,7 +210,7 @@ fn a_ps_usage_error_names_ps() {
 }
 
 /// The suggested fix, pasted into a shell, runs the command that was typed: arguments with
-/// spaces or shell characters are quoted (`sheepdog -- sh -c 'exit 3'` suggests a line that
+/// spaces or shell characters are quoted (`sheepr -- sh -c 'exit 3'` suggests a line that
 /// exits 3 through `sh -c`); with no command after `--` it names COMMAND; a subcommand typed
 /// after an option is suggested as that subcommand.
 #[test]
@@ -218,18 +218,18 @@ fn the_suggested_fix_runs_in_a_shell() {
     let fix_of = |typed: &[&str]| -> String {
         let o = sd(typed);
         assert_eq!(o.code, Some(2), "{typed:?}");
-        let l = o.err.lines().find(|l| l.contains("To run it under sheepdog:")).unwrap_or_else(|| panic!("{typed:?}: {}", o.err)).to_string();
-        l.split("To run it under sheepdog: ").nth(1).unwrap().to_string()
+        let l = o.err.lines().find(|l| l.contains("To run it under sheepr:")).unwrap_or_else(|| panic!("{typed:?}: {}", o.err)).to_string();
+        l.split("To run it under sheepr: ").nth(1).unwrap().to_string()
     };
     let sh = |fix: &str| -> Option<i32> {
-        let line = fix.replacen("sheepdog", sheepdog(), 1);
+        let line = fix.replacen("sheepr", sheepr(), 1);
         Command::new("/bin/sh").args(["-c", &line]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().code()
     };
     assert_eq!(sh(&fix_of(&["--", "sh", "-c", "exit 3"])), Some(3), "the fix does not run the typed command");
     assert_eq!(sh(&fix_of(&["--", "sh", "-c", "exit 4 # it's"])), Some(4), "a quote inside an argument");
     assert_eq!(sh(&fix_of(&["--", "true"])), Some(0), "control");
     assert!(fix_of(&["--"]).ends_with("-- COMMAND"), "{}", fix_of(&["--"]));
-    assert!(fix_of(&["--json", "kill", "5"]).starts_with("sheepdog kill "), "{}", fix_of(&["--json", "kill", "5"]));
+    assert!(fix_of(&["--json", "kill", "5"]).starts_with("sheepr kill "), "{}", fix_of(&["--json", "kill", "5"]));
 }
 
 /// Each duration flag has its own cap: `--kill-deadline` and `kill --grace` at most one day,
@@ -241,7 +241,7 @@ fn each_duration_flag_keeps_its_cap() {
     assert_eq!(sd(&["run", "--timeout", "366d", "--", "true"]).code, Some(125));
     assert_eq!(sd(&["run", "--timeout", "365d", "--", "true"]).code, Some(0));
     assert_eq!(sd(&["kill", "--grace", "2d", "1"]).code, Some(2));
-    let mut c = Command::new(fixture()).arg("sigcount").arg(std::env::temp_dir().join(format!("sd-cap-{}", std::process::id()))).spawn().unwrap();
+    let mut c = Command::new(fixture()).arg("sigcount").arg(std::env::temp_dir().join(format!("sr-cap-{}", std::process::id()))).spawn().unwrap();
     let ok = sd(&["kill", "--dry-run", "--grace", "1d", &c.id().to_string()]).code;
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
@@ -264,15 +264,15 @@ fn sweep_owner_takes_a_value_not_the_json_flag() {
 #[test]
 fn the_suggested_fix_keeps_every_word_as_typed() {
     let fix_of = |typed: &[&std::ffi::OsStr]| -> String {
-        let o = Command::new(sheepdog()).args(typed).stdin(Stdio::null()).output().unwrap();
+        let o = Command::new(sheepr()).args(typed).stdin(Stdio::null()).output().unwrap();
         let err = String::from_utf8_lossy(&o.stderr).into_owned();
-        let l = err.lines().find(|l| l.contains("To run it under sheepdog:")).unwrap_or_else(|| panic!("{typed:?}: {err}")).to_string();
-        l.split("To run it under sheepdog: ").nth(1).unwrap().to_string()
+        let l = err.lines().find(|l| l.contains("To run it under sheepr:")).unwrap_or_else(|| panic!("{typed:?}: {err}")).to_string();
+        l.split("To run it under sheepr: ").nth(1).unwrap().to_string()
     };
     let os = |v: &[&str]| -> Vec<std::ffi::OsString> { v.iter().map(|s| s.into()).collect() };
     let words = os(&["--", "printf", "%s|", "=ls", "~", "~/x", "plain"]);
     let fix = fix_of(&words.iter().map(|w| w.as_os_str()).collect::<Vec<_>>());
-    let line = fix.replacen("sheepdog", sheepdog(), 1);
+    let line = fix.replacen("sheepr", sheepr(), 1);
     for shell in ["/bin/sh", "/bin/zsh"] {
         if !std::path::Path::new(shell).exists() {
             continue;
@@ -314,11 +314,11 @@ fn run_usage_errors_name_the_word_and_its_rule() {
         let o = sd(args);
         assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
         let first = o.err.lines().next().unwrap_or("");
-        assert!(first.starts_with("sheepdog: run: "), "{args:?}: the first line does not start with sheepdog: run::\n{}", o.err);
+        assert!(first.starts_with("sheepr: run: "), "{args:?}: the first line does not start with sheepr: run::\n{}", o.err);
         for w in want {
             assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
         }
-        assert!(o.err.contains("usage: sheepdog run"), "{args:?}: no usage line:\n{}", o.err);
+        assert!(o.err.contains("usage: sheepr run"), "{args:?}: no usage line:\n{}", o.err);
     }
 }
 
@@ -327,7 +327,7 @@ fn run_usage_errors_name_the_word_and_its_rule() {
 /// not an option. A bad value is named first; no command at all shows the shape.
 #[test]
 fn run_without_the_separator_prints_the_corrected_command() {
-    let d = std::env::temp_dir().join(format!("sd-sep-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-sep-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     let f = d.join("ran");
@@ -337,23 +337,23 @@ fn run_without_the_separator_prints_the_corrected_command() {
     assert!(!f.exists(), "the command ran without --");
     let o2 = sd(&["run", "/usr/bin/touch", fs, "--", "x"]);
     assert_eq!(o2.code, Some(125), "{}", o2.err);
-    assert!(!f.exists(), "the command ran with its own -- taken for sheepdog's");
+    assert!(!f.exists(), "the command ran with its own -- taken for sheepr's");
     let dash = sd(&["run", "\u{2014}", "/usr/bin/touch", fs]);
     assert!(!f.exists() && dash.err.lines().next().unwrap_or("").contains('\u{2014}'), "an em dash: not named, or the command ran:\n{}", dash.err);
-    assert!(o.err.contains(&format!("sheepdog run --timeout 5m --quiet -- /usr/bin/touch {fs}")), "no corrected command:\n{}", o.err);
+    assert!(o.err.contains(&format!("sheepr run --timeout 5m --quiet -- /usr/bin/touch {fs}")), "no corrected command:\n{}", o.err);
     for (args, want) in [
-        (&["run", "npm", "test"][..], "sheepdog run -- npm test"),
-        (&["run", "--timeout", "5m", "sh", "-c", "echo a b"], "sheepdog run --timeout 5m -- sh -c 'echo a b'"),
-        (&["run", "--timeout", "5m"], "sheepdog run --timeout 5m -- COMMAND"),
+        (&["run", "npm", "test"][..], "sheepr run -- npm test"),
+        (&["run", "--timeout", "5m", "sh", "-c", "echo a b"], "sheepr run --timeout 5m -- sh -c 'echo a b'"),
+        (&["run", "--timeout", "5m"], "sheepr run --timeout 5m -- COMMAND"),
         (&["run", "--max-mem", "2GB", "npm", "test"], "--max-mem 2GB"),
-        // the command's own `--` is the command's: sheepdog's goes before the first word that is not an option
-        (&["run", "npm", "test", "--", "--watch"], "sheepdog run -- npm test -- --watch"),
-        (&["run", "--timeout", "5m", "cargo", "test", "--", "--nocapture"], "sheepdog run --timeout 5m -- cargo test -- --nocapture"),
-        (&["run", "npm", "--", "test"], "sheepdog run -- npm -- test"),
+        // the command's own `--` is the command's: sheepr's goes before the first word that is not an option
+        (&["run", "npm", "test", "--", "--watch"], "sheepr run -- npm test -- --watch"),
+        (&["run", "--timeout", "5m", "cargo", "test", "--", "--nocapture"], "sheepr run --timeout 5m -- cargo test -- --nocapture"),
+        (&["run", "npm", "--", "test"], "sheepr run -- npm -- test"),
         // an editor's dash in place of `--` is named, and the line uses two hyphens
-        (&["run", "--timeout", "5m", "\u{2014}", "npm", "test"], "sheepdog run --timeout 5m -- npm test"),
+        (&["run", "--timeout", "5m", "\u{2014}", "npm", "test"], "sheepr run --timeout 5m -- npm test"),
         // a word with `=` is quoted (zsh's magic_equal_subst would expand `a==ls`)
-        (&["run", "x", "a==ls"], "sheepdog run -- x 'a==ls'"),
+        (&["run", "x", "a==ls"], "sheepr run -- x 'a==ls'"),
     ] {
         let o = sd(args);
         assert_eq!(o.code, Some(125), "{args:?}: {}", o.err);
@@ -364,7 +364,7 @@ fn run_without_the_separator_prints_the_corrected_command() {
 
 /// Every other subcommand's usage error (exit 2) names the command typed and what it rejected,
 /// with the rule it broke, on its first line, then its usage line. The first line keeps the
-/// `sheepdog:` prefix every stderr message has (a stable interface): `sheepdog: kill: ...`.
+/// `sheepr:` prefix every stderr message has (a stable interface): `sheepr: kill: ...`.
 #[test]
 fn subcommand_usage_errors_name_the_word_and_its_rule() {
     for (args, want) in [
@@ -397,16 +397,16 @@ fn subcommand_usage_errors_name_the_word_and_its_rule() {
         let o = sd(args);
         assert_eq!(o.code, Some(2), "{args:?}: {}", o.err);
         let first = o.err.lines().next().unwrap_or("");
-        assert!(first.starts_with(&format!("sheepdog: {sub}: ")), "{args:?}: the first line does not start with sheepdog: {sub}:\n{}", o.err);
+        assert!(first.starts_with(&format!("sheepr: {sub}: ")), "{args:?}: the first line does not start with sheepr: {sub}:\n{}", o.err);
         for w in want {
             assert!(first.contains(w), "{args:?}: the first line does not say {w:?}:\n{}", o.err);
         }
-        assert!(o.err.contains(&format!("usage: sheepdog {sub}")), "{args:?}: no usage line:\n{}", o.err);
+        assert!(o.err.contains(&format!("usage: sheepr {sub}")), "{args:?}: no usage line:\n{}", o.err);
     }
 }
 
 /// `--mode` exists so the cells can compare tracking methods (one loses escapees): the help never
-/// shows it, so it is outside the stable flags (the README's "the flags `sheepdog help <command>` shows"),
+/// shows it, so it is outside the stable flags (the README's "the flags `sheepr help <command>` shows"),
 /// and it still parses.
 #[test]
 fn the_test_only_mode_flag_is_not_in_the_help() {
@@ -426,11 +426,11 @@ fn a_word_that_cannot_be_shown_gets_only_the_shape() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     for args in [&[OsStr::new("run"), OsStr::new("a\nb")][..], &[OsStr::new("run"), OsStr::from_bytes(b"\xff")], &[OsStr::new("run"), OsStr::new("--owner"), OsStr::new("\u{1}"), OsStr::new("npm")]] {
-        let o = Command::new(sheepdog()).args(args).stdin(Stdio::null()).output().unwrap();
+        let o = Command::new(sheepr()).args(args).stdin(Stdio::null()).output().unwrap();
         let err = String::from_utf8_lossy(&o.stderr).into_owned();
         let first = err.lines().next().unwrap_or("");
         assert_eq!(o.status.code(), Some(125), "{args:?}: {err}");
-        assert!(first.ends_with("sheepdog run [options] -- COMMAND") && !first.contains("\\x"), "{args:?}: {first}");
+        assert!(first.ends_with("sheepr run [options] -- COMMAND") && !first.contains("\\x"), "{args:?}: {first}");
     }
 }
 
@@ -446,13 +446,13 @@ fn the_rules_said_are_the_rules_parsed() {
     assert_eq!(sd(&["run", "--timeout", "1500ms", "--", "true"]).code, Some(0));
 }
 
-/// `sheepdog help` with a command that does not exist names the word it rejected (exit 2).
+/// `sheepr help` with a command that does not exist names the word it rejected (exit 2).
 #[test]
 fn help_for_a_command_that_does_not_exist_names_it() {
     let o = sd(&["help", "frob"]);
     assert_eq!(o.code, Some(2), "{}", o.err);
     let first = o.err.lines().next().unwrap_or("");
-    assert!(first.starts_with("sheepdog: ") && first.contains("frob"), "{}", o.err);
+    assert!(first.starts_with("sheepr: ") && first.contains("frob"), "{}", o.err);
 }
 
 /// A call that starts with run's options and no `run`: the suggested line puts `--` before the
@@ -462,19 +462,19 @@ fn help_for_a_command_that_does_not_exist_names_it() {
 fn an_options_first_call_suggests_the_separator_before_the_command() {
     let o = sd(&["--timeout", "5m", "sh", "-c", "exit 3"]);
     assert_eq!(o.code, Some(2), "{}", o.err);
-    let want = "sheepdog run --timeout 5m -- sh -c 'exit 3'";
+    let want = "sheepr run --timeout 5m -- sh -c 'exit 3'";
     assert!(o.err.lines().next().unwrap_or("").ends_with(want), "{}", o.err);
-    let line = want.replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let line = want.replacen("sheepr", &format!("'{}'", sheepr()), 1);
     let st = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap();
     assert_eq!(st.code(), Some(3), "the suggested line did not run the command: {line}");
     let u = sd(&["--frob", "x"]);
     assert_eq!(u.code, Some(2), "{}", u.err);
-    assert!(!u.err.contains("sheepdog run") && u.err.lines().next().unwrap_or("").contains("--frob"), "{}", u.err);
+    assert!(!u.err.contains("sheepr run") && u.err.lines().next().unwrap_or("").contains("--frob"), "{}", u.err);
     let n = sd(&["--timeout", "5m"]);
-    assert!(n.err.lines().next().unwrap_or("").ends_with("sheepdog run --timeout 5m -- COMMAND"), "{}", n.err);
+    assert!(n.err.lines().next().unwrap_or("").ends_with("sheepr run --timeout 5m -- COMMAND"), "{}", n.err);
 }
 
-/// Every line sheepdog suggests for a missing `run` or `--`, pasted into a shell, runs the typed
+/// Every line sheepr suggests for a missing `run` or `--`, pasted into a shell, runs the typed
 /// command and exits with its code (never 125, a usage error, or 127, a command that is not one):
 /// one reading of where run's options end serves `run`'s parser and the top-level suggestion.
 #[test]
@@ -490,8 +490,8 @@ fn every_suggested_line_runs_the_typed_command() {
     ] {
         let o = sd(args);
         let first = o.err.lines().next().unwrap_or("").to_string();
-        let at = first.find("sheepdog run ").unwrap_or_else(|| panic!("{args:?}: no suggested line: {first}"));
-        let line = first[at..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+        let at = first.find("sheepr run ").unwrap_or_else(|| panic!("{args:?}: no suggested line: {first}"));
+        let line = first[at..].replacen("sheepr", &format!("'{}'", sheepr()), 1);
         let st = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap();
         assert_eq!(st.code(), Some(code), "{args:?}: the suggested line {line} exits {:?}", st.code());
     }
@@ -517,37 +517,37 @@ fn every_suggested_line_runs_the_typed_command() {
     for args in [&["--timeout", "bad", "x"][..], &["--timeout", "bad", "run", "true"], &["--status-fd", "2", "x"]] {
         let e = sd(args);
         let first = e.err.lines().next().unwrap_or("").to_string();
-        assert!(e.code == Some(2) && !first.contains("sheepdog run ") && first.contains(&format!("{} {}", args[0], args[1])) && first.contains("is not valid"), "{args:?}: {first}");
+        assert!(e.code == Some(2) && !first.contains("sheepr run ") && first.contains(&format!("{} {}", args[0], args[1])) && first.contains("is not valid"), "{args:?}: {first}");
     }
     let ok = sd(&["--quiet", "run", "true"]);
     let line = ok.err.lines().next().unwrap_or("").to_string();
-    let line = line[line.find("sheepdog run ").unwrap_or_else(|| panic!("no line: {line}"))..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let line = line[line.find("sheepr run ").unwrap_or_else(|| panic!("no line: {line}"))..].replacen("sheepr", &format!("'{}'", sheepr()), 1);
     assert_eq!(Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).status().unwrap().code(), Some(0), "{line}");
     // run named after its options: the line puts -- before the command, and runs it
     let r = sd(&["--quiet", "run", "echo", "hi"]);
     let first = r.err.lines().next().unwrap_or("").to_string();
-    assert!(first.ends_with("sheepdog run --quiet -- echo hi"), "{first}");
-    let line = first[first.find("sheepdog run ").unwrap()..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    assert!(first.ends_with("sheepr run --quiet -- echo hi"), "{first}");
+    let line = first[first.find("sheepr run ").unwrap()..].replacen("sheepr", &format!("'{}'", sheepr()), 1);
     let out = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).output().unwrap();
     assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).trim().to_string()), (Some(0), "hi".to_string()), "{line}");
     // a subcommand word counts only where run's command would start, never as an option's value
     // or the command's own argument
     let o = sd(&["--owner", "sweep", "--", "echo", "hi"]);
-    assert!(o.err.lines().next().unwrap_or("").ends_with("sheepdog run --owner sweep -- echo hi"), "{}", o.err);
+    assert!(o.err.lines().next().unwrap_or("").ends_with("sheepr run --owner sweep -- echo hi"), "{}", o.err);
     let q = sd(&["--quiet", "echo", "run"]);
     let first = q.err.lines().next().unwrap_or("").to_string();
-    let at = first.find("sheepdog run ").unwrap_or_else(|| panic!("no line: {first}"));
-    let line = first[at..].replacen("sheepdog", &format!("'{}'", sheepdog()), 1);
+    let at = first.find("sheepr run ").unwrap_or_else(|| panic!("no line: {first}"));
+    let line = first[at..].replacen("sheepr", &format!("'{}'", sheepr()), 1);
     let out = Command::new("/bin/sh").arg("-c").arg(&line).stderr(Stdio::null()).output().unwrap();
     assert_eq!((out.status.code(), String::from_utf8_lossy(&out.stdout).trim().to_string()), (Some(0), "run".to_string()), "{line}");
 }
 
 /// The command's own `--status-fd` (after the first word that is not an option) is never
-/// sheepdog's: nothing is written to that fd; control: sheepdog's own still gets the line.
+/// sheepr's: nothing is written to that fd; control: sheepr's own still gets the line.
 #[test]
 fn status_fd_after_the_command_is_the_commands() {
     use std::os::unix::process::CommandExt;
-    let d = std::env::temp_dir().join(format!("sd-sfd-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-sfd-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     // an unusable --status-fd anywhere among the options (no value, a bad one) is a usage error in
     // --status-fd itself: nothing is written (PHASE2.md decision 8)
@@ -571,7 +571,7 @@ fn status_fd_after_the_command_is_the_commands() {
         let f = d.join("fd3");
         let file = std::fs::File::create(&f).unwrap();
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&file);
-        let mut c = Command::new(sheepdog());
+        let mut c = Command::new(sheepr());
         c.args(args).stdin(Stdio::null()).stderr(Stdio::null());
         // fd 3 in the child, open across exec (dup2 onto itself would keep close-on-exec)
         unsafe {

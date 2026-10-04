@@ -135,7 +135,7 @@ pub fn add_note(n: &str) {
     with(|s| s.notes.push(n.to_string()));
 }
 
-/// This process is a relay (sheepdog started with children): only the supervisor writes the
+/// This process is a relay (sheepr started with children): only the supervisor writes the
 /// status line, so the relay drops the fd from its state.
 pub fn disable() {
     with(|s| s.fd = None);
@@ -146,7 +146,7 @@ pub fn disable() {
 /// Nothing is printed when nothing was killed. `--quiet` keeps only the degraded line.
 pub fn report(root_status: Option<libc::c_int>, clean: bool) {
     // debug seam: the phase-1 hint cells count every stderr line, and the report is not theirs
-    if crate::seam_flag("SHEEPDOG_TEST_NO_REPORT") {
+    if crate::seam_flag("SHEEPR_TEST_NO_REPORT") {
         return;
     }
     let (killed, degraded, quiet) = with(|s| (s.killed.iter().map(|k| (k.pid, k.cmd.clone(), k.escaped)).collect::<Vec<_>>(), s.degraded.clone(), s.quiet));
@@ -166,7 +166,7 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
         crate::note(format!("report-cause {cause}"));
         let escaped: Vec<_> = killed.iter().filter(|k| k.2.is_some()).collect();
         crate::say!(
-            "sheepdog: {why}: ended the job, {} process{} killed, {} of them had escaped{}",
+            "sheepr: {why}: ended the job, {} process{} killed, {} of them had escaped{}",
             killed.len(),
             if killed.len() == 1 { "" } else { "es" },
             escaped.len(),
@@ -186,12 +186,12 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
     }
     match degraded {
         None if !quiet => {
-            crate::say!("sheepdog: tree clean. Machine-readable: --status-fd.");
+            crate::say!("sheepr: tree clean. Machine-readable: --status-fd.");
             crate::note("report clean".to_string());
         }
         None => {}
         Some(r) => {
-            crate::say!("sheepdog: no members left that sheepdog could see (tracking degraded: {r}).");
+            crate::say!("sheepr: no members left that sheepr could see (tracking degraded: {r}).");
             crate::note("report degraded".to_string());
         }
     }

@@ -15,7 +15,7 @@
 #     path) finds exactly 0 signing identities and does not list the real login keychain (an empty
 #     or failed answer refuses), and codesign/xcrun/spctl/ditto are not the system's; otherwise
 #     refused.
-# Then: (notarizing) the notary keychain, $HOME/$SD_NOTARY_KEYCHAIN, must exist; the bundle with
+# Then: (notarizing) the notary keychain, $HOME/$SR_NOTARY_KEYCHAIN, must exist; the bundle with
 # the release ID, built only under /private/tmp and deleted on any failure; codesign with the
 # hardened runtime; the signed requirement must equal the release requirement (csreq's canonical
 # form); verify; the runtime flag. Notarizing: announce the password prompt; lock the notary
@@ -88,7 +88,7 @@ fi
 # --- the work ------------------------------------------------------------------------------------
 mkdir -p "$dest" || die "cannot make $dest"
 # named, trapped, then made: a signal at any point finds a trap that knows the dir
-tmp=/private/tmp/sd-sign.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+tmp=/private/tmp/sr-sign.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
 # kc is set only while the notary keychain may be unlocked (from the lock before the unlock to the
 # lock after the last notarytool call); any exit in that span locks it. A failed lock is loud and
 # fails the build: the operator must not be told it ended well while the keychain is open.
@@ -109,16 +109,16 @@ unlock() { # what-was-sent
   tool security unlock-keychain "$kc" || die "the notary keychain was not unlocked (a wrong password, or the prompt cancelled): $1"; }
 
 if [ $notarize = yes ]; then
-  k=$HOME/$SD_NOTARY_KEYCHAIN
+  k=$HOME/$SR_NOTARY_KEYCHAIN
   [ -f "$k" ] || die "no notary keychain at $k: do PHASE3.md D2 step 3 first"
 fi
 
 # a control build carries the control marker (bundle.sh says why)
 if [ $notarize = yes ]; then app=$("$lib/../bundle.sh" "$bin" "$tmp/b" "$version" "$build" --release-id) || die "bundle.sh"
 else app=$("$lib/../bundle.sh" "$bin" "$tmp/b" "$version" "$build" --release-id --control) || die "bundle.sh"; fi
-tool codesign --force --options runtime --timestamp -s "$SD_SIGN_IDENTITY" "$app" || die "codesign"
+tool codesign --force --options runtime --timestamp -s "$SR_SIGN_IDENTITY" "$app" || die "codesign"
 got=$(tool codesign -d -r- "$app" 2>&1 | sed -n 's/^designated => //p')
-want=$(/usr/bin/csreq -r="$SD_RELEASE_REQUIREMENT" -t 2>/dev/null)
+want=$(/usr/bin/csreq -r="$SR_RELEASE_REQUIREMENT" -t 2>/dev/null)
 [ -n "$want" ] && [ "$got" = "$want" ] || die "the signed requirement is not the release requirement: got '$got', want '$want'"
 tool codesign --verify --strict --deep "$app" || die "codesign --verify"
 tool codesign -d -v "$app" 2>&1 | grep -q 'flags=.*runtime' || die "the hardened runtime flag is not set"
@@ -127,23 +127,23 @@ if [ $notarize = yes ]; then
   tool ditto -c -k --keepParent "$app" "$tmp/submit.zip" || die "ditto"
   # the notary keychain is open only from here to the lock after the last notarytool call: nothing
   # of the new build runs in that span
-  echo "sign: security will now ask for the password of the sheepdog-notary keychain (its own password, not your login password), in this terminal. Type it only here. It is locked again right after the submission."
-  [ $real = no ] && echo "announce" >> "${SD_ASK_RECORD:-/dev/null}"
+  echo "sign: security will now ask for the password of the sheepr-notary keychain (its own password, not your login password), in this terminal. Type it only here. It is locked again right after the submission."
+  [ $real = no ] && echo "announce" >> "${SR_ASK_RECORD:-/dev/null}"
   kc=$k
   tool security lock-keychain "$kc" || die "cannot lock the notary keychain $kc"
   unlock "nothing was sent to Apple"
-  if ! tool xcrun notarytool history --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-profile.txt" 2>&1; then
+  if ! tool xcrun notarytool history --keychain-profile sheepr-notary --keychain "$kc" > "$dest/notary-profile.txt" 2>&1; then
     die "the profile check failed; see $dest/notary-profile.txt (a missing profile or no network: until the operator records each outcome, it is not told apart)"
   fi
   # the reply is kept even when notarytool fails (it may exit non-zero on a rejection)
-  res=$(tool xcrun notarytool submit "$tmp/submit.zip" --keychain-profile sheepdog-notary --keychain "$kc" --wait --output-format json 2>&1)
+  res=$(tool xcrun notarytool submit "$tmp/submit.zip" --keychain-profile sheepr-notary --keychain "$kc" --wait --output-format json 2>&1)
   printf '%s\n' "$res" > "$dest/notary-submit.json"
   case $res in
     *'"status":"Accepted"'*|*'"status": "Accepted"'*) ;;
     *) id=$(printf '%s' "$res" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p')
        # the keychain may have locked itself during --wait (5 minutes idle)
-       [ -n "$id" ] && unlock "the submission $id WAS sent and Apple did not accept it; its log was not fetched: xcrun notarytool log $id --keychain-profile sheepdog-notary --keychain $kc" \
-         && tool xcrun notarytool log "$id" --keychain-profile sheepdog-notary --keychain "$kc" > "$dest/notary-log.json" 2>&1
+       [ -n "$id" ] && unlock "the submission $id WAS sent and Apple did not accept it; its log was not fetched: xcrun notarytool log $id --keychain-profile sheepr-notary --keychain $kc" \
+         && tool xcrun notarytool log "$id" --keychain-profile sheepr-notary --keychain "$kc" > "$dest/notary-log.json" 2>&1
        die "Apple did not accept it; see $dest/notary-log.json" ;;
   esac
   relock || exit 1
@@ -153,7 +153,7 @@ if [ $notarize = yes ]; then
 fi
 
 mkdir -p "$tmp/rh"
-v=$("$lib/release-run.sh" "$tmp/rh" "$app/Contents/MacOS/sheepdog" --version 2>"$tmp/door.err"); vr=$?
+v=$("$lib/release-run.sh" "$tmp/rh" "$app/Contents/MacOS/sheepr" --version 2>"$tmp/door.err"); vr=$?
 if [ $vr != 0 ]; then
   grep -q 'exec-guard: refused' "$tmp/door.err" && { cat "$tmp/door.err" >&2; echo "sign: the exec door refused the signed bundle" >&2; exit 5; }
   die "the signed binary does not run: $(cat "$tmp/door.err")"
@@ -161,6 +161,6 @@ fi
 case $v in *"$commit"*) ;; *) die "the signed binary names another commit: $v" ;; esac
 
 if [ $notarize = yes ]; then chk=--signed; else chk=--signed-unstapled; fi
-"$lib/archive.sh" make "$app" "$dest/sheepdog-macos-universal.tar.gz" || die "archive"
-"$lib/archive.sh" check "$dest/sheepdog-macos-universal.tar.gz" $chk || die "the archive fails its check"
+"$lib/archive.sh" make "$app" "$dest/sheepr-macos-universal.tar.gz" || die "archive"
+"$lib/archive.sh" check "$dest/sheepr-macos-universal.tar.gz" $chk || die "the archive fails its check"
 echo "sign: $tag signed${notarize:+ }$( [ $notarize = yes ] && echo 'and notarized' || echo '(control: not notarized)')"

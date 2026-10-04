@@ -1,21 +1,21 @@
-//! Cells 3 and 7-lite (PLAN.md §6): escapees that must not survive `sheepdog run`.
+//! Cells 3 and 7-lite (PLAN.md §6): escapees that must not survive `sheepr run`.
 //!
 //! The checker counts a survivor if EITHER a recorded `<pid> <identity>` is still that same
-//! process (sheepdog::ident), OR a live process carries the iteration's unique argv marker.
+//! process (sheepr::ident), OR a live process carries the iteration's unique argv marker.
 //! The identity path is required (control: an escapee without a marker); the marker path also
 //! catches processes the fixture could not record. Cleanup kills only by those two facts,
 //! re-checked immediately before each signal, and runs from a drop guard, so it also runs when
 //! an assertion panics.
 //!
-//! Controls that must come out the other way: the fixture without sheepdog, the round-2 design
+//! Controls that must come out the other way: the fixture without sheepr, the round-2 design
 //! (macOS `--mode root-disclaim`) and no subreaper (Linux `--mode none`).
 //!
-//! SD_STRESS_N sets the iteration count of the stress cells (default 200; the gate is 10000).
+//! SR_STRESS_N sets the iteration count of the stress cells (default 200; the gate is 10000).
 
 mod common;
 
 use common::{scan, send};
-use sheepdog::ident::same;
+use sheepr::ident::same;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,14 +25,14 @@ static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn stress_n() -> usize {
-    std::env::var("SD_STRESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200)
+    std::env::var("SR_STRESS_N").ok().and_then(|v| v.parse().ok()).unwrap_or(200)
 }
 
 /// One iteration's facts: a unique marker and a record file. Dropping it kills survivors.
@@ -45,7 +45,7 @@ impl Iteration {
     fn new() -> Self {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let marker = format!("29.{}{:06}", std::process::id(), n);
-        let dir = std::env::temp_dir().join(format!("sd-cell3-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sr-cell3-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let rec = dir.join(&marker);
         let _ = std::fs::remove_file(&rec);
@@ -127,19 +127,19 @@ fn iterate(n: usize, launch: impl Fn(&Iteration)) -> Outcome {
     o
 }
 
-fn run_sheepdog(mode: Option<&str>, fixture_args: &[&str]) {
-    let mut c = Command::new(sheepdog());
+fn run_sheepr(mode: Option<&str>, fixture_args: &[&str]) {
+    let mut c = Command::new(sheepr());
     c.arg("run");
     if let Some(mode) = mode {
         c.args(["--mode", mode]);
     }
     c.arg("--").arg(fixture()).args(fixture_args);
     let st = c.status().unwrap();
-    assert_eq!(st.code(), Some(0), "sheepdog did not exit 0 (deadline or error): {st:?}");
+    assert_eq!(st.code(), Some(0), "sheepr did not exit 0 (deadline or error): {st:?}");
 }
 
 fn escape(mode: Option<&'static str>, shape: &'static str) -> impl Fn(&Iteration) {
-    move |it: &Iteration| run_sheepdog(mode, &[shape, &it.marker, it.rec()])
+    move |it: &Iteration| run_sheepr(mode, &[shape, &it.marker, it.rec()])
 }
 
 // ---- controls -------------------------------------------------------------------------
@@ -158,7 +158,7 @@ fn control_the_marker_checker_finds_a_marked_process() {
 }
 
 #[test]
-fn control_without_sheepdog_every_escapee_survives() {
+fn control_without_sheepr_every_escapee_survives() {
     let o = iterate(5, |it| {
         Command::new(fixture()).args(["escape", &it.marker, it.rec()]).status().unwrap();
     });
@@ -200,7 +200,7 @@ fn cell3_root_waits_no_survivor() {
     let o = iterate(n, escape(None, "escape"));
     // non-vacuity: the root records every G it created (it is never killed before it exits)
     assert!(o.recorded * 100 >= n * 99, "only {} of {n} escapees were created", o.recorded);
-    assert_eq!(o.survivors, 0, "{} of {n} escapees survived sheepdog", o.survivors);
+    assert_eq!(o.survivors, 0, "{} of {n} escapees survived sheepr", o.survivors);
 }
 
 #[test]
@@ -209,13 +209,13 @@ fn cell3_root_exits_at_once_no_survivor() {
     let o = iterate(n, escape(None, "escape-fast"));
     // C records and can be killed first, so this is a lower bound on creation
     assert!(o.recorded * 2 >= n, "only {} of {n} escapees were recorded", o.recorded);
-    assert_eq!(o.survivors, 0, "{} of {n} escapees survived sheepdog", o.survivors);
+    assert_eq!(o.survivors, 0, "{} of {n} escapees survived sheepr", o.survivors);
 }
 
 #[test]
 fn cell7_a_breeding_escapee_leaves_no_survivor() {
     let n = (stress_n() / 10).max(20);
-    let o = iterate(n, |it| run_sheepdog(None, &["breed", &it.marker, it.rec(), "300"]));
+    let o = iterate(n, |it| run_sheepr(None, &["breed", &it.marker, it.rec(), "300"]));
     assert!(o.recorded >= n, "the breeder did not start ({} records)", o.recorded);
     assert_eq!(o.survivors, 0, "{} processes of {n} breeding trees survived", o.survivors);
 }
@@ -223,7 +223,7 @@ fn cell7_a_breeding_escapee_leaves_no_survivor() {
 #[test]
 fn cell7_a_fork_chain_leaves_no_survivor() {
     let n = (stress_n() / 10).max(20);
-    let o = iterate(n, |it| run_sheepdog(None, &["chain", &it.marker, it.rec(), "4000"]));
+    let o = iterate(n, |it| run_sheepr(None, &["chain", &it.marker, it.rec(), "4000"]));
     assert!(o.recorded >= n, "the chain did not start ({} records)", o.recorded);
     assert_eq!(o.survivors, 0, "{} chains of {n} survived", o.survivors);
 }
@@ -231,34 +231,34 @@ fn cell7_a_fork_chain_leaves_no_survivor() {
 /// Cell 7 (fast chain): each generation forks its successor at once and exits, so every
 /// process lives microseconds while one scan takes milliseconds. A scan-only emptiness check
 /// sees only dead or not-yet-listed pids and declares a live tree clean (phase-0 fix review,
-/// P1-A). SD_CHAIN_N sets the generation count (default 20000).
+/// P1-A). SR_CHAIN_N sets the generation count (default 20000).
 #[test]
 fn cell7_a_fast_fork_chain_leaves_no_survivor() {
-    let gens = std::env::var("SD_CHAIN_N").unwrap_or_else(|_| "20000".into());
-    let o = iterate(30, |it| run_sheepdog(None, &["chain", &it.marker, it.rec(), &gens, "0"]));
+    let gens = std::env::var("SR_CHAIN_N").unwrap_or_else(|_| "20000".into());
+    let o = iterate(30, |it| run_sheepr(None, &["chain", &it.marker, it.rec(), &gens, "0"]));
     assert!(o.recorded >= 30, "the chain did not start ({} records)", o.recorded);
     assert_eq!(o.survivors, 0, "{} fast chains of 30 survived", o.survivors);
 }
 
 /// Cells 24-lite and 20 (PLAN.md §3.2 sticky membership, §3.3 step 6 deadline): a member
-/// sheepdog saw but could not kill must be reported at the deadline (exit 125, its pid on
-/// stderr), never declared clean. Debug-only seams: SHEEPDOG_TEST_FORGET=1 hides every member
-/// after its first sighting (it "lost its fact"), SHEEPDOG_TEST_NOKILL=1 makes every signal
-/// fail (as EPERM would after a setuid exec), SHEEPDOG_TEST_DEADLINE_MS shortens the deadline.
+/// sheepr saw but could not kill must be reported at the deadline (exit 125, its pid on
+/// stderr), never declared clean. Debug-only seams: SHEEPR_TEST_FORGET=1 hides every member
+/// after its first sighting (it "lost its fact"), SHEEPR_TEST_NOKILL=1 makes every signal
+/// fail (as EPERM would after a setuid exec), SHEEPR_TEST_DEADLINE_MS shortens the deadline.
 /// A loop that is not sticky forgets the member and exits 0 while it is alive.
 #[test]
 fn cell24_a_member_that_cannot_be_killed_is_reported_not_declared_clean() {
     for _ in 0..5 {
         let it = Iteration::new();
         // stderr goes to a file: the unkillable escapee inherits it, and waiting for a pipe's
-        // EOF would wait for the escapee's 29 s sleep, not for sheepdog
+        // EOF would wait for the escapee's 29 s sleep, not for sheepr
         let errf = it.rec.with_extension("stderr");
-        let st = Command::new(sheepdog())
+        let st = Command::new(sheepr())
             .args(["run", "--", fixture(), "escape", &it.marker, it.rec()])
-            .env("SHEEPDOG_TEST_FORGET", "1")
-            .env("SHEEPDOG_TEST_NOKILL", "1")
-            .env("SHEEPDOG_TEST_DEADLINE_MS", "300")
-            .env("SHEEPDOG_TEST_SIGNAL_LOG", it.rec.with_extension("log"))
+            .env("SHEEPR_TEST_FORGET", "1")
+            .env("SHEEPR_TEST_NOKILL", "1")
+            .env("SHEEPR_TEST_DEADLINE_MS", "300")
+            .env("SHEEPR_TEST_SIGNAL_LOG", it.rec.with_extension("log"))
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&errf).unwrap())
             .status()
@@ -268,7 +268,7 @@ fn cell24_a_member_that_cannot_be_killed_is_reported_not_declared_clean() {
         let log = std::fs::read_to_string(it.rec.with_extension("log")).unwrap_or_default();
         let _ = std::fs::remove_file(it.rec.with_extension("log"));
         let g = it.recorded().first().copied().expect("the escapee was recorded").0;
-        assert_eq!(st.code(), Some(125), "sheepdog declared clean with a member alive; stderr: {err}");
+        assert_eq!(st.code(), Some(125), "sheepr declared clean with a member alive; stderr: {err}");
         // the deadline report names the survivor (its trace line: `deadline <pid>...`)
         let reported = log.lines().any(|l| l.split_whitespace().next() == Some("deadline") && l.split_whitespace().any(|w| w == g.to_string()));
         assert!(reported, "the survivor {g} was not reported: {log:?}");

@@ -8,17 +8,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-jr-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-jr-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -28,7 +28,7 @@ fn scratch(name: &str) -> PathBuf {
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     s
 }
 
@@ -100,18 +100,18 @@ fn marker() -> String {
 /// pid that is signalled has a `journal <pid>` line before its first signal line. The shape: a
 /// member that forks an escapee when it gets TERM (`fork-on-term`), so the escapee is born during
 /// the kill's grace, is first seen by a grace scan, and gets its TERM right after that very scan
-/// (a journal written one scan late would come after it). The job is ended by a TERM to sheepdog.
+/// (a journal written one scan late would come after it). The job is ended by a TERM to sheepr.
 #[test]
 fn a_member_is_journaled_before_its_first_signal() {
     let d = scratch("order");
     let s = state(&d);
     let r = d.join("rec");
     let log = d.join("log");
-    let mut c = Command::new(sheepdog())
+    let mut c = Command::new(sheepr())
         .args(["run", "--grace", "0.5", "--", fixture(), "fork-on-term", &marker()])
         .arg(&r)
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_SIGNAL_LOG", &log)
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_SIGNAL_LOG", &log)
         .spawn()
         .unwrap();
     let started = records(&r, 2).len() == 2;
@@ -151,7 +151,7 @@ fn the_journal_exists_while_the_job_runs_and_is_deleted_after_a_clean_end() {
     let s = state(&d);
     let (go, ready) = (d.join("go"), d.join("ready"));
     let script = format!(r#"touch "{}"; while [ ! -e "{}" ]; do sleep 0.01; done"#, ready.display(), go.display());
-    let c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("SHEEPR_TEST_STATE", &s).spawn().unwrap();
     let sup = c.id() as i32;
     let started = wait_for(&ready, 20);
     let js = journals(&s);
@@ -178,11 +178,11 @@ fn a_published_journal_is_locked_and_has_its_header() {
     let d = scratch("locked");
     let s = state(&d);
     let (rel, ready) = (d.join("release"), d.join("ready"));
-    let c = Command::new(sheepdog())
+    let c = Command::new(sheepr())
         .args(["run", "--", "/bin/sh", "-c", "exit 0"])
-        .env("SHEEPDOG_TEST_STATE", &s)
-        .env("SHEEPDOG_TEST_HOLD_AFTER_LINK", &rel)
-        .env("SHEEPDOG_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_HOLD_AFTER_LINK", &rel)
+        .env("SHEEPR_TEST_READY_FILE", &ready)
         .spawn()
         .unwrap();
     let held = wait_for(&ready, 20);
@@ -216,7 +216,7 @@ fn the_job_holds_no_journal_fd() {
         list.replace("{}", "$PPID"),
         sup.display()
     );
-    let code = finish(Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap());
+    let code = finish(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
     assert_eq!(code, Some(0));
     let (own, sup) = (std::fs::read_to_string(&own).unwrap(), std::fs::read_to_string(&sup).unwrap());
     // the fd is listed by the name it was opened under (the temporary one, now removed) or by
@@ -232,7 +232,7 @@ fn the_job_holds_no_journal_fd() {
 /// command's, and the run notes the failure.
 #[test]
 fn a_journal_that_cannot_be_written_never_stops_the_kill() {
-    for (name, seam) in [("nodir", None), ("write", Some("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL"))] {
+    for (name, seam) in [("nodir", None), ("write", Some("SHEEPR_TEST_JOURNAL_WRITE_FAIL"))] {
         let d = scratch(name);
         let s = state(&d);
         if seam.is_none() {
@@ -240,12 +240,12 @@ fn a_journal_that_cannot_be_written_never_stops_the_kill() {
         }
         let r = d.join("rec");
         let trace = d.join("trace");
-        let mut cmd = Command::new(sheepdog());
+        let mut cmd = Command::new(sheepr());
         cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", &format!(r#""$FX" escape {} "$R"; exit 3"#, marker())])
             .env("FX", fixture())
             .env("R", &r)
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_TRACE", &trace);
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_TRACE", &trace);
         if let Some(k) = seam {
             cmd.env(k, "1");
         }
@@ -269,11 +269,11 @@ fn every_member_of_a_big_scan_has_a_complete_line() {
     let s = state(&d);
     let r = d.join("rec");
     let code = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--grace", "0.05", "--", fixture(), "swarm", "300"])
             .arg(&r)
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
             .spawn()
             .unwrap(),
     );
@@ -300,11 +300,11 @@ fn a_non_utf8_argument_is_escaped() {
     let s = state(&d);
     let bad = std::ffi::OsStr::from_bytes(b"a\xff\xfeb");
     let code = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", "/bin/sh", "-c", "exit 0"])
             .arg(bad)
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
             .spawn()
             .unwrap(),
     );
@@ -325,11 +325,11 @@ fn a_taken_job_id_is_never_overwritten() {
     let s = state(&d);
     // a first run (kept) shows the folder; then a second run forced to the same id
     let first = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--no-sweep", "--", "/bin/sh", "-c", "exit 0"])
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
-            .env("SHEEPDOG_TEST_JOB_ID", "0badc0de")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_JOB_ID", "0badc0de")
             .spawn()
             .unwrap(),
     );
@@ -339,11 +339,11 @@ fn a_taken_job_id_is_never_overwritten() {
     assert_eq!(js[0].file_stem().unwrap(), "j-0badc0de", "the forced id");
     let before = std::fs::read(&js[0]).unwrap();
     let second = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--no-sweep", "--", "/bin/sh", "-c", "exit 0"])
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
-            .env("SHEEPDOG_TEST_JOB_ID", "0badc0de")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_JOB_ID", "0badc0de")
             .spawn()
             .unwrap(),
     );
@@ -355,7 +355,7 @@ fn a_taken_job_id_is_never_overwritten() {
 }
 
 /// The state wall, live (PHASE2.md §0.2): a debug run whose environment names the operator's
-/// state (`SHEEPDOG_STATE`, `XDG_STATE_HOME` and `HOME` all pointing at a directory that even has
+/// state (`SHEEPR_STATE`, `XDG_STATE_HOME` and `HOME` all pointing at a directory that even has
 /// a sentinel) writes nothing there and notes that it has no state: with the runner's canary as
 /// its test state (no sentinel), and with no test state at all. The control is every cell above:
 /// with a sentinelled test state it writes a journal.
@@ -365,17 +365,17 @@ fn a_debug_run_never_writes_the_operators_state() {
         let d = scratch(if canary { "wall-canary" } else { "wall-none" });
         let real = d.join("real");
         std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join(".sheepdog-test"), b"").unwrap();
+        std::fs::write(real.join(".sheepr-test"), b"").unwrap();
         let trace = d.join("trace");
-        let mut cmd = Command::new(sheepdog());
+        let mut cmd = Command::new(sheepr());
         cmd.args(["run", "--", "/bin/sh", "-c", "exit 0"])
-            .env("SHEEPDOG_STATE", &real)
+            .env("SHEEPR_STATE", &real)
             .env("XDG_STATE_HOME", &real)
             .env("HOME", &real)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
-            .env("SHEEPDOG_TEST_TRACE", &trace);
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_TRACE", &trace);
         if !canary {
-            cmd.env_remove("SHEEPDOG_TEST_STATE");
+            cmd.env_remove("SHEEPR_TEST_STATE");
         }
         let code = finish(cmd.spawn().unwrap());
         assert_eq!(code, Some(0));
@@ -385,7 +385,7 @@ fn a_debug_run_never_writes_the_operators_state() {
             .into_iter()
             .filter(|p| {
                 let r = p.strip_prefix(&real).unwrap().to_string_lossy().into_owned();
-                r != ".sheepdog-test" && r != ".cache" && r != ".cache/rosetta" && !r.starts_with(".cache/rosetta/")
+                r != ".sheepr-test" && r != ".cache" && r != ".cache/rosetta" && !r.starts_with(".cache/rosetta/")
             })
             .collect();
         assert!(written.is_empty(), "canary {canary}: {written:?}");
@@ -415,12 +415,12 @@ fn the_root_is_journaled_before_it_runs() {
     let s = state(&d);
     let ran = d.join("ran");
     let code = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", "/bin/sh", "-c", &format!(r#"touch "{}""#, ran.display())])
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KILL_AFTER_ROOT_JOURNAL", "1")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KILL_AFTER_ROOT_JOURNAL", "1")
             // Linux: PDEATHSIG would kill the shim anyway; off, only the go byte holds it back
-            .env("SHEEPDOG_TEST_SHIM_NO_PDEATHSIG", "1")
+            .env("SHEEPR_TEST_SHIM_NO_PDEATHSIG", "1")
             .spawn()
             .unwrap(),
     );
@@ -448,8 +448,8 @@ fn the_status_line_names_the_root_the_job_and_the_notes() {
         let _ = std::fs::remove_file(&out);
         let mut c = Command::new("/bin/sh");
         c.args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /bin/sh -c '{cmd}' 3>"{}""#, out.display())])
-            .env("SD", sheepdog())
-            .env("SHEEPDOG_TEST_STATE", &s);
+            .env("SD", sheepr())
+            .env("SHEEPR_TEST_STATE", &s);
         for (k, v) in extra {
             c.env(k, v);
         }
@@ -461,7 +461,7 @@ fn the_status_line_names_the_root_the_job_and_the_notes() {
     assert!(ok.get("job").and_then(Json::str).is_some_and(|j| j.starts_with("j-")));
     let sig = run("kill -KILL $$", &[]);
     assert_eq!(sig.get("root").and_then(Json::str), Some("signaled"));
-    let failed = run("exit 0", &[("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL", "1")]);
+    let failed = run("exit 0", &[("SHEEPR_TEST_JOURNAL_WRITE_FAIL", "1")]);
     let notes: Vec<&str> = failed.get("notes").and_then(Json::arr).unwrap_or(&[]).iter().filter_map(Json::str).collect();
     assert!(notes.iter().any(|n| n.starts_with("journal-failed")), "{notes:?}");
     // a root that never started (not found: 127)
@@ -469,8 +469,8 @@ fn the_status_line_names_the_root_the_job_and_the_notes() {
     let code = finish(
         Command::new("/bin/sh")
             .args(["-c", &format!(r#"exec "$SD" run --status-fd 3 -- /nonexistent/cmd 3>"{}""#, out.display())])
-            .env("SD", sheepdog())
-            .env("SHEEPDOG_TEST_STATE", &s)
+            .env("SD", sheepr())
+            .env("SHEEPR_TEST_STATE", &s)
             .spawn()
             .unwrap(),
     );
@@ -496,10 +496,10 @@ fn a_running_job_s_journal_stays_locked() {
             ready.display(),
             go.display()
         );
-        let mut cmd = Command::new(sheepdog());
-        cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("R", d.join("rec")).env("SHEEPDOG_TEST_STATE", &s);
+        let mut cmd = Command::new(sheepr());
+        cmd.args(["run", "--grace", "0", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("R", d.join("rec")).env("SHEEPR_TEST_STATE", &s);
         if fail {
-            cmd.env("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL", "1");
+            cmd.env("SHEEPR_TEST_JOURNAL_WRITE_FAIL", "1");
         }
         let c = cmd.spawn().unwrap();
         let started = wait_for(&ready, 20);
@@ -526,9 +526,9 @@ fn a_running_job_s_journal_stays_locked() {
     }
 }
 
-/// `--status-fd` gets exactly one line, from the supervisor, also when sheepdog runs with a
+/// `--status-fd` gets exactly one line, from the supervisor, also when sheepr runs with a
 /// relay (it started with children of its own: here the shell's background `sleep`), and also
-/// when the job ends by a TERM to sheepdog. The relay never writes it.
+/// when the job ends by a TERM to sheepr. The relay never writes it.
 #[test]
 fn the_status_line_is_written_once_with_a_relay() {
     let d = scratch("relay");
@@ -539,8 +539,8 @@ fn the_status_line_is_written_once_with_a_relay() {
         let root = if term { format!(r#"touch "{}"; sleep 30"#, ready.display()) } else { "exit 0".to_string() };
         let mut c = Command::new("/bin/sh")
             .args(["-c", &format!(r#"sleep {m} & exec "$SD" run --status-fd 3 -- /bin/sh -c '{root}' 3>"{}""#, out.display())])
-            .env("SD", sheepdog())
-            .env("SHEEPDOG_TEST_STATE", &s)
+            .env("SD", sheepr())
+            .env("SHEEPR_TEST_STATE", &s)
             .spawn()
             .unwrap();
         if term {
@@ -566,11 +566,11 @@ fn the_phase_one_opt_out_writes_no_journal() {
     let d = scratch("optout");
     let s = state(&d);
     let code = finish(
-        Command::new(sheepdog())
+        Command::new(sheepr())
             .args(["run", "--", "/bin/sh", "-c", "exit 0"])
-            .env("SHEEPDOG_TEST_STATE", &s)
-            .env("SHEEPDOG_TEST_KEEP_JOURNAL", "1")
-            .env("SHEEPDOG_TEST_PHASE1", "1")
+            .env("SHEEPR_TEST_STATE", &s)
+            .env("SHEEPR_TEST_KEEP_JOURNAL", "1")
+            .env("SHEEPR_TEST_PHASE1", "1")
             .spawn()
             .unwrap(),
     );
@@ -589,10 +589,10 @@ fn a_leave_strays_journal_is_never_kept_without_its_mark() {
         let d = scratch(if fail { "strays-fail" } else { "strays-ok" });
         let s = state(&d);
         let m = marker();
-        let mut cmd = Command::new(sheepdog());
-        cmd.args(["run", "--leave-strays", "--", fixture(), "escape", &m]).arg(d.join("rec")).env("SHEEPDOG_TEST_STATE", &s);
+        let mut cmd = Command::new(sheepr());
+        cmd.args(["run", "--leave-strays", "--", fixture(), "escape", &m]).arg(d.join("rec")).env("SHEEPR_TEST_STATE", &s);
         if fail {
-            cmd.env("SHEEPDOG_TEST_JOURNAL_WRITE_FAIL", "1");
+            cmd.env("SHEEPR_TEST_JOURNAL_WRITE_FAIL", "1");
         }
         let code = finish(cmd.spawn().unwrap());
         for p in records(&d.join("rec"), 1) {

@@ -1,12 +1,12 @@
 //! Registration of nested runs (macOS; PLAN.md §3.2, PHASE2.md decision 13 and D5).
 //!
 //! The inner side (`register_all`) runs in the process that becomes an inner supervisor, before
-//! its disclaim: it registers with every supervisor of the `SHEEPDOG_OUTER` chain, in series,
+//! its disclaim: it registers with every supervisor of the `SHEEPR_OUTER` chain, in series,
 //! within one 2 s budget. The outer side (`Listener`) is served by the wait loop: non-blocking
 //! accepts and reads, a 100 ms deadline per connection, at most 32 pending. The peer's identity is
 //! the kernel's (`LOCAL_PEERTOKEN`, read after the record); the record's pid is only a claim.
 
-use sheepdog::regwire::{self, Entry};
+use sheepr::regwire::{self, Entry};
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -111,7 +111,7 @@ pub fn register_all(chain: &[Entry]) -> usize {
             }
             Err(why) => {
                 crate::note(format!("unregistered {}: {why}", e.path.display()));
-                say!("sheepdog: could not register with the sheepdog that runs this one ({why}); the outer adds this job only if its next scan still finds this process in its tree");
+                say!("sheepr: could not register with the sheepr that runs this one ({why}); the outer adds this job only if its next scan still finds this process in its tree");
             }
         }
     }
@@ -123,7 +123,7 @@ pub fn inherited(warn: bool) -> Vec<Entry> {
     let Ok(s) = std::env::var(regwire::VAR) else { return Vec::new() };
     let (v, bad) = regwire::parse(&s);
     if warn && bad > 0 {
-        say!("sheepdog: {bad} malformed entr{} in {} ignored", if bad == 1 { "y" } else { "ies" }, regwire::VAR);
+        say!("sheepr: {bad} malformed entr{} in {} ignored", if bad == 1 { "y" } else { "ies" }, regwire::VAR);
     }
     v
 }
@@ -157,18 +157,18 @@ impl Listener {
     pub fn open() -> Option<Listener> {
         let mut nonce = [0u8; 16];
         if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut nonce)).is_err() {
-            say!("sheepdog: no entropy for a registration nonce; nested runs are found by the scan only");
+            say!("sheepr: no entropy for a registration nonce; nested runs are found by the scan only");
             return None;
         }
         let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| "/tmp".into());
-        // mkdtemp's name: "sd-" + 8 characters; the socket's name: "s"
-        let fits = |base: &Path| base.join("sd-XXXXXXXX").join("s").as_os_str().len() <= PATH_MAX;
+        // mkdtemp's name: "sr-" + 8 characters; the socket's name: "s"
+        let fits = |base: &Path| base.join("sr-XXXXXXXX").join("s").as_os_str().len() <= PATH_MAX;
         let base = if fits(&tmp) { tmp } else { PathBuf::from("/tmp") };
-        let tmpl = std::ffi::CString::new(format!("{}/sd-XXXXXXXX", base.display().to_string().trim_end_matches('/'))).ok()?;
+        let tmpl = std::ffi::CString::new(format!("{}/sr-XXXXXXXX", base.display().to_string().trim_end_matches('/'))).ok()?;
         let mut raw = tmpl.into_bytes_with_nul();
         let d = unsafe { libc::mkdtemp(raw.as_mut_ptr() as *mut libc::c_char) };
         if d.is_null() {
-            say!("sheepdog: cannot make a registration directory: {}", std::io::Error::last_os_error());
+            say!("sheepr: cannot make a registration directory: {}", std::io::Error::last_os_error());
             return None;
         }
         raw.pop();
@@ -180,7 +180,7 @@ impl Listener {
             }
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_dir(&dir);
-            say!("sheepdog: cannot listen for nested runs ({why}); they are found by the scan only");
+            say!("sheepr: cannot listen for nested runs ({why}); they are found by the scan only");
             None
         };
         if !regwire::path_fits(&path) {
@@ -290,7 +290,7 @@ impl Listener {
     fn answer(&self, c: &Conn, admit: &mut Admit) -> bool {
         let Some((nonce, claim)) = regwire::read_record(&c.buf) else {
             crate::note("registration refused: malformed".into());
-            say!("sheepdog: a malformed registration was refused");
+            say!("sheepr: a malformed registration was refused");
             return false;
         };
         if nonce != self.nonce {
@@ -309,7 +309,7 @@ impl Listener {
         }
         if claim != pid {
             crate::note(format!("registration refused: claims {claim}, is {pid}"));
-            say!("sheepdog: a registration named pid {claim}, but its sender is pid {pid}; refused");
+            say!("sheepr: a registration named pid {claim}, but its sender is pid {pid}; refused");
             return false;
         }
         let Some((uniq, v1)) = versioned(pid) else { return false };
@@ -318,7 +318,7 @@ impl Listener {
             return false;
         }
         let member = admit(uniq, false);
-        let v2 = if crate::seam_flag("SHEEPDOG_TEST_REG_PIDVERSION_CHANGE") { versioned(pid).map(|v| v.1 + 1) } else { versioned(pid).map(|v| v.1) };
+        let v2 = if crate::seam_flag("SHEEPR_TEST_REG_PIDVERSION_CHANGE") { versioned(pid).map(|v| v.1 + 1) } else { versioned(pid).map(|v| v.1) };
         if v2 != Some(pidversion) {
             crate::note(format!("registration refused: {pid} changed during the check"));
             return false;

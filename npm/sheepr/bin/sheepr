@@ -1,0 +1,34 @@
+#!/bin/sh
+# The npm entry for sheepr (PHASE3.md D9). It finds this platform's package and execs its
+# executable, so the process you hold is sheepr itself (same pid) and it starts with your signal
+# dispositions, signal mask and environment. It is sh, not node: node resets every signal at start
+# and ignores SIGPIPE, and the job would inherit that. All the work happens in a $( ) subshell, so
+# this shell assigns no variable that could change one you exported.
+set -- "$(
+  me=$0 n=0
+  while [ -L "$me" ]; do
+    n=$((n + 1)); [ $n -le 40 ] || break
+    l=$(readlink "$me") || break
+    case $l in (/*) me=$l ;; (*) me=$(dirname "$me")/$l ;; esac
+  done
+  pkg=$(cd -P "$(dirname "$me")/.." 2>/dev/null && pwd -P) || { echo "sheepr: cannot find its npm package" >&2; exit 1; }
+  case $(uname -s) in
+    (Darwin) plat=darwin-universal exe=Sheepr.app/Contents/MacOS/sheepr ;;
+    (Linux)
+      case $(uname -m) in
+        (aarch64|arm64) plat=linux-arm64 ;;
+        (x86_64|amd64) plat=linux-x64 ;;
+        (*) echo "sheepr: no npm package for Linux $(uname -m)" >&2; exit 1 ;;
+      esac
+      exe=bin/sheepr ;;
+    (*) echo "sheepr: no npm package for $(uname -s)" >&2; exit 1 ;;
+  esac
+  # nested under this package, or hoisted beside it (npm's flat layout; pnpm: a sibling link)
+  for dir in "$pkg/node_modules/sheepr-$plat" "$pkg/../sheepr-$plat"; do
+    if [ -x "$dir/$exe" ]; then printf '%s' "$dir/$exe"; exit 0; fi
+  done
+  echo "sheepr: the package sheepr-$plat is not installed. Reinstall sheepr with its optional dependencies (without --omit=optional)." >&2
+  exit 1
+)" "$@"
+case $1 in ('') exit 1 ;; esac
+exec "$@"

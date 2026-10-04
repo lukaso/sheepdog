@@ -8,7 +8,7 @@
 #     profile check, submit, and the notary keychain locked again right after the last notarytool
 #     call, before staple, spctl, the door and the archive (the new binary never runs while it is
 #     unlocked); a failed lock is loud and fails the build;
-#   - notarytool only with --keychain-profile sheepdog-notary and --keychain <the notary keychain
+#   - notarytool only with --keychain-profile sheepr-notary and --keychain <the notary keychain
 #     file under HOME>, never a password, key or Apple ID; no other tool gets a keychain path;
 #   - a failed unlock stops the build before any notarytool call, and the keychain is locked; a
 #     missing notary keychain stops it before any keychain call; a rejection unlocks again before
@@ -18,12 +18,12 @@
 #   - the control mode (--no-notarize) makes no notarytool call and no keychain lock or unlock;
 #   - the guard: a direct call with a `security` that reports an identity, or with a forged
 #     --real nonce, is refused (3) and no signing tool runs;
-#   - the release-ID bundle lives only under /private/tmp/sd-sign.* and is gone afterwards.
+#   - the release-ID bundle lives only under /private/tmp/sr-sign.* and is gone afterwards.
 set -u
 . "$(dirname "$0")/lib.sh"
 [ "$(uname -s)" = Darwin ] || { echo "SKIP (macOS only)"; exit 0; }
 fx_dir
-SIGN="$SD_ROOT/scripts/lib/sign.sh"
+SIGN="$SR_ROOT/scripts/lib/sign.sh"
 DECOY=decoy-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 printf 'int main(){return 0;}\n' > "$FX/m.c"; cc -arch arm64 -arch x86_64 -o "$FX/bin" "$FX/m.c" || exit 3
 mkdir -p "$FX/home"
@@ -44,7 +44,7 @@ EOF
 # deleted when sign.sh ends)
 shim codesign 'case "$*" in
   *"--force"*) for a; do l=$a; done; cp "$l/Contents/Info.plist" "'"$S"'/signed.plist" 2>/dev/null ;;
-  *"-d -r-"*) grep -v "^#" "'"$SD_ROOT"'/tests/fixtures/codesign-dr-devid.txt" ;;
+  *"-d -r-"*) grep -v "^#" "'"$SR_ROOT"'/tests/fixtures/codesign-dr-devid.txt" ;;
   *"-d -v"*) echo "CodeDirectory v=20500 flags=0x10000(runtime)" >&2 ;;
 esac; exit 0'
 shim xcrun 'case "$*" in
@@ -58,7 +58,7 @@ shim security 'case "$*" in *find-identity*) echo "     0 valid identities found
   unlock-keychain*) { [ -e "'"$FX"'/unlock.fail" ] || { [ -e "'"$FX"'/unlock.fail2" ] && [ "$(grep -c "^security unlock-keychain" "'"$S"'/calls")" -ge 2 ]; }; } && { echo "security: SecKeychainUnlock: The user name or passphrase you entered is not correct." >&2; exit 51; } ;;
   lock-keychain*) [ -e "'"$FX"'/lock.fail" ] && [ "$(grep -c "^security lock-keychain" "'"$S"'/calls")" -ge 2 ] && { echo "security: lock failed" >&2; exit 50; } ;;
 esac; exit 0'
-KC=$FX/home/Library/Keychains/sheepdog-notary.keychain-db
+KC=$FX/home/Library/Keychains/sheepr-notary.keychain-db
 mkdir -p "${KC%/*}"; : > "$KC"
 
 run() { # name args... -> rc; output in $FX/out.<name>
@@ -66,7 +66,7 @@ run() { # name args... -> rc; output in $FX/out.<name>
   rm -f "$S/calls" "$S"/env.*
   mkdir -p "$FX/dest.$nm"
   env HOME="$FX/home" PATH="$S:$PATH" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" CSC_KEY_PASSWORD="$DECOY" GH_TOKEN="$DECOY" NPM_TOKEN="$DECOY" \
-    SD_ASK_RECORD="$S/calls" \
+    SR_ASK_RECORD="$S/calls" \
     sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.$nm" "$@" \
     > "$FX/out.$nm" 2>&1
 }
@@ -89,7 +89,7 @@ lk=$(grep -n '^security lock-keychain' "$S/calls" | tail -1 | cut -d: -f1); st=$
 ul=$(grep -n '^security unlock-keychain' "$S/calls" | head -1 | cut -d: -f1); cs=$(grep -n '^codesign --force' "$S/calls" | head -1 | cut -d: -f1)
 [ -n "$ul" ] && [ -n "$cs" ] && [ "$ul" -gt "$cs" ] && pass "unlocked only after codesign" || fail "unlock at $ul, codesign at $cs"
 [ "$(grep -c '^security lock-keychain' "$S/calls")" = 2 ] && pass "two locks: before the unlock and after the last notarytool call" || fail "lock calls: $(grep -c '^security lock-keychain' "$S/calls")"
-grep notarytool "$S/calls" | grep -v -q -- "--keychain-profile sheepdog-notary --keychain $KC\( \|\$\)" && fail "a notarytool call without the profile and the notary keychain" || pass "every notarytool call uses the profile in the notary keychain"
+grep notarytool "$S/calls" | grep -v -q -- "--keychain-profile sheepr-notary --keychain $KC\( \|\$\)" && fail "a notarytool call without the profile and the notary keychain" || pass "every notarytool call uses the profile in the notary keychain"
 grep notarytool "$S/calls" | grep -q -e '--password' -e '--apple-id' -e '--key ' -e '--key-id' -e '--issuer' && fail "notarytool got a credential argument" || pass "notarytool got no credential argument"
 other=$(grep -e '--keychain ' -e 'Library/Keychains' "$S/calls" | grep -v -e "^xcrun notarytool .* --keychain $KC" -e "^security lock-keychain $KC\$" -e "^security unlock-keychain $KC\$")
 [ -z "$other" ] && pass "no other call got a keychain path" || fail "other keychain paths: $other"
@@ -104,17 +104,17 @@ done
 if grep -r -l "$DECOY" "$S" "$FX/out.n" "$FX/dest.n" >/dev/null 2>&1; then fail "the decoy reached: $(grep -r -l "$DECOY" "$S" "$FX/out.n" "$FX/dest.n" | tr '\n' ' ')"
 else pass "the decoy reached no tool, output or file"; fi
 grep -q 'refused' "$FX/out.n" && pass "the refusal is the door's" || fail "no door refusal in the output"
-ls -d /private/tmp/sd-sign.* >/dev/null 2>&1 && fail "a signing temp dir is left" || pass "no signing temp dir left"
-ls "$FX/dest.n" | grep -q Sheepdog.app && fail "a bundle was left in the output" || pass "no bundle left in the output"
+ls -d /private/tmp/sr-sign.* >/dev/null 2>&1 && fail "a signing temp dir is left" || pass "no signing temp dir left"
+ls "$FX/dest.n" | grep -q Sheepr.app && fail "a bundle was left in the output" || pass "no bundle left in the output"
 
-[ -f "$S/signed.plist" ] && [ -z "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" ] \
-  && pass "the notarizing run's bundle has no control marker" || fail "the notarizing run's bundle: $(cat "$S/signed.plist" 2>/dev/null | grep -c SheepdogControlBuild) markers"
+[ -f "$S/signed.plist" ] && [ -z "$(/usr/bin/plutil -extract SheeprControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" ] \
+  && pass "the notarizing run's bundle has no control marker" || fail "the notarizing run's bundle: $(cat "$S/signed.plist" 2>/dev/null | grep -c SheeprControlBuild) markers"
 # 2. the control mode: no notarytool, no question; the bundle carries the control marker (its
 #    CDHash then differs from the release's: a reproducible build would otherwise share it, and
 #    Apple's online ticket would make the control pass Gatekeeper)
 rm -f "$S/signed.plist"
 run c --no-notarize; rc=$?
-[ "$(/usr/bin/plutil -extract SheepdogControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" = true ] && pass "the control bundle carries the control marker" || fail "the control bundle has no control marker"
+[ "$(/usr/bin/plutil -extract SheeprControlBuild raw -o - "$S/signed.plist" 2>/dev/null)" = true ] && pass "the control bundle carries the control marker" || fail "the control bundle has no control marker"
 [ $rc = 5 ] && pass "control run ends at the door's refusal (5)" || fail "control run: rc=$rc $(tail -2 "$FX/out.c" | tr '\n' ' ')"
 grep -q notarytool "$S/calls" && fail "the control mode called notarytool" || pass "the control mode calls no notarytool"
 ! grep -q -e '^announce' -e '^security lock-keychain' -e '^security unlock-keychain' "$S/calls" && pass "the control mode announces nothing and touches no keychain" || fail "the control mode announced or touched a keychain: $(grep -e announce -e keychain "$S/calls" | tr '\n' ';')"
@@ -147,8 +147,8 @@ seq=$(kcl)
 
 # 3. the requirement comparison refuses a changed marker (a copy of sign.sh's library dir with a
 #    release.conf whose requirement lacks one Developer ID marker)
-mkdir -p "$FX/alt/lib"; cp "$SD_ROOT/scripts/lib/"*.sh "$FX/alt/lib/"; cp "$SD_ROOT/scripts/bundle.sh" "$FX/alt/"
-sed 's/ and certificate 1\[field.1.2.840.113635.100.6.2.6\]//' "$SD_ROOT/scripts/release.conf" > "$FX/alt/release.conf"
+mkdir -p "$FX/alt/lib"; cp "$SR_ROOT/scripts/lib/"*.sh "$FX/alt/lib/"; cp "$SR_ROOT/scripts/bundle.sh" "$FX/alt/"
+sed 's/ and certificate 1\[field.1.2.840.113635.100.6.2.6\]//' "$SR_ROOT/scripts/release.conf" > "$FX/alt/release.conf"
 grep -q '100.6.2.6' "$FX/alt/release.conf" && fail "the changed requirement was not made"
 SIGN_SAVE=$SIGN; SIGN="$FX/alt/lib/sign.sh"
 run r; rc=$?
@@ -158,7 +158,7 @@ SIGN=$SIGN_SAVE
 # 4. the guard. (a) A real HOME (the key and the real login keychain in reach), everything else
 # the same: refused (3) before any signing tool, whatever the security shim says.
 rm -f "$S/calls" "$S"/env.*
-env PATH="$S:$PATH" SD_ASK_RECORD="$S/calls" \
+env PATH="$S:$PATH" SR_ASK_RECORD="$S/calls" \
   sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.g1" > "$FX/out.g1" 2>&1; rc=$?
 [ $rc = 3 ] && ! grep -q -e '^codesign' -e '^xcrun' "$S/calls" 2>/dev/null && pass "a real HOME: refused (3), no signing tool ran" || fail "real HOME: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 # (b) the real mode's parent: sign.sh must be a direct child of `release.sh build --sign`, in any of
@@ -171,7 +171,7 @@ cat > "$FX/fake/scripts/release.sh" <<F
 #!/bin/sh
 umask 077; echo n0nce > "$FX/nonce.f"
 exec 3>&-
-sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.f" --real n0nce --nonce-file "$FX/nonce.f" --parent-pid \${SD_PPID:-\$\$}
+sh "$SIGN" --bin "$FX/bin" --version 0.1.0 --build 1 --tag v0.1.0-rc.1 --commit 0123456789ab --dest "$FX/dest.f" --real n0nce --nonce-file "$FX/nonce.f" --parent-pid \${SR_PPID:-\$\$}
 F
 chmod 755 "$FX/fake/scripts/release.sh"
 form() { # label cmd... (run from $FX/fake)
@@ -190,6 +190,6 @@ env HOME="$FX/home" PATH="$S:$PATH" sh "$SIGN" --bin "$FX/bin" --version 0.1.0 -
 [ $rc = 3 ] && grep -q 'not called by release.sh build --sign' "$FX/out.g2" && [ ! -e "$S/calls" ] && pass "a forged --real (not called by release.sh build --sign): refused by the parent check (3), nothing ran" || fail "forged --real: rc=$rc calls=$(cat "$S/calls" 2>/dev/null | tr '\n' ';')"
 # forged: the right parent and arguments, but another pid given (1)
 rm -f "$S/calls"
-(cd "$FX/fake" && env HOME="$FX/home" PATH="$S:$PATH" SD_PPID=1 scripts/release.sh build --sign v0.1.0-rc.1) > "$FX/out.g3" 2>&1; rc=$?
+(cd "$FX/fake" && env HOME="$FX/home" PATH="$S:$PATH" SR_PPID=1 scripts/release.sh build --sign v0.1.0-rc.1) > "$FX/out.g3" 2>&1; rc=$?
 [ $rc = 3 ] && grep -q "parent's pid" "$FX/out.g3" && [ ! -e "$S/calls" ] && pass "the right parent with another pid given: refused by the pid check (3)" || fail "wrong pid: rc=$rc $(tail -1 "$FX/out.g3")"
 finish

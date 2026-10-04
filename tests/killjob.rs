@@ -1,4 +1,4 @@
-//! Phase-2 P4c: `sheepdog kill j-XXXX` (PHASE2.md §1 decision 11), `kill PID:ID`, and the journal
+//! Phase-2 P4c: `sheepr kill j-XXXX` (PHASE2.md §1 decision 11), `kill PID:ID`, and the journal
 //! as a membership fact in `kill <pid>` (decision 12). Every process a kill may aim at is built
 //! here from the fixture binary (these sources turn the latch on).
 
@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-fn sheepdog() -> &'static str {
+fn sheepr() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sheepdog")
+    env!("CARGO_BIN_EXE_sheepr")
 }
 fn fixture() -> &'static str {
     common::test_env();
-    env!("CARGO_BIN_EXE_sd-fixture")
+    env!("CARGO_BIN_EXE_sr-fixture")
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("sd-kj-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("sr-kj-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -28,7 +28,7 @@ fn scratch(name: &str) -> PathBuf {
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();
-    std::fs::write(s.join(".sheepdog-test"), b"").unwrap();
+    std::fs::write(s.join(".sheepr-test"), b"").unwrap();
     s
 }
 
@@ -79,10 +79,10 @@ fn counted(r: &Path) -> usize {
     std::fs::read_to_string(format!("{}.sig", r.display())).map(|s| s.lines().count()).unwrap_or(0)
 }
 
-/// `sheepdog kill ARGS` with this state; its exit code (30 s bound).
+/// `sheepr kill ARGS` with this state; its exit code (30 s bound).
 fn kill(s: &Path, args: &[&str], env: &[(&str, &str)]) -> Option<i32> {
-    let mut c = Command::new(sheepdog());
-    c.arg("kill").args(args).env("SHEEPDOG_TEST_STATE", s);
+    let mut c = Command::new(sheepr());
+    c.arg("kill").args(args).env("SHEEPR_TEST_STATE", s);
     for (k, v) in env {
         c.env(k, v);
     }
@@ -104,8 +104,8 @@ fn kill(s: &Path, args: &[&str], env: &[(&str, &str)]) -> Option<i32> {
 /// A live job (`escapee-and-wait`), its escapee journaled.
 fn live_job(d: &Path, s: &Path, name: &str, pre: impl FnOnce(&mut Command)) -> (Child, (i32, u64), PathBuf) {
     let r = d.join(name);
-    let mut cmd = Command::new(sheepdog());
-    cmd.args(["run", "--"]).arg(fixture()).arg("escapee-and-wait").arg(&r).env("SHEEPDOG_TEST_STATE", s);
+    let mut cmd = Command::new(sheepr());
+    cmd.args(["run", "--"]).arg(fixture()).arg("escapee-and-wait").arg(&r).env("SHEEPR_TEST_STATE", s);
     pre(&mut cmd);
     let c = cmd.spawn().unwrap();
     assert!(wait_until(15, || !records(&r).is_empty()), "{name}: the escapee started");
@@ -165,7 +165,7 @@ fn kill_job_ends_a_stopped_supervisor() {
     let d = scratch("stopped");
     let s = state(&d);
     let (mut c, g, r) = live_job(&d, &s, "a", |_| {});
-    let sup = (c.id() as i32, sheepdog::ident::identity(c.id() as i32).unwrap());
+    let sup = (c.id() as i32, sheepr::ident::identity(c.id() as i32).unwrap());
     common::send(sup.0, sup.1, libc::SIGSTOP);
     let code = kill(&s, &[&job_id(&s)], &[]);
     let sup_ended = finished(&mut c, 15).is_some();
@@ -214,7 +214,7 @@ fn kill_job_of_a_supervisor_that_ignores_term_is_125() {
             Ok(())
         });
     });
-    let code = kill(&s, &[&job_id(&s)], &[("SHEEPDOG_TEST_DEADLINE_MS", "500")]);
+    let code = kill(&s, &[&job_id(&s)], &[("SHEEPR_TEST_DEADLINE_MS", "500")]);
     let sup_alive = finished(&mut c, 1).is_none();
     common::send_child(&mut c, libc::SIGKILL);
     let _ = c.wait();
@@ -232,13 +232,13 @@ fn kill_job_from_inside_the_job_is_refused() {
     let s = state(&d);
     let (idf, rc, rr) = (d.join("id"), d.join("rc"), d.join("root"));
     let script = format!(
-        r#"while [ ! -s "{}" ]; do sleep 0.02; done; sheepdog kill "$(cat "{}")"; echo $? > "{}"; exec "$FX" sigcount "{}""#,
+        r#"while [ ! -s "{}" ]; do sleep 0.02; done; sheepr kill "$(cat "{}")"; echo $? > "{}"; exec "$FX" sigcount "{}""#,
         idf.display(),
         idf.display(),
         rc.display(),
         rr.display()
     );
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let mut c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap();
     assert!(wait_until(10, || !journals(&s).is_empty()));
     std::fs::write(&idf, job_id(&s)).unwrap();
     let got = wait_until(15, || std::fs::read_to_string(&rc).is_ok_and(|t| !t.trim().is_empty()));
@@ -317,7 +317,7 @@ fn kill_pid_proves_the_targets_subtree_from_the_journal() {
         rb.display(),
         rr.display()
     );
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let mut c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap();
     assert!(wait_until(15, || records(&ra).len() >= 3 && !records(&rb).is_empty()), "the workers started");
     let (a, e, cc) = (records(&ra)[0], records(&ra)[1], records(&ra)[2]);
     let b = records(&rb)[0];
@@ -349,8 +349,8 @@ fn kill_pid_id_turns_the_latch_on() {
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
     let sink = d.join("sink");
-    let mut cmd = Command::new(sheepdog());
-    cmd.args(["kill", &format!("{}:{}", p.0, p.1)]).env("SHEEPDOG_TEST_STATE", &s).env("SHEEPDOG_TEST_DEADLINE_MS", "500");
+    let mut cmd = Command::new(sheepr());
+    cmd.args(["kill", &format!("{}:{}", p.0, p.1)]).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_DEADLINE_MS", "500");
     common::cell_sink(&mut cmd, &sink);
     let _ = cmd.status();
     let (alive, n) = (common::alive(p), counted(&r));
@@ -383,7 +383,7 @@ fn a_reused_supervisor_pid_is_a_dead_job() {
     let h = json::parse(&header).unwrap();
     let field = |k: &str| h.get(k).and_then(Json::str).unwrap().to_string();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0001\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":{}}},\"argv\":\"sheepdog run\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0001\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":{}}},\"argv\":\"sheepr run\"}}\n",
         field("boot"),
         field("pidns"),
         unsafe { libc::getuid() },
@@ -430,7 +430,7 @@ fn dry_run_of_a_dead_job_touches_nothing() {
 
 /// Review P1-B: the journal's lineage in `kill <pid>` never reaches the kill's own caller. W's
 /// journaled subtree holds E (E was journaled under C under W, then reparented), and E runs
-/// `sheepdog kill W`: the kill is refused whole (exit 1), E and W get no signal.
+/// `sheepr kill W`: the kill is refused whole (exit 1), E and W get no signal.
 #[test]
 fn the_journal_lineage_never_reaches_the_caller() {
     let d = scratch("caller");
@@ -444,7 +444,7 @@ fn the_journal_lineage_never_reaches_the_caller() {
         rc.display(),
         rr.display()
     );
-    let mut c = Command::new(sheepdog()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPDOG_TEST_STATE", &s).spawn().unwrap();
+    let mut c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap();
     assert!(wait_until(15, || records(&r).len() >= 3), "W, E and C started");
     let (w, e, cc) = (records(&r)[0], records(&r)[1], records(&r)[2]);
     assert!(wait_until(10, || [w.0, e.0, cc.0].iter().all(|p| journaled(&s).contains(p))), "journaled while C lived");
@@ -472,7 +472,7 @@ fn the_journal_lineage_never_reaches_the_caller() {
 /// Review P2-1: `kill j-` is a phase-2 source (its targets come from a journal): a forged journal
 /// of a dead job whose member is an untagged process the test built, with its correct identity,
 /// gets it withheld (counter 0, a `withheld` line in the cell's own sink). (A live header that
-/// names a non-sheepdog is refused before any signal: sweep.rs
+/// names a non-sheepr is refused before any signal: sweep.rs
 /// `kill_job_refuses_a_header_that_names_no_supervisor`.)
 #[test]
 fn kill_job_turns_the_latch_on() {
@@ -494,7 +494,7 @@ fn kill_job_turns_the_latch_on() {
     let mut dead = Command::new("true").spawn().unwrap();
     let _ = dead.wait();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1}},\"argv\":\"sheepdog run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
         field("boot"),
         field("pidns"),
         unsafe { libc::getuid() },
@@ -505,8 +505,8 @@ fn kill_job_turns_the_latch_on() {
     let path = probe.parent().unwrap().join("j-5eed0002.journal");
     std::fs::write(&path, forged).unwrap();
     let sink = d.join("sink");
-    let mut cmd = Command::new(sheepdog());
-    cmd.args(["kill", "j-5eed0002"]).env("SHEEPDOG_TEST_STATE", &s).env("SHEEPDOG_TEST_DEADLINE_MS", "500");
+    let mut cmd = Command::new(sheepr());
+    cmd.args(["kill", "j-5eed0002"]).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_DEADLINE_MS", "500");
     common::cell_sink(&mut cmd, &sink);
     let _ = cmd.status();
     let (alive, n) = (common::alive(p), counted(&ru));
@@ -537,7 +537,7 @@ fn kill_job_keeps_the_sweep_fences() {
     let h = json::parse(&header).unwrap();
     let pidns = h.get("pidns").and_then(Json::str).unwrap().to_string();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0003\",\"boot\":\"00000000-0000-0000-0000-000000000000\",\"pidns\":\"{pidns}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":999999,\"id\":1}},\"argv\":\"sheepdog run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0003\",\"boot\":\"00000000-0000-0000-0000-000000000000\",\"pidns\":\"{pidns}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":999999,\"id\":1}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n",
         unsafe { libc::getuid() },
         p.0,
         p.1
@@ -568,7 +568,7 @@ fn kill_job_of_a_leave_strays_job_names_the_reason() {
     let _ = c.wait();
     let j = journals(&s).pop().unwrap();
     std::fs::OpenOptions::new().append(true).open(&j).unwrap().write_all(b"{\"v\":1,\"kind\":\"leave-strays\"}\n").unwrap();
-    let out = Command::new(sheepdog()).args(["kill", &id]).env("SHEEPDOG_TEST_STATE", &s).output().unwrap();
+    let out = Command::new(sheepr()).args(["kill", &id]).env("SHEEPR_TEST_STATE", &s).output().unwrap();
     let alive = common::alive(g);
     cleanup(&[&r]);
     let err = String::from_utf8_lossy(&out.stderr);

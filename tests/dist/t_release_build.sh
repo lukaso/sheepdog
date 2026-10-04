@@ -18,7 +18,7 @@ out=$FX/out
 # once the tag's worktree exists, break the shared checkout's helpers: the build must use the tag's
 i=0; until grep -q '^release: building' "$FX/log" 2>/dev/null || [ $i -gt 600 ]; do sleep 0.5; i=$((i + 1)); done
 # (every helper the build runs from $S, listed from release.sh itself)
-helpers=$(grep -o '"\$S/[a-z/._-]*' "$SD_ROOT/scripts/release.sh" | sed 's#"\$S/#scripts/#' | sort -u | grep -v 'release.conf$')
+helpers=$(grep -o '"\$S/[a-z/._-]*' "$SR_ROOT/scripts/release.sh" | sed 's#"\$S/#scripts/#' | sort -u | grep -v 'release.conf$')
 [ -n "$helpers" ] || fail "no helpers found in release.sh"
 for h in $helpers; do
   [ -f "$REPO/$h" ] || { fail "no $h in the repo"; continue; }
@@ -31,41 +31,41 @@ grep -q CHECKOUT-HELPER-USED "$FX/log" && fail "a helper ran from the shared che
 g checkout -q -- scripts
 echo "expect commit $short; the build said: $(grep '^release: building' "$FX/log")"
 D=$out/v0.1.0-rc.1-unsigned
-for f in sheepdog-macos-universal.tar.gz sheepdog-linux-aarch64 sheepdog-linux-x86_64 SHA256SUMS MANIFEST.json sheepdog.rb; do
+for f in sheepr-macos-universal.tar.gz sheepr-linux-aarch64 sheepr-linux-x86_64 SHA256SUMS MANIFEST.json sheepr.rb; do
   [ -s "$D/$f" ] && pass "$f made" || fail "$f missing"
 done
-"$SD_ROOT/scripts/lib/archive.sh" check "$D/sheepdog-macos-universal.tar.gz" && pass "the archive passes archive.sh check" || fail "the archive fails its check"
-mkdir "$FX/x" && tar -xzf "$D/sheepdog-macos-universal.tar.gz" -C "$FX/x"
-app=$FX/x/Sheepdog.app
-[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = com.lukaso.sheepdog.dev ] && pass "the unsigned bundle has the .dev ID" || fail "the unsigned bundle's ID"
+"$SR_ROOT/scripts/lib/archive.sh" check "$D/sheepr-macos-universal.tar.gz" && pass "the archive passes archive.sh check" || fail "the archive fails its check"
+mkdir "$FX/x" && tar -xzf "$D/sheepr-macos-universal.tar.gz" -C "$FX/x"
+app=$FX/x/Sheepr.app
+[ "$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = com.lukaso.sheepr.dev ] && pass "the unsigned bundle has the .dev ID" || fail "the unsigned bundle's ID"
 for a in arm64 x86_64; do
-  m=$(vtool -arch $a -show-build "$app/Contents/MacOS/sheepdog" 2>/dev/null | awk '$1=="minos"{print $2; exit}')
+  m=$(vtool -arch $a -show-build "$app/Contents/MacOS/sheepr" 2>/dev/null | awk '$1=="minos"{print $2; exit}')
   [ "$m" = 12.0 ] && pass "$a minos 12.0" || fail "$a minos '$m'"
 done
 mkdir -p "$FX/rh"
-v=$("$SD_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepdog" --version 2>&1)
+v=$("$SR_ROOT/scripts/lib/release-run.sh" "$FX/rh" "$app/Contents/MacOS/sheepr" --version 2>&1)
 case $v in *"$short"*) pass "the Mac binary names the tag's commit" ;; *) fail "the Mac binary says: $v" ;; esac
-. "$SD_ROOT/scripts/release.conf"
+. "$SR_ROOT/scripts/release.conf"
 # the static check, three ways: rc 0 no PT_INTERP, 1 a PT_INTERP, 3 readelf failed (so a missing
 # readelf can never read as "static")
 interp() { # file-in-the-image -> rc
-  timeout 120 docker run --rm --pull=never --network none -v "$D":/d:ro "$SD_IMG_ALPINE" \
+  timeout 120 docker run --rm --pull=never --network none -v "$D":/d:ro "$SR_IMG_ALPINE" \
     sh -c 'readelf -l "$1" > /tmp/h 2>&1 || exit 3; grep -q INTERP /tmp/h && exit 1; exit 0' sh "$1"
 }
 # control, always run: the image's own busybox is dynamic (musl), so the check can fire
 interp /bin/busybox; r=$?; [ $r = 1 ] && pass "control: the image's dynamic busybox shows a PT_INTERP" || fail "control: busybox gives rc $r (want 1: a PT_INTERP)"
 for a in aarch64 x86_64; do
-  b=$D/sheepdog-linux-$a
+  b=$D/sheepr-linux-$a
   case $a in aarch64) pf=linux/arm64 ;; *) pf=linux/amd64 ;; esac
-  interp /d/sheepdog-linux-$a; r=$?; [ $r = 0 ] && pass "$a has no PT_INTERP" || fail "$a: rc $r (1: a PT_INTERP, dynamic; 3: readelf failed)"
-  v=$(timeout 120 docker run --rm --pull=never --network none --platform $pf -v "$b":/sheepdog:ro "sd-scratch:empty-${pf#linux/}" /sheepdog --version 2>&1)
+  interp /d/sheepr-linux-$a; r=$?; [ $r = 0 ] && pass "$a has no PT_INTERP" || fail "$a: rc $r (1: a PT_INTERP, dynamic; 3: readelf failed)"
+  v=$(timeout 120 docker run --rm --pull=never --network none --platform $pf -v "$b":/sheepr:ro "sr-scratch:empty-${pf#linux/}" /sheepr --version 2>&1)
   case $v in *"$short"*) pass "$a runs in an empty image and names the tag's commit" ;; *) fail "$a in an empty image: $v" ;; esac
 done
-grep -q "sha256 \"$(shasum -a 256 "$D/sheepdog-macos-universal.tar.gz" | cut -d' ' -f1)\"" "$D/sheepdog.rb" && pass "the cask names the archive's hash" || fail "the cask's hash"
+grep -q "sha256 \"$(shasum -a 256 "$D/sheepr-macos-universal.tar.gz" | cut -d' ' -f1)\"" "$D/sheepr.rb" && pass "the cask names the archive's hash" || fail "the cask's hash"
 (cd "$D" && shasum -a 256 -c --strict SHA256SUMS >/dev/null 2>&1) && pass "SHA256SUMS matches (strict: no malformed line)" || fail "SHA256SUMS does not match, or has a malformed line"
 [ -s "$D/install.sh" ] && pass "install.sh is in the release" || fail "no install.sh in the release"
 n=$(grep -c . "$D/SHA256SUMS"); [ "$n" = 4 ] && pass "SHA256SUMS has exactly 4 lines" || fail "SHA256SUMS has $n lines, want 4"
-pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SD_ROOT/rust-toolchain.toml")
+pin=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$SR_ROOT/rust-toolchain.toml")
 rs=$(sed -n 's/.*"rustc": *"\([^"]*\)".*/\1/p' "$D/MANIFEST.json" | sort -u)
 [ -n "$rs" ] && [ "$(printf '%s\n' "$rs" | grep -vc "^rustc $pin ")" = 0 ] && pass "every recorded rustc is $pin" || fail "recorded rustc: $rs"
 grep -q "\"commit\": *\"$(g rev-parse v0.1.0-rc.1^{commit})\"" "$D/MANIFEST.json" && pass "the manifest names the commit" || fail "the manifest's commit"
@@ -73,22 +73,22 @@ grep -q '"control": *false' "$D/MANIFEST.json" && pass "the manifest is not a co
 # the npm packages (PHASE3.md S5): four tarballs, the main one's launcher executable and its
 # optional dependencies pinned to this version, each platform one holding its executable
 nv=0.1.0-rc.1
-for p in sheepdog sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
-  t=$D/lukaso-$p-$nv.tgz
+for p in sheepr sheepr-darwin-universal sheepr-linux-arm64 sheepr-linux-x64; do
+  t=$D/$p-$nv.tgz
   [ -s "$t" ] || { fail "no $(basename "$t")"; continue; }
   h=$(shasum -a 256 "$t" | cut -d' ' -f1)
   grep -q "\"name\": \"$(basename "$t")\", \"sha256\": \"$h\"" "$D/MANIFEST.json" && pass "$p: packed, in the manifest with its hash" || fail "$p: not in the manifest with its hash"
 done
-lst() { tar -tvzf "$D/lukaso-$1-$nv.tgz" 2>/dev/null; }
-lst sheepdog | grep -q '^-rwx.* package/bin/sheepdog$' && pass "the main package's launcher is executable" || fail "the main package's launcher"
-tar -xzOf "$D/lukaso-sheepdog-$nv.tgz" package/package.json > "$FX/pj" 2>/dev/null
-for p in sheepdog-darwin-universal sheepdog-linux-arm64 sheepdog-linux-x64; do
-  grep -q "\"@lukaso/$p\": \"$nv\"" "$FX/pj" || fail "the main package does not pin @lukaso/$p to $nv"
+lst() { tar -tvzf "$D/$1-$nv.tgz" 2>/dev/null; }
+lst sheepr | grep -q '^-rwx.* package/bin/sheepr$' && pass "the main package's launcher is executable" || fail "the main package's launcher"
+tar -xzOf "$D/sheepr-$nv.tgz" package/package.json > "$FX/pj" 2>/dev/null
+for p in sheepr-darwin-universal sheepr-linux-arm64 sheepr-linux-x64; do
+  grep -q "\"$p\": \"$nv\"" "$FX/pj" || fail "the main package does not pin $p to $nv"
 done
 grep -q '"optionalDependencies"' "$FX/pj" && pass "the platform packages are optional dependencies" || fail "no optionalDependencies"
-lst sheepdog-darwin-universal | grep -q '^-rwx.* package/Sheepdog.app/Contents/MacOS/sheepdog$' && pass "darwin: the bundle's executable" || fail "darwin package"
-lst sheepdog-linux-arm64 | grep -q '^-rwx.* package/bin/sheepdog$' && pass "linux-arm64: the binary" || fail "linux-arm64 package"
-lst sheepdog-linux-x64 | grep -q '^-rwx.* package/bin/sheepdog$' && pass "linux-x64: the binary" || fail "linux-x64 package"
+lst sheepr-darwin-universal | grep -q '^-rwx.* package/Sheepr.app/Contents/MacOS/sheepr$' && pass "darwin: the bundle's executable" || fail "darwin package"
+lst sheepr-linux-arm64 | grep -q '^-rwx.* package/bin/sheepr$' && pass "linux-arm64: the binary" || fail "linux-arm64 package"
+lst sheepr-linux-x64 | grep -q '^-rwx.* package/bin/sheepr$' && pass "linux-x64: the binary" || fail "linux-x64 package"
 [ "$(g worktree list | grep -c .)" = 1 ] && pass "no worktree left" || fail "a worktree left: $(g worktree list)"
 (cd "$REPO" && env HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 timeout 60 sh scripts/release.sh build --out "$out" v0.1.0-rc.1) >/dev/null 2>&1 \
   && fail "an existing output directory was reused" || pass "an existing output directory is refused"
