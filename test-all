@@ -100,10 +100,9 @@ bg_wait() {
   return $rc
 }
 
+# the warning check, and cargo's output lock for every build on this Mac (the containers source the
+# same file)
 . scripts/lib/warnings.sh || exit 3
-# cargo's output lock (scripts/lib/warnings.sh) for every build on this Mac; leg_run passes it into
-# the containers
-export $WARN_CARGO_ENV
 # record LEG RESULT. A leg whose log ($LOGDIR/LEG.log) holds a compiler warning, or cannot be read
 # for that check (scripts/lib/warnings.sh), cannot pass: cargo replays a crate's warnings even when
 # it does not rebuild it, the Linux suites print their build's whole output into the log, and
@@ -125,10 +124,9 @@ legtag() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 # A leg container: --init (so a signal to the container ends it: a shell as PID 1 ignores TERM),
 # its id recorded in a cidfile (cleanup removes it even after a timeout or ctrl-C), and bounded.
 leg_run() { # leg-name docker-args...
-  local name=$1 kv lock=(); shift
-  for kv in $WARN_CARGO_ENV; do lock+=(-e "$kv"); done
+  local name=$1; shift
   rm -f "$LOGDIR/$name.cid"
-  bg_wait timeout -k 30 3600 docker run --rm --init --pull=never --cidfile "$LOGDIR/$name.cid" "${lock[@]}" "$@" > "$LOGDIR/$name.log" 2>&1
+  bg_wait timeout -k 30 3600 docker run --rm --init --pull=never --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/$name.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
   return $rc
@@ -199,14 +197,14 @@ build_amd64() {
   # built in the container's own target dir (a build into the share fails at random, PHASE2.md),
   # only the binary copied out
   leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr' || return
+    '. /src/scripts/lib/warnings.sh && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr' || return
   no_build_warnings build-amd64
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
   leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SR_IMG_ALPINE" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins' || return
+    '. /src/scripts/lib/warnings.sh && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins' || return
   no_build_warnings build-alpine
 }
 # no_build_warnings NAME: a build whose log holds a compiler warning fails (issue #10)

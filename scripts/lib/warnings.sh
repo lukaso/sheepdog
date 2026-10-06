@@ -1,5 +1,6 @@
 # Compiler warning lines in a test log (issue #10): test-all fails a leg whose log holds one, and a
-# Linux build whose log holds one (tests/dist/t_warnings.sh). POSIX sh; sourced.
+# Linux build whose log holds one (tests/dist/t_warnings.sh). POSIX sh; sourced. Sourcing it also
+# exports cargo's output lock (below) for every cargo run after it.
 #
 # A warning line starts `warning: ` or `warning[CODE]: `. Colour codes are allowed before `warning`
 # and before the colon: rustc 1.98.1 with colour writes `ESC[1m ESC[33m warning[CODE] ESC[0m ESC[1m :`.
@@ -7,12 +8,17 @@
 WARN_ESC=$(printf '\033')
 WARN_SGR="(${WARN_ESC}\[[0-9;]*m)*"
 WARN_RE="^${WARN_SGR}warning(\[[A-Za-z0-9_]+\])?${WARN_SGR}: "
-# cargo's output lock: every build whose log is judged runs with these, so its output has no
-# colour codes and no progress bar whatever a cargo config file says (the environment beats a
-# config file). A progress bar drawn into a log puts the next warning in the middle of a line,
-# where no `^` match sees it. test-all exports them and passes them into every container
-# (leg_run); the Linux suites refuse to build without them.
-WARN_CARGO_ENV="CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never"
+# cargo's output lock, exported here, so whatever sources this file builds under it: test-all (the
+# builds on this Mac) and, inside the containers, the Linux suites and build_alpine and
+# build_amd64. Cargo then reports with no colour codes, no progress bar and every warning shown,
+# whatever a cargo config file says (the environment beats a config file): a progress bar drawn
+# into a log puts the next warning in the middle of a line, where no `^` match sees it, and
+# `build.warnings = "allow"` hides every warning. The lock pins how cargo reports, never what it
+# builds: warnings silenced by rustflags (`-A warnings`, `--cap-lints`), in the source
+# (`#![allow(...)]`) or in Cargo.toml's `[lints]` are not covered (each changes what is compiled).
+WARN_CARGO_ENV="CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never CARGO_BUILD_WARNINGS=warn"
+for _warn_kv in $WARN_CARGO_ENV; do export "$_warn_kv"; done
+unset _warn_kv
 # warn_count LOG: the number of warning lines in LOG, read binary-safe, or `unreadable` when grep
 # cannot read it
 warn_count() (

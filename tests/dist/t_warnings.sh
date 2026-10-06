@@ -3,11 +3,12 @@
 # fails the leg, with or without colour and with or without a code (`warning[E0133]: `), and a
 # log the check cannot read fails it too (an unread log is not a clean one). The logs are rustc's
 # own output: tiny libraries with an unused variable, with a coded warning, and with none,
-# compiled by the pinned toolchain (run from the repo) into the fixture directory. And a cargo
-# build whose config file forces colour and the progress bar (which puts a warning in the middle
-# of a line): under the lock test-all sets (WARN_CARGO_ENV) its warning fails the leg; without the
-# lock the same build hides it (the control that proves the config file took effect). No log line
-# is printed as it is: the bundle leg's own log is checked by the same rule.
+# compiled by the pinned toolchain (run from the repo) into the fixture directory. And cargo
+# builds whose config file hides a warning (colour and the progress bar, which put it in the
+# middle of a line; `build.warnings = "allow"`): under cargo's output lock, which sourcing the lib
+# exported into this cell (as it does for test-all and the Linux suites), the warning fails the
+# leg; without the lock the same build hides it (the controls that prove each config file took
+# effect). No log line is printed as it is: the bundle leg's own log is checked by the same rule.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
@@ -52,30 +53,41 @@ fi
 chmod 600 "$FX/locked"
 
 # cargo, on a tiny crate in the fixture directory: its own CARGO_HOME (no user config is read) and
-# target dirs, the pinned toolchain; a build script that sleeps 3 s so that the bar is drawn
+# target dirs, the pinned toolchain; a build script that sleeps 3 s so that the bar is drawn. A run
+# with the lock inherits it from this cell's environment; a run without it removes every
+# variable the lock names.
 mkdir -p "$FX/crate/src" "$FX/crate/.cargo" "$FX/home"
 cp "$SR_ROOT/rust-toolchain.toml" "$FX/crate/"
 printf '[package]\nname = "wcheck"\nversion = "0.1.0"\nedition = "2021"\n' > "$FX/crate/Cargo.toml"
 printf 'fn main() { std::thread::sleep(std::time::Duration::from_secs(3)); }\n' > "$FX/crate/build.rs"
-printf '[term]\ncolor = "always"\nprogress.when = "always"\nprogress.width = 80\n' > "$FX/crate/.cargo/config.toml"
-cargo_log() { # name source lock(yes|no): cargo build -q's output in $FX/name; exit 0 only if it built
-  cp "$FX/$2.rs" "$FX/crate/src/lib.rs"
-  if [ "$3" = yes ]; then set -- "$1" ${WARN_CARGO_ENV:-}; else set -- "$1"; fi
-  n_=$1; shift
-  (cd "$FX/crate" && env -u CARGO_TERM_COLOR -u CARGO_TERM_PROGRESS_WHEN "$@" CARGO_HOME="$FX/home" \
-    CARGO_TARGET_DIR="$FX/t-$n_" cargo build -q) > "$FX/$n_" 2>&1
+printf '[term]\ncolor = "always"\nprogress.when = "always"\nprogress.width = 80\n' > "$FX/term.toml"
+printf '[build]\nwarnings = "allow"\n' > "$FX/allow.toml"
+unlock=""
+for kv in $WARN_CARGO_ENV; do unlock="$unlock -u ${kv%%=*}"; done
+cargo_log() { # name source config lock(yes|no): cargo build -q's output in $FX/name; exit 0 only if it built
+  cp "$FX/$2.rs" "$FX/crate/src/lib.rs" && cp "$FX/$3.toml" "$FX/crate/.cargo/config.toml" || return 1
+  u=$unlock; [ "$4" = yes ] && u=""
+  # shellcheck disable=SC2086 # $u is a list of `-u NAME` words
+  (cd "$FX/crate" && env $u CARGO_HOME="$FX/home" CARGO_TARGET_DIR="$FX/t-$1" cargo build -q) > "$FX/$1" 2>&1
 }
 CR=$(printf '\r')
-cargo_log nolock w no || { fail "harness: cargo did not build the crate"; show "$FX/nolock"; finish; }
-grep -q "$CR" "$FX/nolock" && grep -q 'unused variable' "$FX/nolock" \
-  || { fail "harness: the config file drew no progress bar, or the build has no warning"; show "$FX/nolock"; }
-[ "$(warn_count "$FX/nolock")" = 0 ] && pass "control: without the lock, the config file hides cargo's warning from the match" \
-  || fail "harness: without the lock the match still sees the warning ($(warn_count "$FX/nolock")): the row below proves nothing"
-cargo_log lock w yes || { fail "cargo did not build the crate under the lock"; show "$FX/lock"; finish; }
-if [ -n "$(warn_fail "$FX/lock")" ] && ! grep -q "$CR" "$FX/lock" && ! grep -q "$WARN_ESC" "$FX/lock"; then
-  pass "under test-all's lock, the same build's warning fails the leg (no bar, no colour)"
-else fail "under the lock: '$(warn_fail "$FX/lock")' (want a failure, no bar and no colour)"; show "$FX/lock"; fi
-cargo_log lockclean c yes || { fail "cargo did not build the clean crate under the lock"; show "$FX/lockclean"; finish; }
+cargo_log bar w term no || { fail "harness: cargo did not build the crate"; show "$FX/bar"; finish; }
+grep -q "$CR" "$FX/bar" && grep -q 'unused variable' "$FX/bar" \
+  || { fail "harness: the config file drew no progress bar, or the build has no warning"; show "$FX/bar"; }
+[ "$(warn_count "$FX/bar")" = 0 ] && pass "control: without the lock, a config file's colour and progress bar hide cargo's warning" \
+  || fail "harness: without the lock the match still sees the warning ($(warn_count "$FX/bar")): the lock row proves nothing"
+cargo_log barlock w term yes || { fail "cargo did not build the crate under the lock"; show "$FX/barlock"; finish; }
+if [ -n "$(warn_fail "$FX/barlock")" ] && ! grep -q "$CR" "$FX/barlock" && ! grep -q "$WARN_ESC" "$FX/barlock"; then
+  pass "under the lock, the same build's warning fails the leg (no bar, no colour)"
+else fail "under the lock: '$(warn_fail "$FX/barlock")' (want a failure, no bar and no colour)"; show "$FX/barlock"; fi
+cargo_log allow w allow no || { fail "harness: cargo did not build the crate (warnings allowed)"; show "$FX/allow"; finish; }
+! grep -q 'unused variable' "$FX/allow" && [ "$(warn_count "$FX/allow")" = 0 ] \
+  && pass "control: without the lock, build.warnings = \"allow\" hides cargo's warning" \
+  || { fail "harness: build.warnings = allow did not hide the warning: the lock row proves nothing"; show "$FX/allow"; }
+cargo_log allowlock w allow yes || { fail "cargo did not build the crate under the lock (warnings allowed)"; show "$FX/allowlock"; finish; }
+[ -n "$(warn_fail "$FX/allowlock")" ] && pass "under the lock, a warning allowed by the config file fails the leg" \
+  || { fail "under the lock, build.warnings = allow still hides the warning"; show "$FX/allowlock"; }
+cargo_log lockclean c term yes || { fail "cargo did not build the clean crate under the lock"; show "$FX/lockclean"; finish; }
 [ -z "$(warn_fail "$FX/lockclean")" ] && pass "control: a clean build under the lock passes" \
   || { fail "a clean build under the lock fails: $(warn_fail "$FX/lockclean")"; show "$FX/lockclean"; }
 finish
