@@ -24,10 +24,11 @@ rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./tar
 # directory), and every leg recompiles sheepr anyway
 mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
 export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
-# the build's warning and error lines reach the leg's log: test-all's record() fails a leg on a
-# compiler warning (issue #10), so a warning in Linux-only code is seen too
+# the build's whole output reaches the leg's log (a quiet build prints only its diagnostics):
+# test-all's record() fails a leg on a compiler warning in it, coloured or not (issue #10,
+# scripts/lib/warnings.sh), so a warning in Linux-only code is seen too
 cargo build -q --tests > /tmp/build.log 2>&1; brc=$?
-grep -E -A6 '^(warning|error)(\[[A-Za-z0-9_]+\])?: ' /tmp/build.log | cut -c1-200
+cut -c1-200 /tmp/build.log
 [ $brc = 0 ] || exit 3
 timeout 3000 cargo test --no-fail-fast -- --nocapture > /tmp/suite.log 2>&1
 rc=$?
