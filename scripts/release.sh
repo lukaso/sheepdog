@@ -104,6 +104,13 @@ checks() {
     [ -n "$pc" ] || die "the previous tag $prev has no readable SR_BUILD_COUNTER in scripts/release.conf (a tag from before a rename keeps it under another name): delete that tag, or tag a commit whose counter can be read"
     [ "$c" -gt "$pc" ] || die "the build counter $c is not above $prev's ($pc)"
   fi
+  # the signing identity at the tag must not be a retired one: a replaced certificate that is still
+  # valid stays in the keychain, meets the release requirement (same team) and would sign silently
+  conf=$(git -C "$root" show "$tag:scripts/release.conf" 2>/dev/null)
+  sid=$(printf '%s\n' "$conf" | sed -n 's/^SR_SIGN_IDENTITY=\([0-9A-F]\{40\}\)$/\1/p' | head -1)
+  [ -n "$sid" ] || die "the tag has no SR_SIGN_IDENTITY (a 40-digit SHA-1 in capitals) in scripts/release.conf"
+  ret=$(printf '%s\n' "$conf" | sed -n "s/^SR_RETIRED_IDENTITIES='\(.*\)'\$/\1/p" | head -1)
+  case " $ret " in *" $sid "*) die "the signing identity $sid is retired (a replaced certificate, still valid in the keychain): set SR_SIGN_IDENTITY in scripts/release.conf to the current one, commit, and tag again" ;; esac
   echo "release: $tag checks passed (commit $commit, build $c${prev:+, previous $prev})"
 }
 

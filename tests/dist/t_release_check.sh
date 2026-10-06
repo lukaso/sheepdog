@@ -64,6 +64,13 @@ g commit -q -am "a counter under another name" && g tag -a v0.2.0-rc.1 -m v0.2.0
 fx_release 0.2.0 1 v0.2.0-rc.2; chk no "a previous tag with no readable build counter" v0.2.0-rc.2
 grep -qF "the previous tag v0.2.0-rc.1 has no readable" "$FX/o" && pass "  that refusal names the previous tag" || fail "  the refusal: $(tail -1 "$FX/o")"
 fx_release 0.3.0 0 v0.3.0-rc.1; fx_release 0.3.0 1 v0.3.0-rc.2; chk ok "control: a previous tag's readable counter of 0, and 1 above it" v0.3.0-rc.2
+# a retired signing identity (a replaced certificate that is still valid, so the keychain would
+# sign with it silently) is refused at the tag, the identity named; the current one passes (above)
+old=7C2F2EBE3D6A6673DC2F12E670A4B77CB2C357C8
+sed -i.bak "s/^SR_SIGN_IDENTITY=.*/SR_SIGN_IDENTITY=$old/" "$REPO/scripts/release.conf" && rm -f "$REPO/scripts/release.conf.bak"
+grep -q "^SR_RETIRED_IDENTITIES=.*$old" "$REPO/scripts/release.conf" || fail "the fixture's release.conf does not list $old as retired (the row would prove nothing)"
+fx_release 0.3.0 2 v0.3.0-rc.3; chk no "a retired signing identity" v0.3.0-rc.3
+grep -qF "$old is retired" "$FX/o" && pass "  that refusal names the identity" || fail "  the refusal: $(tail -1 "$FX/o")"
 
 # the signing and publishing entries refuse before anything runs
 fx_shims "$FX/sh" codesign xcrun security gh docker cargo npm ditto lipo spctl
