@@ -507,7 +507,7 @@ fn strays_kill_asks_with_the_sheepr_prefix() {
             }
         });
         let mut seen = Vec::new();
-        let mut until = |seen: &mut Vec<u8>, done: &dyn Fn(&[u8]) -> bool, secs: u64, what: &str, ch: &mut std::process::Child| {
+        let until = |seen: &mut Vec<u8>, done: &dyn Fn(&[u8]) -> bool, secs: u64, what: &str, ch: &mut std::process::Child| {
             let end = Instant::now() + Duration::from_secs(secs);
             while !done(seen) {
                 match rx.recv_timeout(end.saturating_duration_since(Instant::now())) {

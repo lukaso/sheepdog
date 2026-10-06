@@ -98,7 +98,17 @@ bg_wait() {
   return $rc
 }
 
-record() { RESULTS+=("$1: $2"); echo "== $1: $2"; }
+# record LEG RESULT. A leg whose log ($LOGDIR/LEG.log) holds a compiler warning cannot pass: cargo
+# replays a crate's warnings even when it does not rebuild it, so every leg that compiles shows them
+# (issue #10: the count stays at zero). cargo's own summary line ("generated N warning") is not counted.
+record() {
+  local res=$2 w
+  if [ "$res" = PASS ] && [ -f "$LOGDIR/$1.log" ]; then
+    w=$(grep -E '^warning: ' "$LOGDIR/$1.log" | grep -c -v -E 'generated [0-9]+ warnings?( \(.*\))?$')
+    [ "$w" -eq 0 ] || res="FAIL ($w compiler warning(s); $LOGDIR/$1.log)"
+  fi
+  RESULTS+=("$1: $res"); echo "== $1: $res"
+}
 
 # A tag of its own for each leg (PHASE2.md §0.4): the runner adopts it, so every test process of
 # the leg carries SHEEPR_TEST_TAG=<it>, and after the suite any live process that still does is

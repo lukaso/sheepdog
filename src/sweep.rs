@@ -51,7 +51,6 @@ pub struct Journal {
     pub boot: String,
     pub pidns: String,
     pub owner: String,
-    pub sup: (i32, u64),
     pub members: Vec<Line>,
     pub leave_strays: bool,
     /// the file does not end in a newline (a line cut short): an append starts a new line
@@ -111,7 +110,6 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
     let body = &text[..text.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1)];
     let mut lines = String::from_utf8_lossy(body).lines().filter_map(|l| json::parse(l).ok()).collect::<Vec<_>>().into_iter();
     let h = lines.next().filter(|h| h.get("kind").and_then(Json::str) == Some("header")).ok_or_else(|| Skip::Unreadable("no header".into()))?;
-    let sup = h.get("sup").and_then(|s| Some((num(s, "pid")? as i32, num(s, "id")? as u64))).unwrap_or((0, 0));
     let mut j = Journal {
         path: path.to_path_buf(),
         file,
@@ -119,7 +117,6 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         boot: h.get("boot").and_then(Json::str).unwrap_or("").to_string(),
         pidns: h.get("pidns").and_then(Json::str).unwrap_or("").to_string(),
         owner: h.get("owner").and_then(Json::str).unwrap_or("default").to_string(),
-        sup,
         members: Vec::new(),
         leave_strays: false,
         torn,
