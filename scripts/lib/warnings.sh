@@ -19,6 +19,21 @@ WARN_RE="^${WARN_SGR}warning(\[[A-Za-z0-9_]+\])?${WARN_SGR}: "
 WARN_CARGO_ENV="CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never CARGO_BUILD_WARNINGS=warn"
 for _warn_kv in $WARN_CARGO_ENV; do export "$_warn_kv"; done
 unset _warn_kv
+# warn_lock: print the lock as this shell exports it ("cargo output lock: NAME=VALUE ...", or
+# "NAME unset"), and fail unless every name holds the lock's value. Each container build runs it
+# right after sourcing this file: without the source line it is not found, and the build stops.
+# Not caught: a change that removes both lines from an entry point (test-all does not check that a
+# container log holds the lock line).
+warn_lock() (
+  ok=0 out=""
+  for kv in $WARN_CARGO_ENV; do
+    n=${kv%%=*}
+    if v=$(printenv "$n"); then out="$out $n=$v"; else v=""; out="$out $n unset"; fi
+    [ "$n=$v" = "$kv" ] || ok=1
+  done
+  echo "cargo output lock:$out"
+  return $ok
+)
 # warn_count LOG: the number of warning lines in LOG, read binary-safe, or `unreadable` when grep
 # cannot read it
 warn_count() (

@@ -7,7 +7,8 @@
 # builds whose config file hides a warning (colour and the progress bar, which put it in the
 # middle of a line; `build.warnings = "allow"`): under cargo's output lock, which the build gets
 # only by sourcing the lib (as test-all and the containers do), the warning fails the leg; without
-# the lock the same build hides it (the controls that prove each config file took effect). No log line is printed as it is: the bundle leg's own log is checked by the same rule.
+# the lock the same build hides it (the controls that prove each config file took effect). No
+# log line is printed as it is: the bundle leg's own log is checked by the same rule.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
@@ -90,4 +91,18 @@ cargo_log allowlock w allow yes || { fail "cargo did not build the crate under t
 cargo_log lockclean c term yes || { fail "cargo did not build the clean crate under the lock"; show "$FX/lockclean"; finish; }
 [ -z "$(warn_fail "$FX/lockclean")" ] && pass "control: a clean build under the lock passes" \
   || { fail "a clean build under the lock fails: $(warn_fail "$FX/lockclean")"; show "$FX/lockclean"; }
+
+# warn_lock, which each container build runs right after sourcing the lib: it reads the lock from
+# the environment (what a child inherits), not from the lib's text
+# shellcheck disable=SC2086 # $unlock is a list of `-u NAME` words
+lk() { env $unlock sh -c "$1"' 2>&1; echo "rc=$?"' sh "$SR_ROOT/scripts/lib/warnings.sh"; }
+o=$(lk '. "$1" && warn_lock')
+case $o in *"cargo output lock: $WARN_CARGO_ENV"*rc=0) pass "control: after the source, warn_lock reads the whole lock from the environment" ;;
+  *) fail "warn_lock after the source: $(printf %s "$o" | tr '\n' ' ')" ;; esac
+o=$(lk '. "$1" && unset CARGO_BUILD_WARNINGS && warn_lock')
+case $o in *"CARGO_BUILD_WARNINGS unset"*rc=[1-9]*) pass "warn_lock fails when a name is not exported" ;;
+  *) fail "warn_lock with a name unset: $(printf %s "$o" | tr '\n' ' ')" ;; esac
+o=$(lk '. "$1" && export CARGO_TERM_COLOR=always && warn_lock')
+case $o in *"CARGO_TERM_COLOR=always"*rc=[1-9]*) pass "warn_lock fails on a value that is not the lock's" ;;
+  *) fail "warn_lock with another value: $(printf %s "$o" | tr '\n' ' ')" ;; esac
 finish

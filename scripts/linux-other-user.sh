@@ -13,10 +13,10 @@ rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./tar
 mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
 export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
 # cargo's output lock (scripts/lib/warnings.sh exports it): without it a cargo config could hide a
-# warning from test-all's check (a progress bar, colour codes, warnings allowed). The log states
-# it; without the source line, `set -u` stops the leg here.
+# warning from test-all's check (a progress bar, colour codes, warnings allowed). warn_lock puts
+# the exported lock in the log and stops the leg without it (or without the source line).
 . /src/scripts/lib/warnings.sh || exit 3
-echo "cargo output lock: $WARN_CARGO_ENV"
+warn_lock || exit 3
 # the build's whole output reaches the leg's log (under the lock a quiet build prints only its
 # diagnostics): test-all's record() fails a leg on a compiler warning in it (issue #10), so a
 # warning in Linux-only code is seen too
