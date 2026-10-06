@@ -9,8 +9,9 @@
 //!
 //! Helpers that find pids by a `ps` scan return (pid, identity) pairs, read right at discovery.
 
-#![allow(dead_code, unused_imports)] // each test file uses a different part (the json re-export too)
+#![allow(dead_code)] // each test file uses a different part
 
+#[allow(unused_imports)] // each test file uses a different part: some do not use json
 pub use sheepr::json;
 
 use sheepr::ident::{identity, same};

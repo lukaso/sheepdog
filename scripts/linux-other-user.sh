@@ -12,7 +12,11 @@ rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./tar
 # directory), and every leg recompiles sheepr anyway
 mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
 export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
-cargo build -q --tests 2>&1 | grep -E '^error' -A6 && exit 3
+# the build's warning and error lines reach the leg's log: test-all's record() fails a leg on a
+# compiler warning (issue #10), so a warning in Linux-only code is seen too
+cargo build -q --tests > /tmp/build.log 2>&1; brc=$?
+grep -E -A6 '^(warning|error)(\[[A-Za-z0-9_]+\])?: ' /tmp/build.log | cut -c1-200
+[ $brc = 0 ] || exit 3
 # the test executables only (the profile of a plain bin target has "test":false)
 bins=$(cargo test --no-run --message-format=json 2>/dev/null | grep '"profile":{[^}]*"test":true' | grep -o '"executable":"[^"]*"' | cut -d'"' -f4)
 [ -n "$bins" ] || { echo "no test executables found"; exit 3; }

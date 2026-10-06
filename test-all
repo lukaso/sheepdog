@@ -98,14 +98,20 @@ bg_wait() {
   return $rc
 }
 
+# compiler warning lines (issue #10): `warning: ` or `warning[CODE]: ` at the start of a line, colour
+# codes allowed, read binary-safe; cargo's own summary line is one too, and counts
+ESC=$'\e'
+WARN_RE="^(${ESC}\[[0-9;]*m)*warning(\[[A-Za-z0-9_]+\])?: "
+warn_count() { local c; c=$(grep -a -c -E "$WARN_RE" "$1" 2>/dev/null); echo "${c:-0}"; }
 # record LEG RESULT. A leg whose log ($LOGDIR/LEG.log) holds a compiler warning cannot pass: cargo
-# replays a crate's warnings even when it does not rebuild it, so every leg that compiles shows them
-# (issue #10: the count stays at zero). cargo's own summary line ("generated N warning") is not counted.
+# replays a crate's warnings even when it does not rebuild it, the Linux suites print their build's
+# warning lines into the log, and build_alpine and build_amd64 fail on one (their legs then record
+# the build's failure).
 record() {
   local res=$2 w
   if [ "$res" = PASS ] && [ -f "$LOGDIR/$1.log" ]; then
-    w=$(grep -E '^warning: ' "$LOGDIR/$1.log" | grep -c -v -E 'generated [0-9]+ warnings?( \(.*\))?$')
-    [ "$w" -eq 0 ] || res="FAIL ($w compiler warning(s); $LOGDIR/$1.log)"
+    w=$(warn_count "$LOGDIR/$1.log")
+    [ "$w" -eq 0 ] || res="FAIL ($w compiler warning line(s); $LOGDIR/$1.log)"
   fi
   RESULTS+=("$1: $res"); echo "== $1: $res"
 }
@@ -191,13 +197,21 @@ build_amd64() {
   # built in the container's own target dir (a build into the share fails at random, PHASE2.md),
   # only the binary copied out
   leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr'
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr' || return
+  no_build_warnings build-amd64
 }
 
 # Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
 build_alpine() {
   leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SR_IMG_ALPINE" sh -c \
-    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins'
+    'rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins' || return
+  no_build_warnings build-alpine
+}
+# no_build_warnings NAME: a build whose log holds a compiler warning fails (issue #10)
+no_build_warnings() {
+  local w; w=$(warn_count "$LOGDIR/$1.log")
+  [ "$w" -eq 0 ] && return 0
+  echo "$1: $w compiler warning line(s) (a build with a warning fails)" >> "$LOGDIR/$1.log"; return 1
 }
 
 # Start `sheepr run -- sr-fixture ticker` as the container's main process; prints the id.
