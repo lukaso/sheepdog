@@ -24,9 +24,15 @@ rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude='./tar
 # directory), and every leg recompiles sheepr anyway
 mkdir -p /t && (cd /tgt && tar cf - --exclude=./debug/incremental .) | (cd /t && tar xf -) || exit 3
 export CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0
-# the build's whole output reaches the leg's log (a quiet build prints only its diagnostics):
-# test-all's record() fails a leg on a compiler warning in it, coloured or not (issue #10,
-# scripts/lib/warnings.sh), so a warning in Linux-only code is seen too
+# cargo's output lock (scripts/lib/warnings.sh), passed in by test-all's leg_run: without it a
+# cargo config could hide a warning from the check (a progress bar, colour codes)
+. /src/scripts/lib/warnings.sh || exit 3
+for kv in $WARN_CARGO_ENV; do
+  [ "$(printenv "${kv%%=*}")" = "${kv#*=}" ] || { echo "cargo's output lock is missing: ${kv%%=*} (test-all's leg_run passes it)"; exit 3; }
+done
+# the build's whole output reaches the leg's log (under the lock a quiet build prints only its
+# diagnostics): test-all's record() fails a leg on a compiler warning in it (issue #10), so a
+# warning in Linux-only code is seen too
 cargo build -q --tests > /tmp/build.log 2>&1; brc=$?
 cut -c1-200 /tmp/build.log
 [ $brc = 0 ] || exit 3

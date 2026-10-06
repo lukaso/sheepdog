@@ -101,9 +101,12 @@ bg_wait() {
 }
 
 . scripts/lib/warnings.sh || exit 3
+# cargo's output lock (scripts/lib/warnings.sh) for every build on this Mac; leg_run passes it into
+# the containers
+export $WARN_CARGO_ENV
 # record LEG RESULT. A leg whose log ($LOGDIR/LEG.log) holds a compiler warning, or cannot be read
 # for that check (scripts/lib/warnings.sh), cannot pass: cargo replays a crate's warnings even when
-# it does not rebuild it, the Linux suites print their build's warning lines into the log, and
+# it does not rebuild it, the Linux suites print their build's whole output into the log, and
 # build_alpine and build_amd64 fail on one (their legs then record the build's failure).
 record() {
   local res=$2 w
@@ -122,9 +125,10 @@ legtag() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 # A leg container: --init (so a signal to the container ends it: a shell as PID 1 ignores TERM),
 # its id recorded in a cidfile (cleanup removes it even after a timeout or ctrl-C), and bounded.
 leg_run() { # leg-name docker-args...
-  local name=$1; shift
+  local name=$1 kv lock=(); shift
+  for kv in $WARN_CARGO_ENV; do lock+=(-e "$kv"); done
   rm -f "$LOGDIR/$name.cid"
-  bg_wait timeout -k 30 3600 docker run --rm --init --pull=never --cidfile "$LOGDIR/$name.cid" "$@" > "$LOGDIR/$name.log" 2>&1
+  bg_wait timeout -k 30 3600 docker run --rm --init --pull=never --cidfile "$LOGDIR/$name.cid" "${lock[@]}" "$@" > "$LOGDIR/$name.log" 2>&1
   local rc=$?
   [ -s "$LOGDIR/$name.cid" ] && timeout 60 docker rm -f "$(cat "$LOGDIR/$name.cid")" >/dev/null 2>&1
   return $rc
