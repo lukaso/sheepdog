@@ -1,7 +1,8 @@
 #!/bin/sh
 # Sign, notarize and staple the macOS release (PHASE3.md S2). Called by `release.sh build --sign`,
-# and directly by the dry cells (tests/dist/t_sign.sh). Never call it directly otherwise: it can
-# sign with the Developer ID without a prompt.
+# and directly by the dry cells (tests/dist/t_sign.sh). Never call it directly otherwise: it signs
+# with the Developer ID without a prompt (as `release.sh build --sign` does, through it); the
+# notarized build's gate is the notary keychain's password, asked for at the unlock.
 #
 #   sign.sh --bin BINARY --version X.Y.Z --build N --tag vTAG --commit SHORT --dest DIR
 #           [--no-notarize] [--real NONCE --nonce-file FILE --parent-pid PID]

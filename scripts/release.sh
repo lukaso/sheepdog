@@ -18,9 +18,10 @@
 # `build --sign`, `publish` and `publish-npm` refuse under the test environment (any SHEEPR_TEST_* variable) and
 # without a terminal (stdin and /dev/tty); `publish` and `publish-npm` also read the typed tag from
 # /dev/tty, their human confirmation before anything goes public. That is a guard against mistakes
-# only: a pty passes it (PHASE3.md §1.2). `build --sign` asks for no tag: the gate against an
-# unattended Apple submission is the notary keychain's own password, asked for by sign.sh's unlock
-# (D2 step 3).
+# only: a pty passes it (PHASE3.md §1.2). `build --sign` asks for no tag, and its Developer ID
+# signing runs with no prompt in both modes: the gate against an unattended Apple submission is the
+# notary keychain's own password, asked for by sign.sh's unlock (D2 step 3); `--no-notarize` (a
+# marked control, never submitted) has no human input at all.
 #
 # Exit codes: 0 done; 1 a check failed or a step failed; 2 usage; 3 refused in a test environment;
 # 4 refused without a terminal (or the typed tag did not match).
