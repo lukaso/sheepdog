@@ -511,7 +511,7 @@ publish_npm_exec() { # dir
     # a refused upload stops at once, whatever npm says: its answer to a second upload while it still
     # scans the first one is not measured, so the run does not guess which refusal is which
     tool "$NETC" "$NPM" publish --access public --registry="$NPMREG" "$@" "$pc/$f" \
-      || die "npm refused the upload of $f (above). If this run or an earlier one uploaded $p@$nv, npm may still be scanning it (about five minutes, up to 15 or more), or it held it for review or blocked it: look at https://www.npmjs.com/package/$p and npm's email to ${SR_NPM_USER:-the owner}, wait, then run publish-npm again (it skips a version already there with this file). A blocked version needs a new version number. Nothing after it is published"
+      || die "npm refused the upload of $f, or its login step failed (above). A browser login or 2FA approval that failed or timed out: run publish-npm again (it skips a version already there with this file). If this run or an earlier one uploaded $p@$nv, npm may still be scanning it (about five minutes, up to 15 or more), or it held it for review or blocked it: look at https://www.npmjs.com/package/$p and npm's email to ${SR_NPM_USER:-the owner}, wait, then run publish-npm again. A blocked version needs a new version number. Nothing after it is published"
     npm_visible "$p" "$nv" "$want"
     echo "release: $p@$nv published, and npm shows this file"
   done

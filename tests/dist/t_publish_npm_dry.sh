@@ -191,10 +191,10 @@ mkout "$D" v0.1.0; echo $((wm / ws)) > "$FX/processing.sheepr-darwin-universal";
 # earlier run's upload still scanned, held for review or blocked; a rerun skips a version already there
 mkout "$D" v0.1.0; : > "$FX/pubexists.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubexists.sheepr-linux-x64"
 [ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] \
-  && grep -q 'may still be scanning it' "$FX/o" && grep -q 'skips a version already there with this file' "$FX/o" && grep -q 'blocked version needs a new version number' "$FX/o" \
+  && grep -q 'may still be scanning it' "$FX/o" && grep -q 'skips a version already there with this file' "$FX/o" && grep -q 'blocked version needs a new version number' "$FX/o" && grep -q 'or its login step failed' "$FX/o" \
   && pass "a refused upload (an earlier run's version): stopped at once, no view after it, the cases named" || fail "rerun exists: rc=$r $(order) $(tail -1 "$FX/o")"
 mkout "$D" v0.1.0; : > "$FX/pubfail.sheepr-linux-x64"; pub v0.1.0; r=$?; rm -f "$FX/pubfail.sheepr-linux-x64"
-[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] && grep -q 'E401' "$FX/o" \
+[ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64," ] && grep -q 'E401' "$FX/o" && grep -q 'or its login step failed' "$FX/o" && grep -q 'run publish-npm again' "$FX/o" \
   && pass "a publish refused for another reason (E401): stopped at once, the reason shown" || fail "publish E401: rc=$r $(order) $(tail -1 "$FX/o")"
 # views after an upload that fail, or answer nothing, are waited through; the last error is named
 mkout "$D" v0.1.0; : > "$FX/viewfailafter.sheepr-linux-arm64"; pub v0.1.0; r=$?; rm -f "$FX/viewfailafter.sheepr-linux-arm64"
