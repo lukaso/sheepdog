@@ -197,14 +197,16 @@ build_amd64() {
   # built in the container's own target dir (a build into the share fails at random, PHASE2.md),
   # only the binary copied out
   leg_run build-amd64 --platform linux/amd64 -v "$ROOT":/src:ro -v "$ROOT/target-linux-amd64":/tgt "$AMD64_IMG" sh -c \
-    '. /src/scripts/lib/warnings.sh && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr' || return
+    'set -u; . /src/scripts/lib/warnings.sh && echo "cargo output lock: $WARN_CARGO_ENV" && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/t CARGO_INCREMENTAL=0 cargo build -q --bin sheepr && mkdir -p /tgt/debug && cp /t/debug/sheepr /tgt/debug/sheepr' || return
   no_build_warnings build-amd64
 }
 
-# Build the Alpine binaries (for the PID 1 and --init legs) without running the suite.
+# Build the Alpine binaries (for the PID 1 and --init legs) without running the suite. Both builds
+# run under cargo's output lock (scripts/lib/warnings.sh) and print it; without the source line,
+# `set -u` stops the build.
 build_alpine() {
   leg_run build-alpine -v "$ROOT":/src:ro -v "$ROOT/target-linux":/tgt "$SR_IMG_ALPINE" sh -c \
-    '. /src/scripts/lib/warnings.sh && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins' || return
+    'set -u; . /src/scripts/lib/warnings.sh && echo "cargo output lock: $WARN_CARGO_ENV" && rm -rf /w && mkdir /w && cd /src && tar cf - --exclude=./target --exclude="./target-*" --exclude=./spike . | (cd /w && tar xmf -) && cd /w && CARGO_TARGET_DIR=/tgt CARGO_INCREMENTAL=0 cargo build -q --bins' || return
   no_build_warnings build-alpine
 }
 # no_build_warnings NAME: a build whose log holds a compiler warning fails (issue #10)

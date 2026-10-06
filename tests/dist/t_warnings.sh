@@ -5,10 +5,9 @@
 # own output: tiny libraries with an unused variable, with a coded warning, and with none,
 # compiled by the pinned toolchain (run from the repo) into the fixture directory. And cargo
 # builds whose config file hides a warning (colour and the progress bar, which put it in the
-# middle of a line; `build.warnings = "allow"`): under cargo's output lock, which sourcing the lib
-# exported into this cell (as it does for test-all and the Linux suites), the warning fails the
-# leg; without the lock the same build hides it (the controls that prove each config file took
-# effect). No log line is printed as it is: the bundle leg's own log is checked by the same rule.
+# middle of a line; `build.warnings = "allow"`): under cargo's output lock, which the build gets
+# only by sourcing the lib (as test-all and the containers do), the warning fails the leg; without
+# the lock the same build hides it (the controls that prove each config file took effect). No log line is printed as it is: the bundle leg's own log is checked by the same rule.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
@@ -53,9 +52,9 @@ fi
 chmod 600 "$FX/locked"
 
 # cargo, on a tiny crate in the fixture directory: its own CARGO_HOME (no user config is read) and
-# target dirs, the pinned toolchain; a build script that sleeps 3 s so that the bar is drawn. A run
-# with the lock inherits it from this cell's environment; a run without it removes every
-# variable the lock names.
+# target dirs, the pinned toolchain; a build script that sleeps 3 s so that the bar is drawn. Every
+# run starts with each variable the lock names removed (a lock in this cell's own environment
+# proves nothing); a locked run then sources the lib, an unlocked one sources nothing.
 mkdir -p "$FX/crate/src" "$FX/crate/.cargo" "$FX/home"
 cp "$SR_ROOT/rust-toolchain.toml" "$FX/crate/"
 printf '[package]\nname = "wcheck"\nversion = "0.1.0"\nedition = "2021"\n' > "$FX/crate/Cargo.toml"
@@ -66,9 +65,10 @@ unlock=""
 for kv in $WARN_CARGO_ENV; do unlock="$unlock -u ${kv%%=*}"; done
 cargo_log() { # name source config lock(yes|no): cargo build -q's output in $FX/name; exit 0 only if it built
   cp "$FX/$2.rs" "$FX/crate/src/lib.rs" && cp "$FX/$3.toml" "$FX/crate/.cargo/config.toml" || return 1
-  u=$unlock; [ "$4" = yes ] && u=""
-  # shellcheck disable=SC2086 # $u is a list of `-u NAME` words
-  (cd "$FX/crate" && env $u CARGO_HOME="$FX/home" CARGO_TARGET_DIR="$FX/t-$1" cargo build -q) > "$FX/$1" 2>&1
+  src=/dev/null; [ "$4" = yes ] && src="$SR_ROOT/scripts/lib/warnings.sh"
+  # shellcheck disable=SC2086 # $unlock is a list of `-u NAME` words
+  (cd "$FX/crate" && env $unlock CARGO_HOME="$FX/home" CARGO_TARGET_DIR="$FX/t-$1" \
+    sh -c '. "$1" && exec cargo build -q' sh "$src") > "$FX/$1" 2>&1
 }
 CR=$(printf '\r')
 cargo_log bar w term no || { fail "harness: cargo did not build the crate"; show "$FX/bar"; finish; }
