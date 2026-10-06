@@ -100,8 +100,11 @@ o=$(lk '. "$1" && warn_lock')
 case $o in *"cargo output lock: $WARN_CARGO_ENV"*rc=0) pass "control: after the source, warn_lock reads the whole lock from the environment" ;;
   *) fail "warn_lock after the source: $(printf %s "$o" | tr '\n' ' ')" ;; esac
 o=$(lk '. "$1" && unset CARGO_BUILD_WARNINGS && warn_lock')
-case $o in *"CARGO_BUILD_WARNINGS unset"*rc=[1-9]*) pass "warn_lock fails when a name is not exported" ;;
+case $o in *"CARGO_BUILD_WARNINGS unset"*rc=[1-9]*) pass "warn_lock fails when a name is unset" ;;
   *) fail "warn_lock with a name unset: $(printf %s "$o" | tr '\n' ' ')" ;; esac
+o=$(lk '. "$1" && unset CARGO_TERM_COLOR && CARGO_TERM_COLOR=never && warn_lock')
+case $o in *"CARGO_TERM_COLOR unset"*rc=[1-9]*) pass "warn_lock fails on a name the shell holds but does not export (a child would not see it)" ;;
+  *) fail "warn_lock with a name not exported: $(printf %s "$o" | tr '\n' ' ')" ;; esac
 o=$(lk '. "$1" && export CARGO_TERM_COLOR=always && warn_lock')
 case $o in *"CARGO_TERM_COLOR=always"*rc=[1-9]*) pass "warn_lock fails on a value that is not the lock's" ;;
   *) fail "warn_lock with another value: $(printf %s "$o" | tr '\n' ' ')" ;; esac

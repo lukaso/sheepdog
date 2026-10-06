@@ -23,7 +23,8 @@ unset _warn_kv
 # "NAME unset"), and fail unless every name holds the lock's value. Each container build runs it
 # right after sourcing this file: without the source line it is not found, and the build stops.
 # Not caught: a change that removes both lines from an entry point (test-all does not check that a
-# container log holds the lock line).
+# container log holds the lock line), or one that overrides a lock variable after warn_lock has
+# run (it reads the environment where it runs).
 warn_lock() (
   ok=0 out=""
   for kv in $WARN_CARGO_ENV; do
