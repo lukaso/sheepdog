@@ -2314,7 +2314,7 @@ fn signals_that_end_by_default() -> Vec<libc::c_int> {
         libc::SIGINFO,
     ];
     #[cfg(target_os = "linux")]
-    let rt = unsafe { libc::SIGRTMIN()..=libc::SIGRTMAX() };
+    let rt = libc::SIGRTMIN()..=libc::SIGRTMAX();
     #[cfg(target_os = "macos")]
     let rt = 1..=0;
     // measured, not assumed: keep a signal only if it ends a throwaway child at its default
@@ -2358,7 +2358,7 @@ fn no_signal_that_ends_by_default_ends_sheepr_without_its_kill() {
         libc::SIGINFO,
     ];
     #[cfg(target_os = "linux")]
-    let rt = unsafe { libc::SIGRTMIN()..=libc::SIGRTMAX() };
+    let rt = libc::SIGRTMIN()..=libc::SIGRTMAX();
     #[cfg(target_os = "macos")]
     let rt = 1..=0;
     let rule: Vec<libc::c_int> = (1..=31).chain(rt).filter(|s| !not.contains(s) && !discarded.contains(s)).collect();

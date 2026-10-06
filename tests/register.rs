@@ -15,9 +15,11 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 static SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn sheepr() -> &'static str {
@@ -37,6 +39,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// A marker unique to one iteration (`/bin/sleep <marker>` ends by itself within 29 s).
+#[cfg(target_os = "macos")]
 fn marker() -> String {
     format!("29.{:04}{:03}", std::process::id() % 10_000, SEQ.fetch_add(1, Ordering::SeqCst) % 1000)
 }

@@ -385,12 +385,14 @@ fn tag_sweep_control(j: &Job, escape: &[&str], ready: impl Fn(i32) -> bool, leak
 }
 
 /// `pid` runs the program `prog` (its argv[0]).
+#[cfg(target_os = "macos")]
 fn runs(pid: i32, prog: &str) -> bool {
     let out = Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
     String::from_utf8_lossy(&out.stdout).split_whitespace().next() == Some(prog)
 }
 
 /// The escaped loop: it writes `ready` once `/bin/bash` runs it, then loops 30 s at most.
+#[cfg(target_os = "macos")]
 fn bash_loop(ready: &std::path::Path) -> String {
     format!("echo run > '{}'; for i in $(seq 300); do /bin/sleep 0.1; done", ready.display())
 }

@@ -10,9 +10,13 @@
 mod common;
 
 use common::json::{self, Json};
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::{Duration, Instant};
 
 static SEQ: AtomicUsize = AtomicUsize::new(0);
@@ -21,11 +25,13 @@ fn sheepr() -> &'static str {
     common::test_env();
     env!("CARGO_BIN_EXE_sheepr")
 }
+#[cfg(target_os = "macos")]
 fn fixture() -> &'static str {
     common::test_env();
     env!("CARGO_BIN_EXE_sr-fixture")
 }
 
+#[cfg(target_os = "macos")]
 fn scratch(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("sr-inh-{name}-{}-{}", std::process::id(), SEQ.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&d);
@@ -38,6 +44,7 @@ fn marker() -> String {
     format!("27.{:04}{:03}", std::process::id() % 10_000, SEQ.fetch_add(1, Ordering::SeqCst) % 1000)
 }
 
+#[cfg(target_os = "macos")]
 fn records(r: &Path) -> Vec<(i32, u64)> {
     std::fs::read_to_string(r)
         .unwrap_or_default()
@@ -49,6 +56,7 @@ fn records(r: &Path) -> Vec<(i32, u64)> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(secs);
     while Instant::now() < end {
@@ -60,17 +68,20 @@ fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
+#[cfg(target_os = "macos")]
 fn parent(pid: i32) -> i32 {
     String::from_utf8_lossy(&Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().unwrap().stdout).trim().parse().unwrap_or(0)
 }
 
 /// Every recorded process of these files and every process carrying one of the markers is
 /// SIGKILLed (by identity) when the guard drops, a panic too.
+#[cfg(target_os = "macos")]
 struct Guard {
     recs: Vec<PathBuf>,
     markers: Vec<String>,
     children: Vec<Child>,
 }
+#[cfg(target_os = "macos")]
 impl Drop for Guard {
     fn drop(&mut self) {
         for r in &self.recs {
@@ -104,6 +115,7 @@ fn resp_of(pid: i32) -> Option<u64> {
 
 /// Every pid named in the journals under state directory `st` (a supervisor journals what its
 /// scans see: the readiness handshake waits for a line here, never for a fixed time).
+#[cfg(target_os = "macos")]
 fn journaled(st: &Path) -> Vec<i32> {
     let mut v = Vec::new();
     for b in std::fs::read_dir(st.join("jobs")).into_iter().flatten().flatten() {
@@ -532,6 +544,7 @@ fn inherit_is_accepted_on_linux() {
     assert!(left.is_empty(), "survivors: {left:?}");
 }
 
+#[cfg(target_os = "macos")]
 fn state(d: &Path) -> PathBuf {
     let s = d.join("state");
     std::fs::create_dir_all(&s).unwrap();

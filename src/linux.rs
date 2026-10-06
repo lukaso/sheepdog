@@ -48,15 +48,6 @@ fn group_pids(pg: i32) -> Vec<i32> {
 /// still exits 0, without a report (stated in PHASE1.md, S6 review round 7).
 pub const ADOPTS_ESCAPEES: bool = true;
 
-/// Every live (not zombie) process, for `sheepr kill` (S6). The parent, state and start time
-/// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
-/// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
-/// (`pbi_uid`): a setuid program the user runs is not the user's.
-/// The full path of `pid`'s executable.
-pub fn exe_path(pid: i32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok().map(|p| p.to_string_lossy().into_owned())
-}
-
 /// Fields of /proc/<pid>/stat after "comm)" (field 3 is index 0).
 fn stat_fields(pid: i32) -> Option<Vec<String>> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -98,6 +89,10 @@ pub fn start_secs(pid: i32) -> Option<u64> {
     Some(btime + ticks / hz)
 }
 
+/// Every live (not zombie) process, for `sheepr kill` (S6). The parent, state and start time
+/// come from one read of `/proc/<pid>/stat` (separate reads could mix two processes if the pid
+/// were reused in between); the uid is the effective uid from `/proc/<pid>/status`, as on macOS
+/// (`pbi_uid`): a setuid program the user runs is not the user's.
 pub fn procs() -> Vec<crate::kill::Proc> {
     let mut v = Vec::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
