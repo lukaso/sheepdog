@@ -16,9 +16,11 @@
 # one, an -rc sorting before its final).
 #
 # `build --sign`, `publish` and `publish-npm` refuse under the test environment (any SHEEPR_TEST_* variable) and
-# without a terminal (stdin and /dev/tty), and read the typed tag from /dev/tty. That is a guard
-# against mistakes only: a pty passes it (PHASE3.md §1.2). The gate against an unattended Apple
-# submission is the notary keychain's own password, asked for by sign.sh's unlock (D2 step 3).
+# without a terminal (stdin and /dev/tty); `publish` and `publish-npm` also read the typed tag from
+# /dev/tty, their human confirmation before anything goes public. That is a guard against mistakes
+# only: a pty passes it (PHASE3.md §1.2). `build --sign` asks for no tag: the gate against an
+# unattended Apple submission is the notary keychain's own password, asked for by sign.sh's unlock
+# (D2 step 3).
 #
 # Exit codes: 0 done; 1 a check failed or a step failed; 2 usage; 3 refused in a test environment;
 # 4 refused without a terminal (or the typed tag did not match).
@@ -64,9 +66,14 @@ if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub
   if ! [ -t 0 ] || ! (: < /dev/tty) 2>/dev/null; then
     echo "release: refused: $sub$( [ $sign = yes ] && echo ' --sign') needs a terminal" >&2; exit 4
   fi
-  printf 'release: %s %s. Type the tag to go on: ' "$sub" "$tag" > /dev/tty
-  IFS= read -r answer < /dev/tty || exit 4
-  [ "$answer" = "$tag" ] || { echo "release: not confirmed" >&2; exit 4; }
+  # publish and publish-npm make a release public: the typed tag is their human confirmation. A
+  # signed build asks for nothing here: the notary keychain's own password, typed at the terminal,
+  # is its gate (operator, 2026-10-06)
+  if [ "$sub" != build ]; then
+    printf 'release: %s %s. Type the tag to go on: ' "$sub" "$tag" > /dev/tty
+    IFS= read -r answer < /dev/tty || exit 4
+    [ "$answer" = "$tag" ] || { echo "release: not confirmed" >&2; exit 4; }
+  fi
 fi
 
 # --- the checks ---------------------------------------------------------------------------------
