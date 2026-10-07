@@ -154,6 +154,12 @@ fn the_auto_sweep_notes_a_journal_it_cannot_read() {
     let bad = lj.parent().unwrap().join("j-b4d.journal");
     std::fs::write(&bad, "not a journal\n").unwrap();
     std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    // a journal kept on purpose (--leave-strays), with this boot's header: skipped, never noted
+    let header = std::fs::read_to_string(&lj).unwrap().lines().next().unwrap().to_string();
+    let job = json::parse(&header).unwrap().get("job").and_then(Json::str).unwrap().to_string();
+    let kept = lj.parent().unwrap().join("j-k3pt.journal");
+    std::fs::write(&kept, format!("{}\n{{\"v\":1,\"kind\":\"leave-strays\"}}\n", header.replace(&job, "j-k3pt"))).unwrap();
+    std::fs::set_permissions(&kept, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let (code, st) = run(&d, &s, "bad", "", "/bin/sh -c 'exit 0'", &[]);
     std::fs::write(&go, b"").unwrap();
     let _ = live.0.wait();
@@ -163,6 +169,47 @@ fn the_auto_sweep_notes_a_journal_it_cannot_read() {
     assert_eq!(code, Some(0));
     assert_eq!(said(&st, "j-b4d.journal"), 1, "{:?}", notes(&st));
     assert_eq!(said(&st, &lname), 0, "a live job's journal: {:?}", notes(&st));
+    assert_eq!(said(&st, "j-k3pt"), 0, "a journal kept on purpose: {:?}", notes(&st));
+    assert!(kept.exists(), "the kept journal is left in place");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn mode(p: &Path, m: u32) {
+    std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
+}
+
+/// Review of 6d0ae1a, P2-1: a journal folder the auto-sweep cannot list (0300), or cannot reach
+/// (`jobs/` at 0600), is one `auto-sweep skipped` note that names it, and the command still runs;
+/// before, it was read as empty and noted nothing. The control, the same state at 0700, sweeps
+/// the dead job. Skipped as root (root reads a folder of any mode).
+#[test]
+fn the_auto_sweep_notes_a_folder_it_cannot_read() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads a folder of any mode");
+        return;
+    }
+    let d = scratch("unlisted");
+    let s = state(&d);
+    let (g, r) = dead_job(&d, &s, "a", &[]);
+    let dir = journals(&s)[0].parent().unwrap().to_path_buf();
+    let here = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let skipped = |st: &Option<Json>| notes(st).iter().filter(|n| n.starts_with("auto-sweep skipped") && n.contains(here.as_str())).count();
+    mode(&dir, 0o300);
+    let (code1, st1) = run(&d, &s, "unlisted", "", "/bin/sh -c 'exit 0'", &[]);
+    mode(&dir, 0o700);
+    mode(&s.join("jobs"), 0o600);
+    let (code2, st2) = run(&d, &s, "unreached", "", "/bin/sh -c 'exit 0'", &[]);
+    mode(&s.join("jobs"), 0o700);
+    let alive = common::alive(g);
+    let (code3, st3) = run(&d, &s, "ctl", "", "/bin/sh -c 'exit 0'", &[]);
+    let gone = !common::alive(g);
+    cleanup(&[&r]);
+    assert_eq!((code1, skipped(&st1)), (Some(0), 1), "a folder it cannot list: {:?}", notes(&st1));
+    assert_eq!((code2, skipped(&st2)), (Some(0), 1), "a folder it cannot reach: {:?}", notes(&st2));
+    assert!(alive, "the escapee was signalled through a folder the auto-sweep could not read");
+    assert_eq!(code3, Some(0));
+    assert!(gone, "control: the same state at 0700 is swept");
+    assert_eq!(skipped(&st3), 0, "control: {:?}", notes(&st3));
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -119,10 +119,30 @@ fn sweep(s: &Path, d: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32
     (code, std::fs::read_to_string(&trace).unwrap_or_default())
 }
 
-/// `sheepr sweep ARGS` with this state; (exit code, stderr).
+/// `sheepr sweep ARGS` with this state, within 30 s (then KILL, code None); (exit code, stderr).
 fn sweep_said(s: &Path, args: &[&str]) -> (Option<i32>, String) {
-    let o = Command::new(sheepr()).arg("sweep").args(args).env("SHEEPR_TEST_STATE", s).output().unwrap();
-    (o.status.code(), String::from_utf8_lossy(&o.stderr).into_owned())
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let err = std::env::temp_dir().join(format!("sr-sw-said-{}-{n}.err", std::process::id()));
+    let mut c = Command::new(sheepr()).arg("sweep").args(args).env("SHEEPR_TEST_STATE", s).stderr(std::fs::File::create(&err).unwrap()).spawn().unwrap();
+    let end = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        if let Some(st) = c.try_wait().unwrap() {
+            break st.code();
+        }
+        if Instant::now() > end {
+            common::send_child(&mut c, libc::SIGKILL);
+            let _ = c.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let text = std::fs::read_to_string(&err).unwrap_or_default();
+    let _ = std::fs::remove_file(&err);
+    (code, text)
+}
+
+fn mode(p: &Path, m: u32) {
+    std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
 }
 
 /// This machine's journal folder name (`<boot>-<pidns>`), from a kept journal of a short job.
@@ -506,6 +526,42 @@ fn a_skipped_journal_is_said_on_stderr() {
     assert_eq!(code, Some(0), "control: {err}");
     assert!(journals(&c).is_empty(), "control: the readable journal was swept");
     assert!(!err.contains(".journal"), "control:\n{err}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of 6d0ae1a, P2-1: a journal folder `sweep` cannot list (mode 0300), or cannot reach
+/// (`jobs/` at 0600), is refused with one stderr line that names it, exit 1, as an unsafe folder
+/// is; before, it was read as empty: exit 0, nothing said, the stale job's decoy alive. The
+/// control, the same state at 0700, is swept. Skipped as root (root reads a folder of any mode).
+#[test]
+fn a_folder_sweep_cannot_read_is_refused_and_said() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads a folder of any mode");
+        return;
+    }
+    let d = scratch("unlisted");
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let (mut c, p, _r) = decoy(&d, "decoy");
+    forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[p], false);
+    let dir = s.join("jobs").join(&here);
+    mode(&dir, 0o300);
+    let (code1, err1) = sweep_said(&s, &[]);
+    mode(&dir, 0o700);
+    mode(&s.join("jobs"), 0o600);
+    let (code2, err2) = sweep_said(&s, &[]);
+    mode(&s.join("jobs"), 0o700);
+    let alive = common::alive(p);
+    let (code3, err3) = sweep_said(&s, &[]);
+    let gone = !common::alive(p);
+    end_decoy(&mut c);
+    let names = |e: &str| e.lines().filter(|l| l.contains(here.as_str())).count();
+    assert_eq!((code1, names(&err1)), (Some(1), 1), "a folder it cannot list:\n{err1}");
+    assert_eq!((code2, names(&err2)), (Some(1), 1), "a folder it cannot reach:\n{err2}");
+    assert!(alive, "the decoy was signalled through a folder sweep could not read");
+    assert_eq!(code3, Some(0), "control: {err3}");
+    assert!(gone, "control: the same state at 0700 is swept");
+    assert_eq!(names(&err3), 0, "control:\n{err3}");
     let _ = std::fs::remove_dir_all(&d);
 }
 

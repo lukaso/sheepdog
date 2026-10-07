@@ -376,14 +376,36 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
     }
 }
 
+/// Whether `dir` is absent, so there is nothing to sweep. Only "not found" is: a folder that
+/// exists but cannot be reached or read is never taken as empty (issue #15); `safe_dir` and
+/// `journals` then name it.
+fn absent(dir: &Path) -> bool {
+    matches!(std::fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// The journals in `dir`, sorted. A folder or an entry that cannot be read is an error, never
+/// an empty list (issue #15).
+fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let cannot = |e: std::io::Error| format!("cannot list {}: {e}", dir.display());
+    let mut v = Vec::new();
+    for e in std::fs::read_dir(dir).map_err(cannot)? {
+        let p = e.map_err(cannot)?.path();
+        if p.extension().is_some_and(|e| e == "journal") {
+            v.push(p);
+        }
+    }
+    v.sort();
+    Ok(v)
+}
+
 /// The auto-sweep before a `sheepr run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
-/// skipped on any problem with a note (a journal it cannot read or will not act on is one note
-/// that names the file, issue #15), within 200 ms between journals. It takes the wall's
+/// within 200 ms between journals. A state folder it cannot use, and a journal it cannot read
+/// or will not act on, is a note that names it (issue #15); a deadline missed is `partial`. It takes the wall's
 /// token only when there is a journal to open: an empty state produces no fact.
 pub fn auto(owner: &str, quiet: bool) {
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else { return };
     let Some(dir) = folder(&state) else { return };
-    if !dir.exists() {
+    if absent(&dir) {
         return;
     }
     for p in [state.clone(), state.join("jobs"), dir.clone()] {
@@ -392,11 +414,16 @@ pub fn auto(owner: &str, quiet: bool) {
             return;
         }
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "journal")).collect();
+    let files = match journals(&dir) {
+        Ok(f) => f,
+        Err(why) => {
+            crate::status::add_note(&format!("auto-sweep skipped: {why}"));
+            return;
+        }
+    };
     if files.is_empty() {
         return;
     }
-    files.sort();
     let Some(_token) = crate::wall::gate() else { return };
     let Ok(protected) = protected() else {
         crate::status::add_note("auto-sweep skipped: sheepr cannot follow its own chain of parent processes");
@@ -483,7 +510,7 @@ pub fn main(args: &[OsString]) -> i32 {
         return 0;
     };
     let Some(dir) = folder(&state) else { return 0 };
-    if !dir.exists() {
+    if absent(&dir) {
         return 0;
     }
     for p in [state.clone(), state.join("jobs"), dir.clone()] {
@@ -500,8 +527,13 @@ pub fn main(args: &[OsString]) -> i32 {
             return 1;
         }
     };
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "journal")).collect();
-    files.sort();
+    let files = match journals(&dir) {
+        Ok(f) => f,
+        Err(why) => {
+            crate::fail!("sheepr: refusing to sweep: {}. Nothing was signalled.", crate::kill::clean(&why));
+            return 1;
+        }
+    };
     let (mut swept, mut killed, mut code) = (0usize, 0usize, 0);
     for f in files {
         let j = match open_fenced(&f) {
