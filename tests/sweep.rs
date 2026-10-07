@@ -145,6 +145,17 @@ fn mode(p: &Path, m: u32) {
     std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
 }
 
+/// Folders a cell narrowed, put back to 0700 when the cell ends, a panic too, so a failed cell
+/// never leaves a folder `rm -rf` cannot remove.
+struct Modes(Vec<PathBuf>);
+impl Drop for Modes {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        }
+    }
+}
+
 /// This machine's journal folder name (`<boot>-<pidns>`), from a kept journal of a short job.
 fn folder(d: &Path) -> (String, String, String) {
     let s = state(&d.join("probe"));
@@ -533,6 +544,8 @@ fn a_skipped_journal_is_said_on_stderr() {
 /// (`jobs/` at 0600), is refused with one stderr line that names it, exit 1, as an unsafe folder
 /// is; before, it was read as empty: exit 0, nothing said, the stale job's decoy alive. The
 /// control, the same state at 0700, is swept. Skipped as root (root reads a folder of any mode).
+/// (No "the decoy lives" assertion: nothing can reach a journal it cannot name, review of
+/// 35624d5 P3-4.)
 #[test]
 fn a_folder_sweep_cannot_read_is_refused_and_said() {
     if unsafe { libc::geteuid() } == 0 {
@@ -545,23 +558,45 @@ fn a_folder_sweep_cannot_read_is_refused_and_said() {
     let (mut c, p, _r) = decoy(&d, "decoy");
     forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[p], false);
     let dir = s.join("jobs").join(&here);
+    let _restore = Modes(vec![dir.clone(), s.join("jobs")]);
     mode(&dir, 0o300);
     let (code1, err1) = sweep_said(&s, &[]);
     mode(&dir, 0o700);
     mode(&s.join("jobs"), 0o600);
     let (code2, err2) = sweep_said(&s, &[]);
     mode(&s.join("jobs"), 0o700);
-    let alive = common::alive(p);
     let (code3, err3) = sweep_said(&s, &[]);
     let gone = !common::alive(p);
     end_decoy(&mut c);
     let names = |e: &str| e.lines().filter(|l| l.contains(here.as_str())).count();
     assert_eq!((code1, names(&err1)), (Some(1), 1), "a folder it cannot list:\n{err1}");
     assert_eq!((code2, names(&err2)), (Some(1), 1), "a folder it cannot reach:\n{err2}");
-    assert!(alive, "the decoy was signalled through a folder sweep could not read");
     assert_eq!(code3, Some(0), "control: {err3}");
     assert!(gone, "control: the same state at 0700 is swept");
     assert_eq!(names(&err3), 0, "control:\n{err3}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of 35624d5, P2-1: a normal state is swept in silence, exit 0, nothing on stderr: a fresh
+/// state (only the sentinel), `jobs/` with no folder for this boot (as after a reboot), and this
+/// boot's folder empty. Only "not found" means nothing to sweep; liveapp's boot sweep meets the
+/// first two on every new instance and after every reboot.
+#[test]
+fn a_normal_state_is_swept_in_silence() {
+    let d = scratch("normal");
+    let (here, _, _) = folder(&d);
+    let fresh = state(&d.join("fresh"));
+    let noboot = state(&d.join("noboot"));
+    std::fs::create_dir_all(noboot.join("jobs")).unwrap();
+    mode(&noboot.join("jobs"), 0o700);
+    let empty = state(&d.join("empty"));
+    std::fs::create_dir_all(empty.join("jobs").join(&here)).unwrap();
+    mode(&empty.join("jobs"), 0o700);
+    mode(&empty.join("jobs").join(&here), 0o700);
+    for (n, s) in [("fresh", &fresh), ("no boot folder", &noboot), ("empty boot folder", &empty)] {
+        let (code, err) = sweep_said(s, &[]);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "{n}");
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
 

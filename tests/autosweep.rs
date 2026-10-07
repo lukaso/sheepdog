@@ -178,10 +178,22 @@ fn mode(p: &Path, m: u32) {
     std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
 }
 
+/// Folders a cell narrowed, put back to 0700 when the cell ends, a panic too, so a failed cell
+/// never leaves a folder `rm -rf` cannot remove.
+struct Modes(Vec<PathBuf>);
+impl Drop for Modes {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::set_permissions(p, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+        }
+    }
+}
+
 /// Review of 6d0ae1a, P2-1: a journal folder the auto-sweep cannot list (0300), or cannot reach
 /// (`jobs/` at 0600), is one `auto-sweep skipped` note that names it, and the command still runs;
 /// before, it was read as empty and noted nothing. The control, the same state at 0700, sweeps
-/// the dead job. Skipped as root (root reads a folder of any mode).
+/// the dead job. Skipped as root (root reads a folder of any mode). (No "the escapee lives"
+/// assertion: nothing can reach a journal it cannot name, review of 35624d5 P3-4.)
 #[test]
 fn the_auto_sweep_notes_a_folder_it_cannot_read() {
     if unsafe { libc::geteuid() } == 0 {
@@ -194,22 +206,39 @@ fn the_auto_sweep_notes_a_folder_it_cannot_read() {
     let dir = journals(&s)[0].parent().unwrap().to_path_buf();
     let here = dir.file_name().unwrap().to_string_lossy().into_owned();
     let skipped = |st: &Option<Json>| notes(st).iter().filter(|n| n.starts_with("auto-sweep skipped") && n.contains(here.as_str())).count();
+    let _restore = Modes(vec![dir.clone(), s.join("jobs")]);
     mode(&dir, 0o300);
     let (code1, st1) = run(&d, &s, "unlisted", "", "/bin/sh -c 'exit 0'", &[]);
     mode(&dir, 0o700);
     mode(&s.join("jobs"), 0o600);
     let (code2, st2) = run(&d, &s, "unreached", "", "/bin/sh -c 'exit 0'", &[]);
     mode(&s.join("jobs"), 0o700);
-    let alive = common::alive(g);
     let (code3, st3) = run(&d, &s, "ctl", "", "/bin/sh -c 'exit 0'", &[]);
     let gone = !common::alive(g);
     cleanup(&[&r]);
     assert_eq!((code1, skipped(&st1)), (Some(0), 1), "a folder it cannot list: {:?}", notes(&st1));
     assert_eq!((code2, skipped(&st2)), (Some(0), 1), "a folder it cannot reach: {:?}", notes(&st2));
-    assert!(alive, "the escapee was signalled through a folder the auto-sweep could not read");
     assert_eq!(code3, Some(0));
     assert!(gone, "control: the same state at 0700 is swept");
     assert_eq!(skipped(&st3), 0, "control: {:?}", notes(&st3));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of 35624d5, P2-1: a normal state gives no auto-sweep note: the first `run` on a fresh
+/// state, and a `run` whose `jobs/` has no folder for this boot (as after a reboot).
+#[test]
+fn a_normal_state_gives_no_auto_sweep_note() {
+    let d = scratch("normal");
+    let fresh = state(&d.join("fresh"));
+    let noboot = state(&d.join("noboot"));
+    std::fs::create_dir_all(noboot.join("jobs")).unwrap();
+    mode(&noboot.join("jobs"), 0o700);
+    for (n, s) in [("fresh", &fresh), ("no boot folder", &noboot)] {
+        let (code, st) = run(&d, s, n.split(' ').next().unwrap(), "", "/bin/sh -c 'exit 0'", &[]);
+        assert_eq!(code, Some(0), "{n}");
+        assert!(st.is_some(), "{n}: a status line");
+        assert!(!notes(&st).iter().any(|x| x.starts_with("auto-sweep")), "{n}: {:?}", notes(&st));
+    }
     let _ = std::fs::remove_dir_all(&d);
 }
 

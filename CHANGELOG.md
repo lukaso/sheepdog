@@ -17,8 +17,9 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   on stderr, one line that names the file, and the exit code does not change; the auto-sweep
   before each `run` puts the same skip in the `--status-fd` notes. Before, `sweep` said it only
   in a debug build, and the auto-sweep said nothing at all. A job kept with `--leave-strays` is
-  still skipped without a word. A journal folder that exists but cannot be read is no longer
-  taken as empty: `sweep` refuses it (exit 1, as an unsafe folder) and the auto-sweep notes it
+  still skipped without a word. Only a journal folder that is not there means "nothing to
+  sweep": one sheepr cannot reach or list (no permission, not a directory) is no longer taken as
+  empty, so `sweep` refuses it (exit 1, as an unsafe folder) and the auto-sweep notes it
   ([#15](https://github.com/lukaso/sheepr/issues/15)).
 
 ## 0.1.0 (2026-10-06)

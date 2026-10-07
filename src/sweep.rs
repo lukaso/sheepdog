@@ -17,7 +17,8 @@
 //! Reading a journal is a phase-2 source: the sweep takes the wall's token first (PHASE2.md §0.1),
 //! and does nothing under the phase-1 opt-out.
 //!
-//! Exit codes: 0 done (also: nothing to sweep); 1 refused (the state directory is not safe);
+//! Exit codes: 0 done (also: nothing to sweep, which only a folder "not found" means); 1 refused
+//! (the state directory is not safe, or its journal folder cannot be reached or listed);
 //! 2 usage error; 125 a job's kill deadline passed with members alive.
 
 use crate::kill::{end_supervisors, is_sheepr, parent, protected, Proved};
@@ -383,8 +384,9 @@ fn absent(dir: &Path) -> bool {
     matches!(std::fs::symlink_metadata(dir), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
-/// The journals in `dir`, sorted. A folder or an entry that cannot be read is an error, never
-/// an empty list (issue #15).
+/// The journals in `dir`, sorted. A folder that cannot be listed (or a listing that fails part
+/// way) is an error, never an empty list (issue #15). A journal file that cannot be read is not:
+/// `open` makes it `Skip::Unreadable` later, which is said.
 fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let cannot = |e: std::io::Error| format!("cannot list {}: {e}", dir.display());
     let mut v = Vec::new();
