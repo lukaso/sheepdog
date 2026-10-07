@@ -119,6 +119,12 @@ fn sweep(s: &Path, d: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32
     (code, std::fs::read_to_string(&trace).unwrap_or_default())
 }
 
+/// `sheepr sweep ARGS` with this state; (exit code, stderr).
+fn sweep_said(s: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let o = Command::new(sheepr()).arg("sweep").args(args).env("SHEEPR_TEST_STATE", s).output().unwrap();
+    (o.status.code(), String::from_utf8_lossy(&o.stderr).into_owned())
+}
+
 /// This machine's journal folder name (`<boot>-<pidns>`), from a kept journal of a short job.
 fn folder(d: &Path) -> (String, String, String) {
     let s = state(&d.join("probe"));
@@ -475,14 +481,13 @@ fn a_header_from_another_boot_is_not_swept_from_this_folder() {
 /// safety (another boot's header in this boot's folder), is said on stderr, one line naming the
 /// file; before, only a debug build's trace saw it. A journal kept on purpose (`--leave-strays`)
 /// says nothing. The exit code stays 0. The control, a readable dead journal, names no file.
+/// The cell runs the debug build (a release build refuses a test environment); the line is a
+/// plain `say!`, the same in both builds.
 #[test]
 fn a_skipped_journal_is_said_on_stderr() {
     let d = scratch("saysskip");
     let (here, boot, pidns) = folder(&d);
-    let say = |s: &Path| {
-        let o = Command::new(sheepr()).arg("sweep").env("SHEEPR_TEST_STATE", s).output().unwrap();
-        (o.status.code(), String::from_utf8_lossy(&o.stderr).into_owned())
-    };
+    let say = |s: &Path| sweep_said(s, &[]);
     let s = state(&d.join("skips"));
     forge(&s, &here, "j-0th3rb00t", "default", "00000000-0000-0000-0000-000000000000", &pidns, &[], false);
     forge(&s, &here, "j-k3pt", "default", &boot, &pidns, &[], true);
@@ -502,6 +507,69 @@ fn a_skipped_journal_is_said_on_stderr() {
     assert!(journals(&c).is_empty(), "control: the readable journal was swept");
     assert!(!err.contains(".journal"), "control:\n{err}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A live job whose journal sorts after a stale job's, during a `sweep` held inside the stale
+/// job's kill (after its freeze). `end_during`: the live job ends cleanly in that hold, so its
+/// journal is gone when the sweep comes to it. Returns (held, gone, stderr).
+fn race(tag: &str, end_during: bool) -> (bool, bool, String) {
+    let d = scratch(tag);
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let go = d.join("go");
+    let script = format!(r#"while [ ! -e "{}" ]; do sleep 0.05; done"#, go.display());
+    let mut live = Command::new(sheepr())
+        .args(["run", "--no-sweep", "--", "/bin/sh", "-c", &script])
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_JOB_ID", "zzzzzzzz")
+        .spawn()
+        .unwrap();
+    let lj = s.join("jobs").join(&here).join("j-zzzzzzzz.journal");
+    assert!(wait_until(15, || lj.exists()), "the live job's journal");
+    let (mut c, p, _r) = decoy(&d, "decoy");
+    forge(&s, &here, "j-00000000", "default", &boot, &pidns, &[p], false);
+    let (ready, release) = (d.join("ready"), d.join("release"));
+    let (s2, rd2, rl2) = (s.clone(), ready.clone(), release.clone());
+    let t = std::thread::spawn(move || {
+        let o = Command::new(sheepr())
+            .arg("sweep")
+            .env("SHEEPR_TEST_STATE", &s2)
+            .env("SHEEPR_TEST_DEADLINE_MS", "5000")
+            .env("SHEEPR_TEST_HOLD_AFTER_FREEZE", &rl2)
+            .env("SHEEPR_TEST_READY_FILE", &rd2)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    });
+    let held = wait_until(15, || ready.exists());
+    if end_during {
+        std::fs::write(&go, b"").unwrap();
+        let _ = live.wait();
+    }
+    let gone = !lj.exists();
+    std::fs::write(&release, b"").unwrap();
+    let err = t.join().unwrap();
+    if !end_during {
+        std::fs::write(&go, b"").unwrap();
+        let _ = live.wait();
+    }
+    end_decoy(&mut c);
+    let _ = std::fs::remove_dir_all(&d);
+    (held, gone, err)
+}
+
+/// Review of e3e2d3a, P1: a job that ends cleanly while a `sweep` works on another job is not
+/// said (its journal is gone between the listing and the open: that is a live job ending, as a
+/// clean end that unlinks after the lock is); the control, a job that stays live, is not said
+/// either.
+#[test]
+fn a_job_that_ends_during_a_sweep_is_not_said() {
+    let (held, gone, err) = race("ends", true);
+    assert!(held && gone, "the race did not happen: held {held}, gone {gone}");
+    assert!(!err.contains("j-zzzzzzzz"), "a job that ended cleanly during the sweep was said:\n{err}");
+    let (held, gone, err) = race("stays", false);
+    assert!(held && !gone, "control: held {held}, gone {gone}");
+    assert!(!err.contains("j-zzzzzzzz"), "control: a live job was said:\n{err}");
 }
 
 /// The second wall control (PHASE2.md §4a, round 2): a journaled pid now held by an untagged
@@ -544,14 +612,17 @@ fn another_users_journal_is_never_swept() {
     let v: Vec<&str> = planted.split('|').collect();
     let (foreign, own, p, rec) = (PathBuf::from(v[0]), PathBuf::from(v[1]), (v[2].parse::<i32>().unwrap(), v[3].parse::<u64>().unwrap()), PathBuf::from(v[4]));
     let d = scratch("planted");
-    let (code, _) = sweep(&foreign, &d, &[], &[]);
+    let (code, err) = sweep_said(&foreign, &[]);
     let (alive, n) = (common::alive(p), counted(&rec));
-    let (code2, _) = sweep(&own, &d, &[], &[]);
+    let (code2, err2) = sweep_said(&own, &[]);
     let gone = !common::alive(p);
     assert_eq!(code, Some(0));
     assert!(alive && n == 0, "another user's journal was swept ({n})");
+    // issue #15: the skip is said, one line naming the file
+    assert_eq!(err.lines().filter(|l| l.contains("j-0badf00d.journal")).count(), 1, "another user's journal:\n{err}");
     assert_eq!(code2, Some(0));
     assert!(gone, "control: the same journal owned by this user is swept");
+    assert!(!err2.contains("j-0badf00d.journal"), "control:\n{err2}");
     let _ = std::fs::remove_dir_all(&d);
 }
 

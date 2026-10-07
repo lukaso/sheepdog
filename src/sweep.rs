@@ -62,7 +62,8 @@ pub enum Skip {
     Live,
     Unsafe(String),
     Unreadable(String),
-    /// its job chose to keep its strays (`--leave-strays`): not a problem, never said
+    /// its job chose to keep its strays (`--leave-strays`): not a problem, so `sweep` and the
+    /// auto-sweep never say it (`kill <job>` still names it in its refusal)
     Kept(String),
 }
 
@@ -93,7 +94,9 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .map_err(|e| Skip::Unreadable(format!("{e}")))?;
+        // gone between the listing and this open: a job that ended cleanly (or another sweep's),
+        // as a name that no longer matches the lock below
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { Skip::Live } else { Skip::Unreadable(format!("{e}")) })?;
     let meta = file.metadata().map_err(|e| Skip::Unreadable(format!("{e}")))?;
     if meta.uid() != unsafe { libc::geteuid() } {
         return Err(Skip::Unsafe("the journal belongs to another user".into()));
@@ -374,7 +377,8 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
 }
 
 /// The auto-sweep before a `sheepr run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
-/// silently skipped on any problem (a note), within 200 ms between journals. It takes the wall's
+/// skipped on any problem with a note (a journal it cannot read or will not act on is one note
+/// that names the file, issue #15), within 200 ms between journals. It takes the wall's
 /// token only when there is a journal to open: an empty state produces no fact.
 pub fn auto(owner: &str, quiet: bool) {
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else { return };
@@ -405,7 +409,8 @@ pub fn auto(owner: &str, quiet: bool) {
         match open_fenced(&f) {
             Ok(j) => opened.push(j),
             Err(Skip::Live) => live_named.extend(peek(&f)),
-            Err(_) => {}
+            Err(Skip::Unsafe(why)) | Err(Skip::Unreadable(why)) => crate::status::add_note(&format!("auto-sweep skipped {}: {why}", f.display())),
+            Err(Skip::Kept(_)) => {}
         }
     }
     let (mut swept, mut killed) = (0usize, 0usize);

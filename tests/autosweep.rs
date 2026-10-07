@@ -137,6 +137,35 @@ fn notes(st: &Option<Json>) -> Vec<String> {
     st.as_ref().and_then(|s| s.get("notes")).and_then(Json::arr).unwrap_or(&[]).iter().filter_map(Json::str).map(String::from).collect()
 }
 
+/// Issue #15: a journal the auto-sweep cannot read (no header) is one `notes` entry that names
+/// the file, as an explicit `sweep` says it on stderr; before, it left no trace at all. The
+/// control, a live job's journal in the same folder, gives no note.
+#[test]
+fn the_auto_sweep_notes_a_journal_it_cannot_read() {
+    let d = scratch("unread");
+    let s = state(&d);
+    let go = d.join("go");
+    let script = format!(r#"while [ ! -e "{}" ]; do sleep 0.05; done"#, go.display());
+    let mut live = Outer(Command::new(sheepr()).args(["run", "--no-sweep", "--", "/bin/sh", "-c", &script]).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
+    assert!(wait_until(15, || journals(&s).len() == 1), "the live job's journal");
+    let lj = journals(&s)[0].clone();
+    let lname = lj.file_name().unwrap().to_string_lossy().into_owned();
+    let (_, ctl) = run(&d, &s, "ctl", "", "/bin/sh -c 'exit 0'", &[]);
+    let bad = lj.parent().unwrap().join("j-b4d.journal");
+    std::fs::write(&bad, "not a journal\n").unwrap();
+    std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let (code, st) = run(&d, &s, "bad", "", "/bin/sh -c 'exit 0'", &[]);
+    std::fs::write(&go, b"").unwrap();
+    let _ = live.0.wait();
+    let said = |st: &Option<Json>, name: &str| notes(st).iter().filter(|n| n.contains(name)).count();
+    assert!(ctl.is_some(), "control: a status line");
+    assert_eq!(said(&ctl, &lname), 0, "control: a live job's journal: {:?}", notes(&ctl));
+    assert_eq!(code, Some(0));
+    assert_eq!(said(&st, "j-b4d.journal"), 1, "{:?}", notes(&st));
+    assert_eq!(said(&st, &lname), 0, "a live job's journal: {:?}", notes(&st));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// The next run sweeps a dead job of its owner before its command starts; with `--no-sweep`
 /// it does not (the control).
 #[test]
