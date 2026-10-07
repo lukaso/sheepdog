@@ -1,5 +1,5 @@
 //! `--status-fd N` (PLAN.md §3.1; PHASE2.md §1 decision 8): one JSON line, written once at the
-//! end, by the supervisor only (a relay drops the fd), within IDLE_MS and CAP_MS (issue #14). Fields: `v`, `job`, `root` (`exited`,
+//! end, by the supervisor only (a relay drops the fd), within IDLE and CAP (issue #14). Fields: `v`, `job`, `root` (`exited`,
 //! `signaled`, `not-started`), `code`, `trigger` (null, `term`; P3 adds `timeout` and `cap`),
 //! `trigger_at` (ms since start), `deadline_missed`, `killed` (`[{pid, cmd, escaped}]`, escaped:
 //! null | `setsid` | `reparented`), `survivors`, `tracking`, `degraded`, `error`, `notes`. The fd
@@ -203,14 +203,14 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
 /// job is killed. Long, so a caller that is alive but stalled (a busy event loop, swap) still
 /// gets its line once it holds more than its pipe (64 KiB for a pipe or node's stdio pair, 8 KiB
 /// for a raw macOS socketpair).
-const IDLE_MS: u64 = 10_000;
+const IDLE: Duration = Duration::from_secs(10);
 /// The longest the line may take in all, however steadily its reader reads (debug seam
 /// SHEEPR_TEST_STATUS_CAP_MS).
-const CAP_MS: u64 = 30_000;
+const CAP: Duration = Duration::from_secs(30);
 /// An EINTR this close to the end of its window counts as the timer's tick.
 const TICK_SLACK: Duration = Duration::from_millis(10);
 /// The notice that the line did not arrive waits at most this long for stderr.
-const NOTICE_MS: u64 = 1000;
+const NOTICE: Duration = Duration::from_secs(1);
 /// One write's size: PIPE_BUF, which a pipe takes whole or not at all (as a macOS socket does
 /// below its 2048-byte low-water mark), so no write waits on with part of it taken, and a reader
 /// that takes part of a write and stops is cut one idle later, not two (review of fa07b06, P3-1).
@@ -222,17 +222,17 @@ const CHUNK: usize = 512;
 const CHUNK: usize = 4096;
 
 /// Write the status line (once) and return `code`. A line its reader does not take (the fd
-/// accepts nothing for IDLE_MS, the line takes longer than CAP_MS, or the reader has closed its
+/// accepts nothing for IDLE, the line takes longer than CAP, or the reader has closed its
 /// end) is said in one stderr line, also under `--quiet` (the machine-readable record is gone),
-/// which waits at most NOTICE_MS; the exit code stays the command's.
+/// which waits at most NOTICE; the exit code stays the command's.
 pub fn write(code: i32) -> i32 {
     let Some((fd, line)) = line(code) else { return code };
     // sheepr's end: only an exit or a raise follows (die_like resets the one signal it raises).
     // A closed reader must be EPIPE, never a SIGPIPE death, also before setup_signals blocked it
     // (a usage error, an early panic)
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-    let idle = Duration::from_millis(crate::seam_ms("SHEEPR_TEST_STATUS_IDLE_MS").unwrap_or(IDLE_MS));
-    let cap = Duration::from_millis(crate::seam_ms("SHEEPR_TEST_STATUS_CAP_MS").unwrap_or(CAP_MS));
+    let idle = crate::seam_ms("SHEEPR_TEST_STATUS_IDLE_MS").map_or(IDLE, Duration::from_millis);
+    let cap = crate::seam_ms("SHEEPR_TEST_STATUS_CAP_MS").map_or(CAP, Duration::from_millis);
     let (total, start) = (line.len(), Instant::now());
     if let Err((cause, why, sent)) = bounded_write(fd, line.as_bytes(), idle, cap) {
         crate::note(format!("status-undelivered {cause} {} {sent}/{total}", start.elapsed().as_millis()));
@@ -240,7 +240,7 @@ pub fn write(code: i32) -> i32 {
         // still starts a line of its own
         let nl = if sent > 0 && sent < total && same_file(fd, 2) { "\n" } else { "" };
         let said = format!("{nl}sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
-        let notice = idle.min(Duration::from_millis(NOTICE_MS));
+        let notice = idle.min(NOTICE);
         let _ = bounded_write(2, said.as_bytes(), notice, notice);
     }
     code
@@ -398,4 +398,16 @@ fn line(code: i32) -> Option<(i32, String)> {
         );
         Some((fd, line))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The limits README.md, CHANGELOG.md and PLAN.md state (whole-branch review P2-2): 10 s
+    /// idle, 30 s cap, 1 s notice. tests/status.rs proves the idle end to end with no seam.
+    #[test]
+    fn the_stated_limits() {
+        assert_eq!((IDLE, CAP, NOTICE), (Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(1)));
+    }
 }

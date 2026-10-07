@@ -604,6 +604,20 @@ fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Whole-branch review P2-2: the stated default holds in the build as shipped, not only under the
+/// seams: with no idle seam, a stuck reader is cut 10 s after the pipe filled (README's number).
+/// (The 30 s cap and the 1 s notice are pinned by the unit cell in src/status.rs.)
+#[test]
+fn the_default_idle_is_ten_seconds() {
+    let d = scratch("default");
+    let x = piped(&d, "default", Reader::Stuck, 1 << 20, Opts::default());
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    let (cause, ms) = undelivered(&x).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", x.trace));
+    assert_eq!(cause, "timeout");
+    assert!((10_000..13_000).contains(&ms), "cut after {ms} ms, not the default 10 s");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Review of a1419bc, P2-3: the idle limit counts only the time the fd accepts nothing. A reader
 /// that reads slowly but steadily (4 KiB every 25 ms) gets the whole 400 KiB line, which takes
 /// it longer than the 1 s idle. A steady reader of a line too large for it is cut at the cap (a
