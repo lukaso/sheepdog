@@ -21,7 +21,8 @@
 //! phase-1 opt-out, or a journal folder "not found" (any other error on the way to it refuses);
 //! 1 refused: the state directory or its journal folder is not safe, cannot be reached or cannot
 //! be listed, sheepr cannot follow its own chain of parent processes, or (Linux) /proc cannot be
-//! read; 2 usage error; 125 a job's kill deadline passed with members alive.
+//! read; 2 usage error; 125 a job's kill deadline passed with members alive, or the kill failed
+//! inside sheepr.
 
 use crate::kill::{end_supervisors, is_sheepr, parent, protected, Proved};
 use crate::{kill_failed, kill_tree, say, signal, trace, KillOpts};

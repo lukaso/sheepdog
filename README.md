@@ -183,16 +183,23 @@ that is an absolute path, else in `~/.local/state/sheepr`; delete that directory
 
 ## Reference
 
-- Exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired (`--timeout`, a
-  cap); 125 when sheepr failed, for a usage error of `run`, or when a process was still alive at
-  the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
-  `--status-fd` says which, as one JSON line; read that fd while sheepr runs. sheepr gives up
-  when the fd accepts nothing for 10 s (up to 20 s after its last byte on a terminal, which can
-  take part of a write), and at about 30 s in all; then the reader has part of the line or none,
-  sheepr says so on stderr, and the exit code stays the same. A status is a line that parses as
-  JSON: with `3>&2`, sheepr's notice starts a new line, so a cut line also ends in a newline.
-  Leave the line about 31 s (40 s at worst) after the kill deadline before you send sheepr KILL.
-  The other commands exit 2 for a usage error.
+- `run`'s exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired
+  (`--timeout`, a cap); 125 when sheepr failed, for a usage error of `run`, or when a process was
+  still alive at the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143
+  in a shell). `--status-fd` says which, as one JSON line; read that fd while sheepr runs. sheepr
+  gives up when the fd accepts nothing for 10 s (up to 20 s after its last byte on a terminal,
+  which can take part of a write), and at 30 s in all; then the reader has part of the line or
+  none, sheepr says so on stderr, and the exit code stays the same. A status is a line that parses
+  as JSON (with `3>&2`, sheepr's notice starts a new line, so a cut line also ends in a newline).
+  Leave sheepr 31 s after the kill deadline before you send it KILL (42 s at worst, and only
+  while its stderr is read).
+- `sweep` exits 0 when it is done, also when there is nothing to sweep; 1 when it refuses and
+  signals nothing (the state directory or its journal folder is not safe, cannot be reached or
+  cannot be listed; sheepr cannot follow its own chain of parent processes; on Linux, /proc
+  cannot be read); 125 when a job's kill deadline passed with members alive, or the kill failed
+  inside sheepr. A journal it skips (one it cannot read, or will not act on for safety) is one
+  stderr line, and the exit code stays 0.
+- Every command but `run` exits 2 for a usage error.
 - Stable interfaces: the subcommands and the flags `sheepr help <command>` shows, the exit codes,
   the `--status-fd` and `--json` schemas (`"v": 1`), and the `sheepr:` at the start of the first
   line of each message sheepr itself writes to stderr (for a usage error, that line says what was
