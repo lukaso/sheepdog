@@ -186,7 +186,9 @@ that is an absolute path, else in `~/.local/state/sheepr`; delete that directory
 - `run`'s exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired
   (`--timeout`, a cap); 125 when sheepr failed, for a usage error of `run`, or when a process was
   still alive at the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143
-  in a shell). `--status-fd` says which, as one JSON line; read that fd while sheepr runs. sheepr
+  in a shell). `--status-fd` says which, as one JSON line; read that fd while sheepr runs (from a
+  regular file, wait for the line's newline or for sheepr's exit: the line goes out in several
+  writes). sheepr
   gives up when the fd accepts nothing for 10 s (up to 20 s after its last byte on a terminal or
   a Linux TCP socket, which can take part of a write; on Linux a Unix socket such as node's stdio
   pair accepts nothing until its reader has drained three quarters of it), and at about 30 s in

@@ -326,8 +326,9 @@ struct Opts<'a> {
     shared_stderr: bool,
     /// the write end is O_NONBLOCK (set on the test's copy: the open file description is shared)
     nonblock: bool,
-    /// count sheepr's threads this long after the spawn
-    threads_at_ms: Option<u128>,
+    /// count sheepr's threads once the pipe is full (its count unchanged for 200 ms): sheepr is
+    /// then in the line's write
+    threads_when_full: bool,
 }
 
 struct Piped {
@@ -461,6 +462,7 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, o: Opts) -> Piped {
     let keep = w; // the test's own copy of the write end, read for its flags after the end
     let note = trace.clone();
     let pid = c.id() as i32;
+    let rfd = r.as_ref().map(std::os::fd::AsRawFd::as_raw_fd);
     let reading = r.map(|mut r| {
         std::thread::spawn(move || {
             let mut got = Vec::new();
@@ -508,13 +510,18 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, o: Opts) -> Piped {
         })
     });
     let end = t0 + Duration::from_secs(20);
-    let mut counted = None;
+    let (mut counted, mut last) = (None, (0, Instant::now()));
     let st = loop {
         if let Some(s) = c.try_wait().unwrap() {
             break Some(s);
         }
-        if counted.is_none() && o.threads_at_ms.is_some_and(|at| t0.elapsed().as_millis() >= at) {
-            counted = Some(threads(c.id()));
+        if let (true, None, Some(fd)) = (o.threads_when_full, &counted, rfd) {
+            let w = waiting(fd);
+            if w != last.0 {
+                last = (w, Instant::now());
+            } else if w > 0 && last.1.elapsed() >= Duration::from_millis(200) {
+                counted = Some(threads(c.id()));
+            }
         }
         if Instant::now() > end {
             common::send_child(&mut c, libc::SIGKILL);
@@ -586,7 +593,7 @@ fn whole(p: &Piped, pad: usize) -> bool {
 fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let d = scratch("stuck");
     let pad = 1 << 20;
-    let stuck = piped(&d, "stuck", Reader::Stuck, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], threads_at_ms: Some(2500), ..Default::default() });
+    let stuck = piped(&d, "stuck", Reader::Stuck, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], threads_when_full: true, ..Default::default() });
     assert_eq!(stuck.code, Some(7), "sheepr did not exit within 20 s (or not with the command's code); trace:\n{}", stuck.trace);
     let (cause, ms, sent) = undelivered_sent(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout");
@@ -663,7 +670,7 @@ fn a_closed_status_reader_is_said_on_stderr() {
     let full = piped(&d, "full", Reader::Closed, 0, Opts { full_stderr: true, ..Default::default() });
     assert_eq!(full.code, Some(7), "a full stderr held sheepr; trace:\n{}", full.trace);
     assert_eq!(undelivered(&full).map(|u| u.0), Some("closed".to_string()), "{}", full.trace);
-    assert!(full.ms < 4000, "the notice to a full stderr took {} ms, not its 1 s", full.ms);
+    assert!(full.ms < x.ms + 2000, "the notice to a full stderr took {} ms more than the control, not its 1 s", full.ms - x.ms.min(full.ms));
     let _ = std::fs::remove_dir_all(&d);
 }
 

@@ -147,6 +147,7 @@ fn the_auto_sweep_notes_a_journal_it_cannot_read() {
     let go = d.join("go");
     let script = format!(r#"while [ ! -e "{}" ]; do sleep 0.05; done"#, go.display());
     let mut live = Outer(Command::new(sheepr()).args(["run", "--no-sweep", "--", "/bin/sh", "-c", &script]).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
+    let _go = GoOnDrop(go.clone());
     assert!(wait_until(15, || journals(&s).len() == 1), "the live job's journal");
     let lj = journals(&s)[0].clone();
     let lname = lj.file_name().unwrap().to_string_lossy().into_owned();
@@ -160,6 +161,11 @@ fn the_auto_sweep_notes_a_journal_it_cannot_read() {
     let kept = lj.parent().unwrap().join("j-k3pt.journal");
     std::fs::write(&kept, format!("{}\n{{\"v\":1,\"kind\":\"leave-strays\"}}\n", header.replace(&job, "j-k3pt"))).unwrap();
     std::fs::set_permissions(&kept, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    // a journal with another boot's header in this boot's folder: unsafe, noted (review P3-4)
+    let boot = json::parse(&header).unwrap().get("boot").and_then(Json::str).unwrap().to_string();
+    let other = lj.parent().unwrap().join("j-0th3rb00t.journal");
+    std::fs::write(&other, format!("{}\n", header.replace(&job, "j-0th3rb00t").replace(&boot, "00000000-0000-0000-0000-000000000000"))).unwrap();
+    std::fs::set_permissions(&other, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
     let (code, st) = run(&d, &s, "bad", "", "/bin/sh -c 'exit 0'", &[]);
     std::fs::write(&go, b"").unwrap();
     let _ = live.0.wait();
@@ -168,6 +174,7 @@ fn the_auto_sweep_notes_a_journal_it_cannot_read() {
     assert_eq!(said(&ctl, &lname), 0, "control: a live job's journal: {:?}", notes(&ctl));
     assert_eq!(code, Some(0));
     assert_eq!(said(&st, "j-b4d.journal"), 1, "{:?}", notes(&st));
+    assert_eq!(said(&st, "j-0th3rb00t.journal"), 1, "another boot's header: {:?}", notes(&st));
     assert_eq!(said(&st, &lname), 0, "a live job's journal: {:?}", notes(&st));
     assert_eq!(said(&st, "j-k3pt"), 0, "a journal kept on purpose: {:?}", notes(&st));
     assert!(kept.exists(), "the kept journal is left in place");
@@ -245,6 +252,17 @@ fn a_normal_state_gives_no_auto_sweep_note() {
         assert!(!notes(&st).iter().any(|x| x.starts_with("auto-sweep")), "{n}: {:?}", notes(&st));
     }
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The `go` file of a live job's root loop, written when the cell ends, a panic too, so a cell
+/// that fails before its own `go` never leaves the loop (and its supervisor) running, which would
+/// hold the test's output and hang the run (whole-branch review P3-1). Declare it after the job,
+/// so it drops first.
+struct GoOnDrop(PathBuf);
+impl Drop for GoOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"");
+    }
 }
 
 /// The next run sweeps a dead job of its owner before its command starts; with `--no-sweep`

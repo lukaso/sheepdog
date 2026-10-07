@@ -11,14 +11,15 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
 - `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job
   is killed. sheepr gives up when the fd accepts nothing for 10 s, and at about 30 s in all; then
   it says on stderr that the line did not arrive (also with `--quiet`) and exits with its usual
-  code. A closed reader gives that line too, also on a usage error, where it could kill sheepr
+  code. The line now goes out in several writes, so a reader of a regular file must wait for its
+  newline or for sheepr's exit. A closed reader gives that line too, also on a usage error, where it could kill sheepr
   with SIGPIPE before (unless the status fd is stderr itself, as with `3>&2`: then the usage
   message meets the closed reader first, and SIGPIPE still ends sheepr). A status fd the caller made non-blocking now waits for its reader too;
   before, the line was cut at the first full buffer ([#14](https://github.com/lukaso/sheepr/issues/14)).
 - `sweep`: a journal it skips because it cannot read it, or will not act on it for safety, is said
   on stderr, one line that names the file, and the exit code does not change; the auto-sweep
-  before each `run` puts the same skip in the `--status-fd` notes. Before, `sweep` said it only
-  in a debug build, and the auto-sweep said nothing at all. A job kept with `--leave-strays` is
+  before each `run` puts the same skip in the `--status-fd` notes. Before, `sweep` wrote it only
+  to a debug build's test trace, never to stderr, and the auto-sweep said nothing at all. A job kept with `--leave-strays` is
   still skipped without a word. Only a journal folder that is not there means "nothing to
   sweep": one sheepr cannot reach or list (no permission, not a directory) is no longer taken as
   empty, so `sweep` refuses it (exit 1, as an unsafe folder) and the auto-sweep notes it

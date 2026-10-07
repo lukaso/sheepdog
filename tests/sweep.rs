@@ -606,6 +606,17 @@ fn a_normal_state_is_swept_in_silence() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// The `go` file of a live job's root loop, written when the cell ends, a panic too, so a cell
+/// that fails before its own `go` never leaves the loop (and its supervisor) running, which would
+/// hold the test's output and hang the run (whole-branch review P3-1). Declare it after the job,
+/// so it drops first.
+struct GoOnDrop(PathBuf);
+impl Drop for GoOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"");
+    }
+}
+
 /// A live job whose journal sorts after a stale job's, during a `sweep` held inside the stale
 /// job's kill (after its freeze). `end_during`: the live job ends cleanly in that hold, so its
 /// journal is gone when the sweep comes to it. Returns (held, gone, stderr).
@@ -621,6 +632,7 @@ fn race(tag: &str, end_during: bool) -> (bool, bool, String) {
         .env("SHEEPR_TEST_JOB_ID", "zzzzzzzz")
         .spawn()
         .unwrap();
+    let _go = GoOnDrop(go.clone());
     let lj = s.join("jobs").join(&here).join("j-zzzzzzzz.journal");
     assert!(wait_until(15, || lj.exists()), "the live job's journal");
     let (mut c, p, _r) = decoy(&d, "decoy");
