@@ -675,6 +675,9 @@ fn a_closed_status_reader_is_said_on_stderr() {
     let notice = |p: &Piped| p.trace.lines().find_map(|l| l.strip_prefix("status-notice ")?.parse::<u64>().ok());
     assert!(notice(&full).is_some_and(|ms| (900..2000).contains(&ms)), "the notice to a full stderr: {:?} ms, not its 1 s", notice(&full));
     assert!(notice(&x).is_some_and(|ms| ms < 500), "control: the notice to a stderr that takes it: {:?} ms", notice(&x));
+    // and the full stderr holds sheepr's whole exit no longer than that (the control runs first
+    // and takes any first-launch delay, so this upper bound cannot be made red by a cold start)
+    assert!(full.ms < x.ms + 2000, "a full stderr held sheepr {} ms more than the control", full.ms.saturating_sub(x.ms));
     let _ = std::fs::remove_dir_all(&d);
 }
 

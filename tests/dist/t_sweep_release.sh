@@ -32,12 +32,16 @@ rm -f "${dir}j-b4d.journal"
 # (env, not the renv function: a function in the background is a subshell, and $! must be sheepr)
 env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPR_STATE="$FX/h/s" TMPDIR="$FX/h" "$B" run --no-sweep -- /bin/sh -c "$wait_go" < /dev/null > /dev/null 2> "$FX/err.dead" &
 sup=$!
-i=0; while [ "$(journals)" -lt 1 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-dj=$(ls "$dir" | grep '\.journal$' | head -n 1)
+# the SIGKILL only once the journal names the root (on macOS the root is spawned stopped and the
+# supervisor journals it, then resumes it: a SIGKILL before that would leave it stopped for ever)
+i=0; while ! cat "$dir"*.journal 2> /dev/null | grep -q '"root":true' && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+dj=$(grep -l '"root":true' "$dir"*.journal 2> /dev/null | head -n 1)
+rp=$(grep -h '"root":true' "$dir"*.journal 2> /dev/null | head -n 1 | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
 kill -KILL "$sup"; wait "$sup" 2> /dev/null
 sr sweep; r=$?
-[ -n "$dj" ] && [ "$r" = 0 ] && [ ! -e "$dir$dj" ] && grep -q 'swept 1 dead job' "$FX/err" && ! grep -q '\.journal' "$FX/err" \
-  && pass "control: a dead job's readable journal is read and swept, named by no line, exit 0" || fail "control (dead): '$dj', rc=$r $(tr '\n' ' ' < "$FX/err")"
+gone=no; [ -n "$rp" ] && ! kill -0 "$rp" 2> /dev/null && gone=yes
+[ -n "$dj" ] && [ "$r" = 0 ] && [ ! -e "$dj" ] && [ "$gone" = yes ] && grep -q 'swept 1 dead job ([1-9]' "$FX/err" && ! grep -q '\.journal' "$FX/err" \
+  && pass "control: a dead job's readable journal is read and swept (its root $rp ended), named by no line, exit 0" || fail "control (dead): '$dj', root $rp gone=$gone, rc=$r $(tr '\n' ' ' < "$FX/err")"
 # control 2: a live job's readable journal: left, not named
 renv run --no-sweep -- /bin/sh -c "$wait_go" < /dev/null > /dev/null 2> "$FX/err.live" &
 i=0; while [ "$(journals)" -lt 1 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done

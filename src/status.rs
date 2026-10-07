@@ -409,9 +409,9 @@ fn line(code: i32) -> Option<(i32, String)> {
 mod tests {
     use super::*;
 
-    /// The limits README.md, CHANGELOG.md and PLAN.md state (whole-branch review P2-2): 10 s
-    /// idle, 30 s cap, 1 s notice, 10 ms tick slack. tests/status.rs proves the idle end to end
-    /// with no seam.
+    /// The stated limits (whole-branch review P2-2): the 10 s idle and 30 s cap that README.md,
+    /// CHANGELOG.md and PLAN.md §3.1 state, and the 1 s notice and 10 ms tick slack that PLAN.md
+    /// §3.1 states. tests/status.rs proves the idle end to end with no seam.
     #[test]
     fn the_stated_limits() {
         assert_eq!((IDLE, CAP, NOTICE), (Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(1)));

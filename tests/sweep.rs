@@ -114,6 +114,33 @@ impl Drop for Decoy {
     }
 }
 
+/// An outer `sheepr run` a cell ends itself. If the cell fails first, a TERM on drop ends its whole
+/// job (a SIGKILL would leave the job to a sweep), and a KILL follows after 5 s (review of
+/// 6aa85ed, F3). It derefs to its `Child`.
+struct Run(Child);
+impl std::ops::Deref for Run {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Run {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl Drop for Run {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            common::send_child(&mut self.0, libc::SIGTERM);
+            let c = &mut self.0;
+            if !wait_until(5, || c.try_wait().ok().flatten().is_some()) {
+                end_decoy(&mut self.0);
+            }
+        }
+    }
+}
+
 fn end_decoy(c: &mut Child) {
     common::send_child(c, libc::SIGKILL);
     let _ = c.wait();
@@ -494,7 +521,7 @@ fn sweep_ends_an_inner_supervisor_first() {
         d.join("innerpid").display(),
         rr.display()
     );
-    let mut c = Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap();
+    let mut c = Run(Command::new(sheepr()).args(["run", "--", "/bin/sh", "-c", &script]).env("FX", fixture()).env("SHEEPR_TEST_STATE", &s).spawn().unwrap());
     // the inner supervisor is journaled by the outer (readiness), then the outer is SIGKILLed
     let inner: i32 = { assert!(wait_until(15, || std::fs::read_to_string(d.join("innerpid")).is_ok_and(|t| !t.trim().is_empty()))); std::fs::read_to_string(d.join("innerpid")).unwrap().trim().parse().unwrap() };
     assert!(wait_until(10, || journaled(&s).contains(&inner)), "the inner supervisor was journaled");
