@@ -12,7 +12,8 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   is killed. sheepr gives up when the fd accepts nothing for 10 s, and at about 30 s in all; then
   it says on stderr that the line did not arrive (also with `--quiet`) and exits with its usual
   code. A closed reader gives that line too, also on a usage error, where it could kill sheepr
-  with SIGPIPE before. A status fd the caller made non-blocking now waits for its reader too;
+  with SIGPIPE before (unless the status fd is stderr itself, as with `3>&2`: then the usage
+  message meets the closed reader first, and SIGPIPE still ends sheepr). A status fd the caller made non-blocking now waits for its reader too;
   before, the line was cut at the first full buffer ([#14](https://github.com/lukaso/sheepr/issues/14)).
 - `sweep`: a journal it skips because it cannot read it, or will not act on it for safety, is said
   on stderr, one line that names the file, and the exit code does not change; the auto-sweep
