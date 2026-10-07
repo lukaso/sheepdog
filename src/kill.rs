@@ -732,7 +732,7 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
             crate::fail!("sheepr: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
             Err(1)
         }
-        Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) => {
+        Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) | Err(crate::sweep::Skip::Kept(why)) => {
             crate::fail!("sheepr: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
             Err(1)
         }

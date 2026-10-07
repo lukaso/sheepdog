@@ -12,6 +12,10 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   read it, or that has closed its end, can no longer keep sheepr running after the job is killed:
   sheepr says on stderr that the line did not arrive (also with `--quiet`) and exits with its
   usual code ([#14](https://github.com/lukaso/sheepr/issues/14)).
+- `sweep`: a journal it skips because it cannot read it, or will not act on it for safety, is said
+  on stderr, one line that names the file. Before, only a debug build saw it. A job kept with
+  `--leave-strays` is still skipped without a word, and the exit code does not change
+  ([#15](https://github.com/lukaso/sheepr/issues/15)).
 
 ## 0.1.0 (2026-10-06)
 

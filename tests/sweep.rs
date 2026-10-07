@@ -471,6 +471,39 @@ fn a_header_from_another_boot_is_not_swept_from_this_folder() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// Issue #15 (first step): a journal `sweep` cannot read (no header), or will not act on for
+/// safety (another boot's header in this boot's folder), is said on stderr, one line naming the
+/// file; before, only a debug build's trace saw it. A journal kept on purpose (`--leave-strays`)
+/// says nothing. The exit code stays 0. The control, a readable dead journal, names no file.
+#[test]
+fn a_skipped_journal_is_said_on_stderr() {
+    let d = scratch("saysskip");
+    let (here, boot, pidns) = folder(&d);
+    let say = |s: &Path| {
+        let o = Command::new(sheepr()).arg("sweep").env("SHEEPR_TEST_STATE", s).output().unwrap();
+        (o.status.code(), String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let s = state(&d.join("skips"));
+    forge(&s, &here, "j-0th3rb00t", "default", "00000000-0000-0000-0000-000000000000", &pidns, &[], false);
+    forge(&s, &here, "j-k3pt", "default", &boot, &pidns, &[], true);
+    let bad = s.join("jobs").join(&here).join("j-b4d.journal");
+    std::fs::write(&bad, "not a journal\n").unwrap();
+    std::fs::set_permissions(&bad, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let (code, err) = say(&s);
+    let lines = |name: &str| err.lines().filter(|l| l.contains(name)).count();
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(lines("j-b4d.journal"), 1, "the unreadable journal:\n{err}");
+    assert_eq!(lines("j-0th3rb00t.journal"), 1, "another boot's journal:\n{err}");
+    assert_eq!(lines("j-k3pt"), 0, "a journal kept on purpose:\n{err}");
+    let c = state(&d.join("control"));
+    forge(&c, &here, "j-0k", "default", &boot, &pidns, &[], false);
+    let (code, err) = say(&c);
+    assert_eq!(code, Some(0), "control: {err}");
+    assert!(journals(&c).is_empty(), "control: the readable journal was swept");
+    assert!(!err.contains(".journal"), "control:\n{err}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// The second wall control (PHASE2.md §4a, round 2): a journaled pid now held by an untagged
 /// process under another identity is refused as `gone`: no signal, no `withheld` line.
 #[test]

@@ -62,6 +62,8 @@ pub enum Skip {
     Live,
     Unsafe(String),
     Unreadable(String),
+    /// its job chose to keep its strays (`--leave-strays`): not a problem, never said
+    Kept(String),
 }
 
 /// A folder is safe to act on: a real directory (not a symlink), this user's, and nobody else
@@ -145,7 +147,7 @@ pub fn open_fenced(path: &Path) -> Result<Journal, Skip> {
         return Err(Skip::Unsafe("another boot or pid namespace".into()));
     }
     if j.leave_strays {
-        return Err(Skip::Unsafe("its job left its strays on purpose (--leave-strays)".into()));
+        return Err(Skip::Kept("its job left its strays on purpose (--leave-strays)".into()));
     }
     Ok(j)
 }
@@ -501,6 +503,12 @@ pub fn main(args: &[OsString]) -> i32 {
             Ok(j) => j,
             Err(Skip::Live) => continue,
             Err(Skip::Unsafe(why)) | Err(Skip::Unreadable(why)) => {
+                // said, not only noted: the trace exists only in a debug build (issue #15)
+                say!("sheepr: could not sweep {}: {why}. Its processes, if any, were not ended.", crate::kill::clean(&f.display().to_string()));
+                crate::note(format!("sweep skipped {}: {why}", f.display()));
+                continue;
+            }
+            Err(Skip::Kept(why)) => {
                 crate::note(format!("sweep skipped {}: {why}", f.display()));
                 continue;
             }
