@@ -6,6 +6,13 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
+## Unreleased
+
+- `run --status-fd`: the status line waits at most 1 s for its reader. A reader that does not
+  read it, or that has closed its end, can no longer keep sheepr running after the job is killed:
+  sheepr says on stderr that the line did not arrive (also with `--quiet`) and exits with its
+  usual code ([#14](https://github.com/lukaso/sheepr/issues/14)).
+
 ## 0.1.0 (2026-10-06)
 
 The first release.

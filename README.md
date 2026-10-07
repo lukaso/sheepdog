@@ -186,7 +186,9 @@ that is an absolute path, else in `~/.local/state/sheepr`; delete that directory
 - Exit codes follow `timeout(1)`: the command's own code; 124 when a limit fired (`--timeout`, a
   cap); 125 when sheepr failed, for a usage error of `run`, or when a process was still alive at
   the kill deadline; a job ended by a TERM from outside dies of SIGTERM itself (143 in a shell).
-  `--status-fd` says which, as one JSON line. The other commands exit 2 for a usage error.
+  `--status-fd` says which, as one JSON line. That line waits at most 1 s for its reader; a reader
+  that does not take it in time, or that has closed its end, gets a line on stderr instead, and the
+  exit code stays the same. The other commands exit 2 for a usage error.
 - Stable interfaces: the subcommands and the flags `sheepr help <command>` shows, the exit codes,
   the `--status-fd` and `--json` schemas (`"v": 1`), and the `sheepr:` at the start of the first
   line of each message sheepr itself writes to stderr (for a usage error, that line says what was

@@ -287,6 +287,138 @@ fn quiet_suppresses_the_report() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Reader {
+    /// the test holds the read end and never reads it
+    Stuck,
+    /// a thread reads to the newline
+    Drain,
+    /// the read end is closed before sheepr starts
+    Closed,
+}
+
+struct Piped {
+    code: Option<i32>,
+    stderr: String,
+    trace: String,
+    got: Vec<u8>,
+    /// O_NONBLOCK on the test's own copy of the write end (the same open file description),
+    /// read after sheepr exited; None when the test kept no copy
+    nonblock_after: Option<bool>,
+}
+
+/// `sheepr run --quiet --status-fd 3 -- /bin/sh -c 'exit 7'` with fd 3 the write end of a pipe the
+/// test owns and the status line padded by `pad` bytes (debug seam), within 20 s (then KILL, code
+/// None). The test keeps its own copy of the write end unless the reader is `Closed`.
+fn piped(d: &Path, name: &str, reader: Reader, pad: usize) -> Piped {
+    let (r, w) = std::io::pipe().unwrap();
+    let keep = (reader != Reader::Closed).then(|| w.try_clone().unwrap());
+    let r = if reader == Reader::Closed {
+        drop(r);
+        None
+    } else {
+        Some(r)
+    };
+    let trace = d.join(format!("{name}.trace"));
+    let err = d.join(format!("{name}.err"));
+    let mut cmd = Command::new(sheepr());
+    cmd.args(["run", "--quiet", "--status-fd", "3", "--", "/bin/sh", "-c", "exit 7"])
+        .env("SHEEPR_TEST_STATUS_PAD", pad.to_string())
+        .env("SHEEPR_TEST_TRACE", &trace)
+        .stderr(std::fs::File::create(&err).unwrap());
+    let raw = std::os::fd::AsRawFd::as_raw_fd(&w);
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
+            // dup2 onto itself would keep CLOEXEC
+            let ok = if raw == 3 { libc::fcntl(3, libc::F_SETFD, 0) } else { libc::dup2(raw, 3) };
+            if ok < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut c = cmd.spawn().unwrap();
+    drop(w);
+    let drain = match (reader, r) {
+        (Reader::Drain, Some(mut r)) => Some(std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut buf = [0u8; 65536];
+            while !got.contains(&b'\n') {
+                match std::io::Read::read(&mut r, &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+            }
+            (got, None)
+        })),
+        (_, r) => Some(std::thread::spawn(move || (Vec::new(), r))),
+    };
+    let end = Instant::now() + Duration::from_secs(20);
+    let code = loop {
+        if let Some(s) = c.try_wait().unwrap() {
+            break s.code();
+        }
+        if Instant::now() > end {
+            common::send_child(&mut c, libc::SIGKILL);
+            let _ = c.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let nonblock_after = keep.as_ref().map(|k| unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(k), libc::F_GETFL) } & libc::O_NONBLOCK != 0);
+    drop(keep);
+    let (got, held) = drain.map(|t| t.join().unwrap()).unwrap_or_default();
+    drop(held); // the stuck reader is released only now, after sheepr's end
+    Piped { code, stderr: std::fs::read_to_string(&err).unwrap_or_default(), trace: std::fs::read_to_string(&trace).unwrap_or_default(), got, nonblock_after }
+}
+
+/// The trace's `status-undelivered CAUSE MS SENT/TOTAL` note, if any.
+fn undelivered(p: &Piped) -> Option<(String, u64)> {
+    let l = p.trace.lines().find(|l| l.starts_with("status-undelivered "))?;
+    let mut w = l.split_whitespace().skip(1);
+    Some((w.next()?.to_string(), w.next()?.parse().ok()?))
+}
+
+/// Issue #14: the status line never holds sheepr's exit. Against a line larger than any pipe
+/// buffer (1 MiB of debug pad) and a reader that never reads, sheepr exits with the command's
+/// code after waiting its 1 s for the reader and no more, says on stderr (also under `--quiet`)
+/// that the line was not delivered, and leaves the caller's write end blocking as it found it.
+/// The control drains: the whole line arrives, and stderr and the trace say nothing.
+#[test]
+fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
+    let d = scratch("stuck");
+    let pad = 1 << 20;
+    let stuck = piped(&d, "stuck", Reader::Stuck, pad);
+    assert_eq!(stuck.code, Some(7), "sheepr did not exit within 20 s (or not with the command's code); trace:\n{}", stuck.trace);
+    let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
+    assert_eq!(cause, "timeout");
+    assert!((1000..5000).contains(&ms), "waited {ms} ms for the reader, not its 1 s");
+    assert!(!stuck.stderr.trim().is_empty(), "nothing on stderr says the status was lost");
+    assert_eq!(stuck.nonblock_after, Some(false), "the caller's write end was left non-blocking");
+    let drain = piped(&d, "drain", Reader::Drain, pad);
+    assert_eq!(drain.code, Some(7), "control");
+    let line = String::from_utf8_lossy(&drain.got);
+    let st = json::parse(line.trim_end()).unwrap_or_else(|e| panic!("control: the line does not parse ({e}); {} bytes", drain.got.len()));
+    assert_eq!(st.get("code").and_then(Json::num), Some(7.0), "control");
+    assert!(drain.got.len() > pad, "control: {} bytes arrived", drain.got.len());
+    assert_eq!(undelivered(&drain), None, "control:\n{}", drain.trace);
+    assert!(drain.stderr.trim().is_empty(), "control: --quiet printed {}", drain.stderr);
+    assert_eq!(drain.nonblock_after, Some(false), "control: the caller's write end was left non-blocking");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Issue #14: a reader that has closed its end gets no line, and sheepr says so on stderr (also
+/// under `--quiet`) and keeps the command's code; a closed pipe is never a SIGPIPE death.
+#[test]
+fn a_closed_status_reader_is_said_on_stderr() {
+    let d = scratch("closed");
+    let x = piped(&d, "closed", Reader::Closed, 0);
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert_eq!(undelivered(&x).map(|u| u.0), Some("closed".to_string()), "{}", x.trace);
+    assert!(!x.stderr.trim().is_empty(), "nothing on stderr says the status was lost");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// Review P2-5: `--status-fd` 0, 1 or 2 would take the command's own stream (it is set
 /// close-on-exec): a usage error (125), and the command does not run.
 #[test]

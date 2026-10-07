@@ -1,5 +1,5 @@
 //! `--status-fd N` (PLAN.md §3.1; PHASE2.md §1 decision 8): one JSON line, written once at the
-//! end, by the supervisor only (a relay drops the fd). Fields: `v`, `job`, `root` (`exited`,
+//! end, by the supervisor only (a relay drops the fd), within DELIVER_MS (issue #14). Fields: `v`, `job`, `root` (`exited`,
 //! `signaled`, `not-started`), `code`, `trigger` (null, `term`; P3 adds `timeout` and `cap`),
 //! `trigger_at` (ms since start), `deadline_missed`, `killed` (`[{pid, cmd, escaped}]`, escaped:
 //! null | `setsid` | `reparented`), `survivors`, `tracking`, `degraded`, `error`, `notes`. The fd
@@ -197,10 +197,72 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
     }
 }
 
-/// Write the status line (once) and return `code`.
+/// How long the status line waits for its reader (issue #14). A reader that drains its end takes
+/// the line at once; one that does not must never hold sheepr after the job is killed.
+const DELIVER_MS: u64 = 1000;
+
+/// Write the status line (once) and return `code`. A line its reader does not take within
+/// DELIVER_MS, or whose reader has closed its end, is said on stderr (also under `--quiet`: the
+/// machine-readable record is gone) and the exit code stays the command's.
 pub fn write(code: i32) -> i32 {
+    let Some((fd, line)) = line(code) else { return code };
+    let start = Instant::now();
+    if let Err((cause, why, sent)) = deliver(fd, line.as_bytes(), std::time::Duration::from_millis(DELIVER_MS)) {
+        crate::note(format!("status-undelivered {cause} {} {sent}/{}", start.elapsed().as_millis(), line.len()));
+        crate::say!("sheepr: the status line did not reach fd {fd}: {why} ({sent} of {} bytes written).", line.len());
+    }
+    code
+}
+
+/// Write all of `b` to `fd` within `limit`. The fd is made non-blocking for the write and its
+/// flags are put back after (the caller may share the open file description); a full pipe is
+/// waited on with poll, and an EINTR is tried again (sheepr runs no signal handler today, so it
+/// is not expected). Err: (cause, why, bytes written).
+fn deliver(fd: i32, b: &[u8], limit: std::time::Duration) -> Result<(), (&'static str, String, usize)> {
+    let end = Instant::now() + limit;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    let set = flags >= 0 && flags & libc::O_NONBLOCK == 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0;
+    let mut off = 0;
+    let r = loop {
+        if off == b.len() {
+            break Ok(());
+        }
+        let n = unsafe { libc::write(fd, b[off..].as_ptr() as *const libc::c_void, b.len() - off) };
+        if n > 0 {
+            off += n as usize;
+            continue;
+        }
+        let e = if n == 0 { libc::EAGAIN } else { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) };
+        match e {
+            libc::EINTR => {}
+            libc::EPIPE => break Err(("closed", "its reader has closed it".to_string(), off)),
+            e if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {
+                let left = end.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break Err(("timeout", format!("its reader did not take it within {} ms", limit.as_millis()), off));
+                }
+                let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                // a closed reader or a bad fd wakes the poll, and the next write names it
+                unsafe { libc::poll(&mut p, 1, (left.as_millis() as libc::c_int).saturating_add(1)) };
+            }
+            e => break Err(("error", std::io::Error::from_raw_os_error(e).to_string(), off)),
+        }
+    };
+    if set {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    }
+    r
+}
+
+/// The status line, and the fd it goes to (taken: the line is written once).
+fn line(code: i32) -> Option<(i32, String)> {
     with(|s| {
-        let Some(fd) = s.fd.take() else { return };
+        let fd = s.fd.take()?;
+        // debug seam: a note of this many bytes, so a test's line is larger than any pipe buffer
+        // (a real job reaches that size with a few hundred killed members; seam_ms reads a number)
+        if let Some(n) = crate::seam_ms("SHEEPR_TEST_STATUS_PAD") {
+            s.notes.push("x".repeat(n as usize));
+        }
         let js = crate::journal::json_str;
         let opt = |v: &Option<String>| v.as_deref().map_or_else(|| "null".to_string(), js);
         let killed: Vec<String> = s
@@ -226,15 +288,6 @@ pub fn write(code: i32) -> i32 {
             opt(&s.error),
             notes.join(",")
         );
-        let b = line.as_bytes();
-        let mut off = 0;
-        while off < b.len() {
-            let n = unsafe { libc::write(fd, b[off..].as_ptr() as *const libc::c_void, b.len() - off) };
-            if n <= 0 {
-                break;
-            }
-            off += n as usize;
-        }
-    });
-    code
+        Some((fd, line))
+    })
 }
