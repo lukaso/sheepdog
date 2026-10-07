@@ -256,7 +256,9 @@ fn the_report_says_clean_only_when_tracking_was_complete() {
         );
         common::kill_marked(&[&m]);
         let killed = deg.status.as_ref().and_then(|s| s.get("killed")).and_then(Json::arr).map_or(0, |a| a.len());
-        assert!(killed > 0, "control: the degraded run killed something");
+        // the message says which way it failed: no status line at all (the write), or a line
+        // whose killed list is empty (the tracking)
+        assert!(killed > 0, "control: the degraded run killed something; code {:?}, status {:?}, trace:\n{}", deg.code, deg.status.is_some().then(|| field(&deg, "killed")), std::fs::read_to_string(&trace2).unwrap_or_default());
         assert!(field(&deg, "degraded").and_then(Json::str).is_some(), "degraded is named");
         let notes = std::fs::read_to_string(&trace2).unwrap_or_default();
         assert!(notes.lines().any(|l| l == "report degraded"), "{notes}");
@@ -289,17 +291,37 @@ fn quiet_suppresses_the_report() {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Reader {
-    /// the test holds the read end and never reads it
+    /// the test holds the read end and reads nothing while sheepr runs (it reads the pipe to its
+    /// end after, so `got` is exactly what sheepr wrote)
     Stuck,
     /// a thread reads to the newline
     Drain,
     /// a thread reads at most `.0` bytes every `.1` ms, to the newline
     Slow(usize, u64),
-    /// a thread waits `.0` ms, then reads to the end of the pipe (all its writers gone)
-    Stall(u64),
+    /// a thread waits for the trace's `status-undelivered` note (sheepr has given up), then reads
+    /// to the end of the pipe
+    AfterNote,
+    /// a thread waits until the pipe is full (its count unchanged for 200 ms), takes `.0` bytes
+    /// once, and reads nothing more while sheepr runs
+    TakeThenStop(usize),
     /// no reader at all: the child makes the pipe and closes its read end before the exec, so no
     /// other process (another cell's child) can hold that end
     Closed,
+}
+
+#[derive(Default)]
+struct Opts<'a> {
+    /// words between `run --quiet --status-fd 3` and `--`
+    args: &'a [&'a str],
+    env: &'a [(&'a str, &'a str)],
+    /// stderr is a full pipe nobody reads (then `stderr` is empty)
+    full_stderr: bool,
+    /// stderr is the status pipe itself, as a shell's `3>&2` (then `got` holds both)
+    shared_stderr: bool,
+    /// the write end is O_NONBLOCK (set on the test's copy: the open file description is shared)
+    nonblock: bool,
+    /// count sheepr's threads this long after the spawn
+    threads_at_ms: Option<u128>,
 }
 
 struct Piped {
@@ -307,10 +329,14 @@ struct Piped {
     signal: Option<i32>,
     stderr: String,
     trace: String,
-    /// what the reader got; a `Stuck` reader's is read after sheepr's end, to the end of the pipe
+    /// what the reader got; a `Stuck` or `TakeThenStop` reader's rest is read after sheepr's end,
+    /// to the end of the pipe
     got: Vec<u8>,
     /// from the spawn to sheepr's end
     ms: u128,
+    /// from the spawn to the reader's first read (`AfterNote`, `TakeThenStop`)
+    read_at_ms: Option<u128>,
+    threads: Option<usize>,
     /// O_NONBLOCK on the test's own copy of the write end (the same open file description),
     /// read after sheepr exited; None when the test kept no copy
     nonblock_after: Option<bool>,
@@ -329,26 +355,43 @@ fn fill(w: &std::io::PipeWriter) {
     unsafe { libc::fcntl(fd, libc::F_SETFL, fl) };
 }
 
+/// The bytes waiting in the pipe whose read end is `fd`.
+fn waiting(fd: i32) -> i32 {
+    let mut n: libc::c_int = 0;
+    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) };
+    n
+}
+
+/// The number of threads of process `pid`, if it can be read.
+fn threads(pid: u32) -> Option<usize> {
+    if cfg!(target_os = "linux") {
+        return std::fs::read_dir(format!("/proc/{pid}/task")).ok().map(|d| d.count());
+    }
+    let o = Command::new("ps").args(["-M", "-p", &pid.to_string()]).output().ok()?;
+    Some(String::from_utf8_lossy(&o.stdout).lines().count().checked_sub(1)?)
+}
+
 /// `sheepr run --quiet --status-fd 3 ARGS -- /bin/sh -c 'exit 7'` with fd 3 the write end of a
 /// pipe and the status line padded by `pad` bytes (debug seam), within 20 s (then KILL, code
-/// None). The test keeps its own copy of the write end unless the reader is `Closed`. With
-/// `full_stderr`, stderr is a full pipe nobody reads (then `stderr` is empty).
-fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &[(&str, &str)], full_stderr: bool) -> Piped {
+/// None). The test keeps its own copy of the write end unless the reader is `Closed`.
+fn piped(d: &Path, name: &str, reader: Reader, pad: usize, o: Opts) -> Piped {
     let trace = d.join(format!("{name}.trace"));
     let err = d.join(format!("{name}.err"));
     let mut cmd = Command::new(sheepr());
-    cmd.args(["run", "--quiet", "--status-fd", "3"]).args(args).args(["--", "/bin/sh", "-c", "exit 7"]);
+    cmd.args(["run", "--quiet", "--status-fd", "3"]).args(o.args).args(["--", "/bin/sh", "-c", "exit 7"]);
     cmd.env("SHEEPR_TEST_STATUS_PAD", pad.to_string()).env("SHEEPR_TEST_TRACE", &trace);
-    for (k, v) in env {
+    for (k, v) in o.env {
         cmd.env(k, v);
     }
-    let held_err = if full_stderr {
+    let held_err = if o.full_stderr {
         let (er, ew) = std::io::pipe().unwrap();
         fill(&ew);
         cmd.stderr(ew);
         Some(er)
     } else {
-        cmd.stderr(std::fs::File::create(&err).unwrap());
+        if !o.shared_stderr {
+            cmd.stderr(std::fs::File::create(&err).unwrap());
+        }
         None
     };
     let (r, w) = if reader == Reader::Closed {
@@ -370,6 +413,12 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
     } else {
         let (r, w) = std::io::pipe().unwrap();
         let raw = std::os::fd::AsRawFd::as_raw_fd(&w);
+        if o.nonblock {
+            unsafe { libc::fcntl(raw, libc::F_SETFL, libc::fcntl(raw, libc::F_GETFL) | libc::O_NONBLOCK) };
+        }
+        if o.shared_stderr {
+            cmd.stderr(w.try_clone().unwrap());
+        }
         unsafe {
             std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
                 // dup2 onto itself would keep CLOEXEC
@@ -384,19 +433,50 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
     };
     let t0 = Instant::now();
     let mut c = cmd.spawn().unwrap();
+    drop(cmd); // its copies of the stderr ends: a reader must see the end of the pipe with sheepr's
     let keep = w; // the test's own copy of the write end, read for its flags after the end
+    let note = trace.clone();
     let reading = r.map(|mut r| {
         std::thread::spawn(move || {
             let mut got = Vec::new();
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&r);
+            let wait_until = |f: &dyn Fn() -> bool| {
+                let end = Instant::now() + Duration::from_secs(20);
+                while !f() && Instant::now() < end {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
             let (step, every, to_end) = match reader {
                 Reader::Slow(n, ms) => (n, ms, false),
-                Reader::Stuck => return (got, Some(r)),
-                Reader::Stall(ms) => {
-                    std::thread::sleep(Duration::from_millis(ms));
+                Reader::Stuck => return (got, Some(r), None),
+                Reader::AfterNote => {
+                    wait_until(&|| std::fs::read_to_string(&note).unwrap_or_default().contains("status-undelivered "));
                     (65536, 0, true)
+                }
+                Reader::TakeThenStop(n) => {
+                    let (end, mut last) = (Instant::now() + Duration::from_secs(20), (0, Instant::now()));
+                    loop {
+                        let w = waiting(fd);
+                        if w != last.0 {
+                            last = (w, Instant::now());
+                        } else if w > 0 && last.1.elapsed() >= Duration::from_millis(200) {
+                            break;
+                        }
+                        if Instant::now() > end {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let at = t0.elapsed().as_millis();
+                    let mut buf = vec![0u8; n];
+                    if let Ok(k) = std::io::Read::read(&mut r, &mut buf) {
+                        got.extend_from_slice(&buf[..k]);
+                    }
+                    return (got, Some(r), Some(at));
                 }
                 _ => (65536, 0, false),
             };
+            let at = t0.elapsed().as_millis();
             let mut buf = vec![0u8; step];
             while to_end || !got.contains(&b'\n') {
                 match std::io::Read::read(&mut r, &mut buf) {
@@ -405,13 +485,17 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
                 }
                 std::thread::sleep(Duration::from_millis(every));
             }
-            (got, None)
+            (got, None, (reader == Reader::AfterNote).then_some(at))
         })
     });
-    let end = Instant::now() + Duration::from_secs(20);
+    let end = t0 + Duration::from_secs(20);
+    let mut counted = None;
     let st = loop {
         if let Some(s) = c.try_wait().unwrap() {
             break Some(s);
+        }
+        if counted.is_none() && o.threads_at_ms.is_some_and(|at| t0.elapsed().as_millis() >= at) {
+            counted = Some(threads(c.id()));
         }
         if Instant::now() > end {
             common::send_child(&mut c, libc::SIGKILL);
@@ -423,9 +507,9 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
     let ms = t0.elapsed().as_millis();
     let nonblock_after = keep.as_ref().map(|k| unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(k), libc::F_GETFL) } & libc::O_NONBLOCK != 0);
     drop(keep);
-    let (mut got, held) = reading.map(|t| t.join().unwrap()).unwrap_or_default();
-    // the stuck reader and the full stderr are released only now, after sheepr's end; what the
-    // stuck reader's pipe holds is exactly what sheepr wrote (every writer is gone)
+    let (mut got, held, read_at_ms) = reading.map(|t| t.join().unwrap()).unwrap_or_default();
+    // a held reader and the full stderr are released only now, after sheepr's end; what a held
+    // reader's pipe still holds is exactly what sheepr wrote after its read (every writer is gone)
     if let Some(mut r) = held {
         let _ = std::io::Read::read_to_end(&mut r, &mut got);
     }
@@ -437,6 +521,8 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
         trace: std::fs::read_to_string(&trace).unwrap_or_default(),
         got,
         ms,
+        read_at_ms,
+        threads: counted.flatten(),
         nonblock_after,
     }
 }
@@ -472,15 +558,16 @@ fn whole(p: &Piped, pad: usize) -> bool {
 /// buffer (1 MiB of debug pad) and a reader that never reads, sheepr exits with the command's
 /// code once the fd has accepted nothing for its idle limit (a seam makes it 3 s here; 10 s by
 /// default), and not much later (a buffer that fills at once is progress: the window starts
-/// at the write that waits, so the give-up is one idle, not two); it says so in one stderr line (also under `--quiet`), and it
-/// never touches the flags of the write end it was given. What the pipe holds after the end is
-/// exactly the count the note gives (review of a19592d, F3: nothing writes after the give-up).
-/// The control drains: the whole line arrives, and stderr and the trace say nothing.
+/// at the write that waits, so the give-up is one idle, not two); it says so in one stderr line
+/// (also under `--quiet`), and it never touches the flags of the write end it was given. What
+/// the pipe holds after the end is exactly the count the note gives. While it waits, sheepr has
+/// one thread (review of fa07b06, P3-2: no writer thread of any kind). The control drains: the
+/// whole line arrives, and stderr and the trace say nothing.
 #[test]
 fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let d = scratch("stuck");
     let pad = 1 << 20;
-    let stuck = piped(&d, "stuck", Reader::Stuck, pad, &[], &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], false);
+    let stuck = piped(&d, "stuck", Reader::Stuck, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], threads_at_ms: Some(1500), ..Default::default() });
     assert_eq!(stuck.code, Some(7), "sheepr did not exit within 20 s (or not with the command's code); trace:\n{}", stuck.trace);
     let (cause, ms, sent) = undelivered_sent(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout");
@@ -488,7 +575,8 @@ fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     assert_eq!(stuck.got.len(), sent, "the note's count is not what the pipe holds");
     assert!(one_notice(&stuck), "stderr: {:?}", stuck.stderr);
     assert_eq!(stuck.nonblock_after, Some(false), "the caller's write end was left non-blocking");
-    let drain = piped(&d, "drain", Reader::Drain, pad, &[], &[IDLE_1S], false);
+    assert_eq!(stuck.threads, Some(1), "sheepr's threads while it waits on the line");
+    let drain = piped(&d, "drain", Reader::Drain, pad, Opts { env: &[IDLE_1S], ..Default::default() });
     assert_eq!(drain.code, Some(7), "control");
     assert!(whole(&drain, pad), "control: {} bytes", drain.got.len());
     assert_eq!(undelivered(&drain), None, "control:\n{}", drain.trace);
@@ -508,21 +596,21 @@ fn a_slow_reader_gets_the_line_and_the_cap_still_ends_it() {
     let d = scratch("slow");
     let pad = 400 << 10;
     let cap = ("SHEEPR_TEST_STATUS_CAP_MS", "3000");
-    let slow = piped(&d, "slow", Reader::Slow(4096, 25), pad, &[], &[IDLE_1S], false);
+    let slow = piped(&d, "slow", Reader::Slow(4096, 25), pad, Opts { env: &[IDLE_1S], ..Default::default() });
     assert_eq!(slow.code, Some(7), "{}", slow.trace);
     assert_eq!(undelivered(&slow), None, "a reader that kept reading was cut:\n{}", slow.trace);
     assert!(whole(&slow, pad), "{} bytes", slow.got.len());
-    let capped = piped(&d, "capped", Reader::Slow(4096, 300), 1 << 20, &[], &[IDLE_1S, cap], false);
+    let capped = piped(&d, "capped", Reader::Slow(4096, 300), 1 << 20, Opts { env: &[IDLE_1S, cap], ..Default::default() });
     assert_eq!(capped.code, Some(7), "sheepr did not exit within 20 s:\n{}", capped.trace);
     let (cause, ms) = undelivered(&capped).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", capped.trace));
     assert_eq!(cause, "cap");
     assert!((3000..6000).contains(&ms), "capped at {ms} ms, not at 3 s");
     assert!(one_notice(&capped), "stderr: {:?}", capped.stderr);
-    let stuck = piped(&d, "stuck", Reader::Stuck, 1 << 20, &[], &[IDLE_1S, cap], false);
+    let stuck = piped(&d, "stuck", Reader::Stuck, 1 << 20, Opts { env: &[IDLE_1S, cap], ..Default::default() });
     let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("control: no note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout", "control");
     assert!(ms < 3000, "control: {ms} ms, not the idle's 1 s");
-    let full = piped(&d, "capped-full", Reader::Slow(4096, 300), 1 << 20, &[], &[IDLE_1S, cap], true);
+    let full = piped(&d, "capped-full", Reader::Slow(4096, 300), 1 << 20, Opts { env: &[IDLE_1S, cap], full_stderr: true, ..Default::default() });
     assert_eq!(full.code, Some(7), "{}", full.trace);
     assert!(full.ms < 3000 + 1000 + 1000 + 4000, "a capped line and a full stderr took {} ms", full.ms);
     let _ = std::fs::remove_dir_all(&d);
@@ -530,17 +618,19 @@ fn a_slow_reader_gets_the_line_and_the_cap_still_ends_it() {
 
 /// Issue #14: a reader that has closed its end gets no line, and sheepr says so on stderr (also
 /// under `--quiet`) and keeps the command's code. Review of a1419bc, P2-1: a full stderr that
-/// nobody reads cannot hold sheepr's exit either (the notice has a limit of its own).
+/// nobody reads cannot hold sheepr's exit either: the notice waits at most 1 s, also with the
+/// default 10 s idle (review of fa07b06, P2-2).
 #[test]
 fn a_closed_status_reader_is_said_on_stderr() {
     let d = scratch("closed");
-    let x = piped(&d, "closed", Reader::Closed, 0, &[], &[], false);
+    let x = piped(&d, "closed", Reader::Closed, 0, Opts::default());
     assert_eq!(x.code, Some(7), "{}", x.trace);
     assert_eq!(undelivered(&x).map(|u| u.0), Some("closed".to_string()), "{}", x.trace);
     assert!(one_notice(&x), "stderr: {:?}", x.stderr);
-    let full = piped(&d, "full", Reader::Closed, 0, &[], &[], true);
+    let full = piped(&d, "full", Reader::Closed, 0, Opts { full_stderr: true, ..Default::default() });
     assert_eq!(full.code, Some(7), "a full stderr held sheepr; trace:\n{}", full.trace);
     assert_eq!(undelivered(&full).map(|u| u.0), Some("closed".to_string()), "{}", full.trace);
+    assert!(full.ms < 4000, "the notice to a full stderr took {} ms, not its 1 s", full.ms);
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -550,8 +640,8 @@ fn a_closed_status_reader_is_said_on_stderr() {
 #[test]
 fn a_closed_reader_before_the_job_is_not_a_sigpipe_death() {
     let d = scratch("early");
-    let usage = piped(&d, "usage", Reader::Closed, 0, &["--timeout", "bad"], &[], false);
-    let panic = piped(&d, "panic", Reader::Closed, 0, &[], &[("SHEEPR_TEST_PANIC_IN_RUN", "1")], false);
+    let usage = piped(&d, "usage", Reader::Closed, 0, Opts { args: &["--timeout", "bad"], ..Default::default() });
+    let panic = piped(&d, "panic", Reader::Closed, 0, Opts { env: &[("SHEEPR_TEST_PANIC_IN_RUN", "1")], ..Default::default() });
     for (n, x) in [("usage", &usage), ("panic", &panic)] {
         assert_eq!((x.code, x.signal), (Some(125), None), "{n}: {}", x.stderr);
         assert_eq!(undelivered(x).map(|u| u.0), Some("closed".to_string()), "{n}: {}", x.trace);
@@ -560,29 +650,84 @@ fn a_closed_reader_before_the_job_is_not_a_sigpipe_death() {
 }
 
 /// Review of a19592d, F1: the line needs no new thread, so a process that cannot start one (a
-/// pids limit the job used up; here a stack no thread can get) still delivers it whole.
+/// pids limit the job used up; here a stack no `std::thread` can get) still delivers it whole.
+/// The thread count in the stuck cell is the wider check.
 #[test]
 fn the_line_needs_no_new_thread() {
     let d = scratch("nothread");
     let pad = 1 << 20;
-    let x = piped(&d, "nothread", Reader::Drain, pad, &[], &[("RUST_MIN_STACK", "1125899906842624")], false);
+    let x = piped(&d, "nothread", Reader::Drain, pad, Opts { env: &[("RUST_MIN_STACK", "1125899906842624")], ..Default::default() });
     assert_eq!(x.code, Some(7), "{}", x.trace);
     assert!(whole(&x, pad), "{} bytes; trace:\n{}", x.got.len(), x.trace);
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Review of a19592d, F3: once sheepr gives up, nothing more is written. A reader that stalls
-/// past the idle and then reads to the end of the pipe, while the notice waits on a full stderr,
-/// gets exactly the count the note gives (and so no status bytes after the notice, either).
+/// Review of a19592d, F3, and of fa07b06, P2-1: once sheepr gives up, nothing more is written.
+/// The reader waits for the give-up note, then reads to the end of the pipe while sheepr is
+/// still alive (its notice waits on a full stderr): it gets exactly the count the note gives.
 #[test]
 fn nothing_is_written_after_the_give_up() {
     let d = scratch("late");
     let pad = 1 << 20;
-    let late = piped(&d, "late", Reader::Stall(2500), pad, &[], &[IDLE_1S], true);
+    let late = piped(&d, "late", Reader::AfterNote, pad, Opts { env: &[IDLE_1S], full_stderr: true, ..Default::default() });
     assert_eq!(late.code, Some(7), "{}", late.trace);
     let (cause, _, sent) = undelivered_sent(&late).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", late.trace));
     assert_eq!(cause, "timeout");
+    let at = late.read_at_ms.expect("the reader read");
+    assert!(at < late.ms, "the reader started at {at} ms, after sheepr's end at {} ms: the cell proves nothing", late.ms);
     assert_eq!(late.got.len(), sent, "bytes were written after sheepr gave up");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of fa07b06, P2-3: a status fd the caller made non-blocking (the open file description
+/// is shared) still waits for its reader: a reader that keeps reading gets the whole line, and
+/// the flag is left as the caller set it. The control, a stuck reader on such an fd, is cut by
+/// the idle, not at once by EAGAIN.
+#[test]
+fn a_non_blocking_status_fd_still_waits_for_its_reader() {
+    let d = scratch("nonblock");
+    let pad = 400 << 10;
+    let x = piped(&d, "nonblock", Reader::Slow(65536, 5), pad, Opts { env: &[IDLE_1S], nonblock: true, ..Default::default() });
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert_eq!(undelivered(&x), None, "{}", x.trace);
+    assert!(whole(&x, pad), "{} bytes", x.got.len());
+    assert!(x.stderr.trim().is_empty(), "{}", x.stderr);
+    assert_eq!(x.nonblock_after, Some(true), "the caller's O_NONBLOCK was changed");
+    let stuck = piped(&d, "nonblock-stuck", Reader::Stuck, pad, Opts { env: &[IDLE_1S], nonblock: true, ..Default::default() });
+    let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("control: no note:\n{}", stuck.trace));
+    assert_eq!(cause, "timeout", "control: {}", stuck.trace);
+    assert!(ms >= 1000, "control: cut after {ms} ms, not after the idle");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of fa07b06, P3-1: a reader that takes part of a write and stops is cut one idle after
+/// it stopped, not two: each write is at most PIPE_BUF (512 on macOS), which a pipe takes whole
+/// or not at all, so no write waits on with part of it taken. (Linux pipes take 4096 whole, so
+/// there this cell holds either way.)
+#[test]
+fn a_reader_that_takes_part_of_a_write_is_cut_after_one_idle() {
+    let d = scratch("part");
+    let x = piped(&d, "part", Reader::TakeThenStop(1000), 1 << 20, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "2000")], ..Default::default() });
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert_eq!(undelivered(&x).map(|u| u.0), Some("timeout".to_string()), "{}", x.trace);
+    let at = x.read_at_ms.expect("the reader read");
+    assert!(x.ms - at < 3000, "cut {} ms after the reader stopped, not one 2 s idle", x.ms - at);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of fa07b06, P3-3: with stderr the status pipe itself (`3>&2`), the notice after a cut
+/// line starts a line of its own: the line's part, a newline, then `sheepr: `.
+#[test]
+fn a_notice_after_a_cut_line_in_the_same_file_starts_a_line() {
+    let d = scratch("shared");
+    let x = piped(&d, "shared", Reader::AfterNote, 1 << 20, Opts { env: &[IDLE_1S], shared_stderr: true, ..Default::default() });
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    let out = String::from_utf8_lossy(&x.got);
+    let at = out.find("sheepr: ").unwrap_or_else(|| panic!("no notice in the shared pipe:\n{}", x.trace));
+    assert!(out.starts_with("{\"v\":1"), "the line's part comes first");
+    assert_eq!(&out[at - 1..at], "\n", "the notice does not start a line");
+    assert!(!out[..at - 1].contains('\n'), "the cut line holds a newline");
+    assert!(out[at..].ends_with(".\n") && out[at..].lines().count() == 1, "the notice is one line at the end");
     let _ = std::fs::remove_dir_all(&d);
 }
 

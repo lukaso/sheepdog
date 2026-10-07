@@ -201,15 +201,22 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
 /// gives up on its reader (issue #14; debug seam SHEEPR_TEST_STATUS_IDLE_MS). A reader that
 /// drains its end takes the line at once; one that has stopped must never hold sheepr after the
 /// job is killed. Long, so a caller that is alive but stalled (a busy event loop, swap) still
-/// gets its line: on macOS a socketpair, node's stdio pipe, holds only 8 KiB.
+/// gets its line once it holds more than its pipe (64 KiB for a pipe or node's stdio pair, 8 KiB
+/// for a raw macOS socketpair).
 const IDLE_MS: u64 = 10_000;
 /// The longest the line may take in all, however steadily its reader reads (debug seam
 /// SHEEPR_TEST_STATUS_CAP_MS).
 const CAP_MS: u64 = 30_000;
 /// The notice that the line did not arrive waits at most this long for stderr.
 const NOTICE_MS: u64 = 1000;
-/// One write's size: each starts a new idle window, so a buffer that fills at once is progress,
-/// and a reader that reads steadily keeps every window short.
+/// One write's size: PIPE_BUF, which a pipe takes whole or not at all (as a macOS socket does
+/// below its 2048-byte low-water mark), so no write waits on with part of it taken, and a reader
+/// that takes part of a write and stops is cut one idle later, not two (review of fa07b06, P3-1).
+/// Each write at a new offset starts a new idle window, so a buffer that fills at once is
+/// progress, and a reader that reads steadily keeps every window short.
+#[cfg(target_os = "macos")]
+const CHUNK: usize = 512;
+#[cfg(not(target_os = "macos"))]
 const CHUNK: usize = 4096;
 
 /// Write the status line (once) and return `code`. A line its reader does not take (the fd
@@ -227,11 +234,21 @@ pub fn write(code: i32) -> i32 {
     let (total, start) = (line.len(), Instant::now());
     if let Err((cause, why, sent)) = bounded_write(fd, line.as_bytes(), idle, cap) {
         crate::note(format!("status-undelivered {cause} {} {sent}/{total}", start.elapsed().as_millis()));
-        let said = format!("sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
+        // a cut line has no newline: when stderr is the same file (a shell's `3>&2`), the notice
+        // still starts a line of its own
+        let nl = if sent > 0 && sent < total && same_file(fd, 2) { "\n" } else { "" };
+        let said = format!("{nl}sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
         let notice = idle.min(Duration::from_millis(NOTICE_MS));
         let _ = bounded_write(2, said.as_bytes(), notice, notice);
     }
     code
+}
+
+/// Whether fds `a` and `b` are the same file (device and inode).
+fn same_file(a: i32, b: i32) -> bool {
+    let (mut x, mut y): (libc::stat, libc::stat) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    let read = unsafe { libc::fstat(a, &mut x) == 0 && libc::fstat(b, &mut y) == 0 };
+    read && x.st_dev == y.st_dev && x.st_ino == y.st_ino
 }
 
 extern "C" fn on_alarm(_: libc::c_int) {}
@@ -250,7 +267,9 @@ fn arm(first: Duration, every: Duration) {
 /// then sheepr gives up. Nothing is left writing when this returns, so the count is exact, and
 /// no thread is needed (a job can use up the pids). SIGALRM is unblocked for this thread only,
 /// while it writes; sheepr's other thread (macOS `tcc-probe`) starts after setup_signals and
-/// blocks it, so the tick reaches this one. Stated: a tick that falls between setting the timer
+/// blocks it, so the tick reaches this one. A non-blocking fd (the caller's choice; its open file
+/// description is shared, so it is left as it is): an EAGAIN waits in poll for room, in the same
+/// window, and the tick ends that wait as it ends a write. Stated: a tick that falls between setting the timer
 /// and the write itself is missed, and the next one ends the write (twice the limit at worst);
 /// a file on a hard network mount can hold a write that no signal ends.
 /// Err: (cause, why, bytes written).
@@ -266,26 +285,42 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
         libc::sigaddset(&mut alrm, libc::SIGALRM);
         libc::pthread_sigmask(libc::SIG_UNBLOCK, &alrm, &mut old_mask);
     }
+    let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
     let start = Instant::now();
-    let mut off = 0;
+    // (offset, since): the window of the write at that offset; a retry after EAGAIN keeps it
+    let (mut off, mut window): (usize, Option<(usize, Instant)>) = (0, None);
     let r = loop {
         if off == b.len() {
             break Ok(());
         }
-        // past the cap a write gets 1 ms: one that waits ends as `cap` below
-        let window = cap.saturating_sub(start.elapsed()).min(idle).max(Duration::from_millis(1));
-        arm(window, window);
+        let since = match window {
+            Some((o, since)) if o == off => since,
+            _ => {
+                // past the cap a write gets 1 ms: one that waits ends as `cap` below
+                let w = cap.saturating_sub(start.elapsed()).min(idle).max(Duration::from_millis(1));
+                arm(w, w);
+                window = Some((off, Instant::now()));
+                Instant::now()
+            }
+        };
         let end = (off + CHUNK).min(b.len());
         let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
-        let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let mut e = errno();
         if n > 0 {
             off += n as usize;
             continue;
         }
+        if n < 0 && (e == libc::EAGAIN || e == libc::EWOULDBLOCK) {
+            let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            if unsafe { libc::poll(&mut p, 1, -1) } >= 0 {
+                continue;
+            }
+            e = errno();
+        }
         break Err(match (n, e) {
             (0, _) => ("error", "a write took nothing".to_string(), off),
             (_, libc::EINTR) if start.elapsed() >= cap => ("cap", format!("its reader did not take it all within {} ms", cap.as_millis()), off),
-            (_, libc::EINTR) => ("timeout", format!("the fd accepted nothing for {} ms", window.as_millis()), off),
+            (_, libc::EINTR) => ("timeout", format!("the fd accepted nothing for {} ms", since.elapsed().as_millis()), off),
             (_, libc::EPIPE) => ("closed", "its reader has closed it".to_string(), off),
             (_, e) => ("error", std::io::Error::from_raw_os_error(e).to_string(), off),
         });
