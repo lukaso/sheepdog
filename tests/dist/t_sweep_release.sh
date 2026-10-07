@@ -38,8 +38,13 @@ i=0; while ! cat "$dir"*.journal 2> /dev/null | grep -q '"root":true' && [ $i -l
 dj=$(grep -l '"root":true' "$dir"*.journal 2> /dev/null | head -n 1)
 rp=$(grep -h '"root":true' "$dir"*.journal 2> /dev/null | head -n 1 | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')
 kill -KILL "$sup"; wait "$sup" 2> /dev/null
+# a root that has ended may still be a zombie until launchd reaps it: gone = no such pid, or Z
+gone() { ! kill -0 "$1" 2> /dev/null || ps -o stat= -p "$1" 2> /dev/null | grep -q '^Z'; }
+alive_before=no; [ -n "$rp" ] && ! gone "$rp" && alive_before=yes
 sr sweep; r=$?
-gone=no; [ -n "$rp" ] && ! kill -0 "$rp" 2> /dev/null && gone=yes
+gone=no; i=0
+while [ -n "$rp" ] && [ $i -lt 20 ]; do gone "$rp" && { gone=yes; break; }; sleep 0.1; i=$((i + 1)); done
+[ "$alive_before" = yes ] || fail "control (dead): the root '$rp' was not alive before the sweep (the check proves nothing)"
 [ -n "$dj" ] && [ "$r" = 0 ] && [ ! -e "$dj" ] && [ "$gone" = yes ] && grep -q 'swept 1 dead job ([1-9]' "$FX/err" && ! grep -q '\.journal' "$FX/err" \
   && pass "control: a dead job's readable journal is read and swept (its root $rp ended), named by no line, exit 0" || fail "control (dead): '$dj', root $rp gone=$gone, rc=$r $(tr '\n' ' ' < "$FX/err")"
 # control 2: a live job's readable journal: left, not named
