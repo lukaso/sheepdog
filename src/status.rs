@@ -286,36 +286,53 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
         libc::pthread_sigmask(libc::SIG_UNBLOCK, &alrm, &mut old_mask);
     }
     let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    // debug seam: every write of the status line says EAGAIN and writes nothing, while poll says
+    // the fd is ready (a FUSE file can do both)
+    let eagain = fd != 2 && crate::seam_flag("SHEEPR_TEST_STATUS_EAGAIN");
     let start = Instant::now();
-    // (offset, since): the window of the write at that offset; a retry after EAGAIN keeps it
-    let (mut off, mut window): (usize, Option<(usize, Instant)>) = (0, None);
+    // (offset, since, length): the window of the write at that offset; a retry after EAGAIN keeps it
+    let (mut off, mut window): (usize, Option<(usize, Instant, Duration)>) = (0, None);
     let r = loop {
         if off == b.len() {
             break Ok(());
         }
-        let since = match window {
-            Some((o, since)) if o == off => since,
+        let (since, w) = match window {
+            Some((o, since, w)) if o == off => (since, w),
             _ => {
                 // past the cap a write gets 1 ms: one that waits ends as `cap` below
                 let w = cap.saturating_sub(start.elapsed()).min(idle).max(Duration::from_millis(1));
                 arm(w, w);
-                window = Some((off, Instant::now()));
-                Instant::now()
+                let since = Instant::now();
+                window = Some((off, since, w));
+                (since, w)
             }
         };
         let end = (off + CHUNK).min(b.len());
-        let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
-        let mut e = errno();
+        let (n, mut e) = if eagain {
+            (-1, libc::EAGAIN)
+        } else {
+            let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
+            (n, errno())
+        };
         if n > 0 {
             off += n as usize;
             continue;
         }
         if n < 0 && (e == libc::EAGAIN || e == libc::EWOULDBLOCK) {
-            let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-            if unsafe { libc::poll(&mut p, 1, -1) } >= 0 {
+            // wait for room for what is left of this window: a poll that says ready while each
+            // write says EAGAIN (a FUSE file can) still ends with the window, as the tick ends a
+            // write (review of 03da4f8, F2)
+            let left = w.saturating_sub(since.elapsed());
+            let r = if left.is_zero() {
+                0
+            } else {
+                let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+                unsafe { libc::poll(&mut p, 1, (left.as_millis() as libc::c_int).saturating_add(1)) }
+            };
+            if r > 0 {
                 continue;
             }
-            e = errno();
+            e = if r == 0 { libc::EINTR } else { errno() };
         }
         break Err(match (n, e) {
             (0, _) => ("error", "a write took nothing".to_string(), off),

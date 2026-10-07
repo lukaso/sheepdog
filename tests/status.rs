@@ -53,6 +53,8 @@ struct Run {
     status: Option<Json>,
     lines: usize,
     stderr: String,
+    /// the status file as it was read
+    raw: String,
 }
 
 /// `sheepr run ARGS` with `--status-fd 3` pointed at a file (through a shell, `exec`), within
@@ -87,6 +89,7 @@ fn run(d: &Path, name: &str, args: &str, env: &[(&str, &str)], pre: impl FnOnce(
         status: text.lines().next().and_then(|l| json::parse(l).ok()),
         lines: text.lines().count(),
         stderr: std::fs::read_to_string(&err).unwrap_or_default(),
+        raw: text,
     }
 }
 
@@ -258,7 +261,7 @@ fn the_report_says_clean_only_when_tracking_was_complete() {
         let killed = deg.status.as_ref().and_then(|s| s.get("killed")).and_then(Json::arr).map_or(0, |a| a.len());
         // the message says which way it failed: no status line at all (the write), or a line
         // whose killed list is empty (the tracking)
-        assert!(killed > 0, "control: the degraded run killed something; code {:?}, status {:?}, trace:\n{}", deg.code, deg.status.is_some().then(|| field(&deg, "killed")), std::fs::read_to_string(&trace2).unwrap_or_default());
+        assert!(killed > 0, "control: the degraded run killed something; code {:?}, status file {:?}, stderr {:?}, trace:\n{}", deg.code, deg.raw, deg.stderr, std::fs::read_to_string(&trace2).unwrap_or_default());
         assert!(field(&deg, "degraded").and_then(Json::str).is_some(), "degraded is named");
         let notes = std::fs::read_to_string(&trace2).unwrap_or_default();
         assert!(notes.lines().any(|l| l == "report degraded"), "{notes}");
@@ -567,7 +570,7 @@ fn whole(p: &Piped, pad: usize) -> bool {
 fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let d = scratch("stuck");
     let pad = 1 << 20;
-    let stuck = piped(&d, "stuck", Reader::Stuck, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], threads_at_ms: Some(1500), ..Default::default() });
+    let stuck = piped(&d, "stuck", Reader::Stuck, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], threads_at_ms: Some(2500), ..Default::default() });
     assert_eq!(stuck.code, Some(7), "sheepr did not exit within 20 s (or not with the command's code); trace:\n{}", stuck.trace);
     let (cause, ms, sent) = undelivered_sent(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout");
@@ -697,6 +700,19 @@ fn a_non_blocking_status_fd_still_waits_for_its_reader() {
     let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("control: no note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout", "control: {}", stuck.trace);
     assert!(ms >= 1000, "control: cut after {ms} ms, not after the idle");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of 03da4f8, F2: when poll says the fd is ready but each write says EAGAIN (a FUSE file
+/// can; a debug seam does it here), sheepr still gives up within the idle, not spins for ever.
+#[test]
+fn an_fd_that_is_ready_but_takes_nothing_is_cut_at_the_idle() {
+    let d = scratch("eagain");
+    let x = piped(&d, "eagain", Reader::Drain, 0, Opts { env: &[IDLE_1S, ("SHEEPR_TEST_STATUS_EAGAIN", "1")], ..Default::default() });
+    assert_eq!(x.code, Some(7), "sheepr did not exit within 20 s:\n{}", x.trace);
+    let (cause, ms) = undelivered(&x).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", x.trace));
+    assert_eq!(cause, "timeout");
+    assert!((1000..3000).contains(&ms), "cut after {ms} ms, not at the 1 s idle");
     let _ = std::fs::remove_dir_all(&d);
 }
 
