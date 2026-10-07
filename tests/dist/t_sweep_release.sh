@@ -20,6 +20,13 @@ sr sweep; r=$?
 n=$(grep -c 'j-b4d\.journal' "$FX/err")
 [ "$r" = 0 ] && [ "$n" = 1 ] && pass "a release sweep says the unreadable journal once, exit 0" || fail "rc=$r, $n line(s): $(tr '\n' ' ' < "$FX/err")"
 rm -f "${dir}j-b4d.journal"
+# the control holds a readable journal during its sweep: a live job's, whose root waits for `go`
+# (written at exit, a failure too, before lib.sh's trap removes the fixture)
+trap 'touch "$FX/go"; wait; rm -rf "$FX"' EXIT
+env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPR_STATE="$FX/h/s" TMPDIR="$FX/h" "$B" run -- /bin/sh -c "while [ ! -e '$FX/go' ]; do sleep 0.05; done" < /dev/null > /dev/null 2> "$FX/err.live" &
+i=0; while [ "$(ls "$dir" | grep -c '\.journal$')" -lt 1 ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+nj=$(ls "$dir" | grep -c '\.journal$')
 sr sweep; r=$?
-[ "$r" = 0 ] && ! grep -q '\.journal' "$FX/err" && pass "control: no line names a journal, exit 0" || fail "control: rc=$r $(tr '\n' ' ' < "$FX/err")"
+touch "$FX/go"; wait
+[ "$nj" -ge 1 ] && [ "$r" = 0 ] && ! grep -q '\.journal' "$FX/err" && pass "control: a live job's readable journal ($nj) is named by no line, exit 0" || fail "control: $nj journal(s), rc=$r $(tr '\n' ' ' < "$FX/err")"
 finish

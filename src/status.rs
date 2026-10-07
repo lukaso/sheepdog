@@ -323,6 +323,7 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
             off += n as usize;
             continue;
         }
+        let mut polled = false;
         if n < 0 && (e == libc::EAGAIN || e == libc::EWOULDBLOCK) {
             // wait for room for what is left of this window: a poll that says ready while each
             // write says EAGAIN (a FUSE file can) still ends with the window, as the tick ends a
@@ -338,12 +339,14 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
                 continue;
             }
             e = if r == 0 { libc::EINTR } else { errno() };
+            polled = r < 0;
         }
         // an EINTR before the window is up is a signal sent from outside (SIGALRM is unblocked
         // while the line is written), not the timer's tick: try again in the same window, so the
         // signal never cuts the line (issue #14). TICK_SLACK takes a tick that comes a little early
         // for the tick.
         if n < 0 && e == libc::EINTR && since.elapsed() + TICK_SLACK < w {
+            crate::note(format!("status-retry {}", if polled { "poll" } else { "write" }));
             continue;
         }
         break Err(match (n, e) {

@@ -82,12 +82,35 @@ fn counted(r: &Path) -> usize {
 }
 
 /// A decoy the test built: `sigcount R` (it counts every catchable signal it gets).
-fn decoy(d: &Path, name: &str) -> (Child, (i32, u64), PathBuf) {
+fn decoy(d: &Path, name: &str) -> (Decoy, (i32, u64), PathBuf) {
     let r = d.join(name);
-    let c = Command::new(fixture()).arg("sigcount").arg(&r).spawn().unwrap();
+    let c = Decoy(Command::new(fixture()).arg("sigcount").arg(&r).spawn().unwrap());
     assert!(wait_until(10, || !records(&r).is_empty()), "the decoy started");
     let p = records(&r)[0];
     (c, p, r)
+}
+
+/// A decoy, killed when the cell ends, a panic too: it holds the test's output and lives up to
+/// 30 minutes, so a cell that fails before its `end_decoy` would otherwise hang the run (review
+/// of 5ef936c..f0ec620, P3-5). It derefs to its `Child`, so `end_decoy(&mut c)` still works.
+struct Decoy(Child);
+impl std::ops::Deref for Decoy {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Decoy {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+impl Drop for Decoy {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            end_decoy(&mut self.0);
+        }
+    }
 }
 
 fn end_decoy(c: &mut Child) {

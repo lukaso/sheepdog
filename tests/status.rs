@@ -670,7 +670,10 @@ fn a_closed_status_reader_is_said_on_stderr() {
     let full = piped(&d, "full", Reader::Closed, 0, Opts { full_stderr: true, ..Default::default() });
     assert_eq!(full.code, Some(7), "a full stderr held sheepr; trace:\n{}", full.trace);
     assert_eq!(undelivered(&full).map(|u| u.0), Some("closed".to_string()), "{}", full.trace);
-    assert!(full.ms < x.ms + 2000, "the notice to a full stderr took {} ms more than the control, not its 1 s", full.ms - x.ms.min(full.ms));
+    // the notice waited its 1 s on the full stderr (more than 500 ms: stderr was full), and no
+    // more (less than 2 s), against the same run with a stderr that takes it
+    let extra = full.ms.saturating_sub(x.ms);
+    assert!((500..2000).contains(&extra), "the notice to a full stderr took {extra} ms more than the control, not its 1 s");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -767,7 +770,30 @@ fn a_signal_from_outside_does_not_cut_the_line() {
     assert_eq!(undelivered(&x), None, "a SIGALRM from outside cut the line:\n{}", x.trace);
     assert!(whole(&x, pad), "{} bytes", x.got.len());
     assert!(x.stderr.trim().is_empty(), "{}", x.stderr);
+    // the signal landed in the blocked write and the write was tried again: not a vacuous pass
+    assert_eq!(retries(&x, "write"), 1, "{}", x.trace);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The same on a non-blocking fd (review of 5ef936c, P2): there the signal ends sheepr's poll for
+/// room, not a write, and that poll is tried again too.
+#[test]
+fn a_signal_from_outside_does_not_cut_a_non_blocking_line() {
+    let d = scratch("alarm-nb");
+    let pad = 200 << 10;
+    let x = piped(&d, "alarm-nb", Reader::AlarmThenDrain, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "5000")], nonblock: true, ..Default::default() });
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert_eq!(undelivered(&x), None, "a SIGALRM from outside cut the line:\n{}", x.trace);
+    assert!(whole(&x, pad), "{} bytes", x.got.len());
+    assert!(x.stderr.trim().is_empty(), "{}", x.stderr);
+    assert_eq!(retries(&x, "poll"), 1, "{}", x.trace);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The trace's `status-retry KIND` notes: a write or a poll that a signal from outside ended
+/// before its window, tried again.
+fn retries(p: &Piped, kind: &str) -> usize {
+    p.trace.lines().filter(|l| *l == format!("status-retry {kind}")).count()
 }
 
 /// Review of fa07b06, P3-1: a reader that takes part of a write and stops is cut one idle after
