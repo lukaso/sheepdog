@@ -241,7 +241,9 @@ pub fn write(code: i32) -> i32 {
         let nl = if sent > 0 && sent < total && same_file(fd, 2) { "\n" } else { "" };
         let said = format!("{nl}sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
         let notice = idle.min(NOTICE);
+        let t = Instant::now();
         let _ = bounded_write(2, said.as_bytes(), notice, notice);
+        crate::note(format!("status-notice {}", t.elapsed().as_millis()));
     }
     code
 }
@@ -408,9 +410,12 @@ mod tests {
     use super::*;
 
     /// The limits README.md, CHANGELOG.md and PLAN.md state (whole-branch review P2-2): 10 s
-    /// idle, 30 s cap, 1 s notice. tests/status.rs proves the idle end to end with no seam.
+    /// idle, 30 s cap, 1 s notice, 10 ms tick slack. tests/status.rs proves the idle end to end
+    /// with no seam.
     #[test]
     fn the_stated_limits() {
         assert_eq!((IDLE, CAP, NOTICE), (Duration::from_secs(10), Duration::from_secs(30), Duration::from_secs(1)));
+        // PLAN.md §3.1: an EINTR in a window's last 10 ms is the tick, not a signal from outside
+        assert_eq!(TICK_SLACK, Duration::from_millis(10));
     }
 }

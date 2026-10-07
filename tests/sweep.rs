@@ -90,9 +90,10 @@ fn decoy(d: &Path, name: &str) -> (Decoy, (i32, u64), PathBuf) {
     (c, p, r)
 }
 
-/// A decoy, killed when the cell ends, a panic too: it holds the test's output and lives up to
-/// 30 minutes, so a cell that fails before its `end_decoy` would otherwise hang the run (review
-/// of 5ef936c..f0ec620, P3-5). It derefs to its `Child`, so `end_decoy(&mut c)` still works.
+/// A fixture process this file spawns (every one: `grep -n 'Command::new(fixture())\|/usr/bin/env'
+/// tests/sweep.rs`), killed when the cell ends, a panic too: it holds the test's output and lives
+/// up to 30 minutes, so a cell that fails before its `end_decoy` would otherwise hang the run
+/// (reviews of f0ec620 and 63af0bf). It derefs to its `Child`, so `end_decoy(&mut c)` still works.
 struct Decoy(Child);
 impl std::ops::Deref for Decoy {
     type Target = Child;
@@ -323,7 +324,7 @@ fn a_wrong_identity_entry_is_never_signalled() {
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
     let r = d.join("forker");
-    let mut c = Command::new(fixture()).args(["forker", "1", "10"]).arg(&r).spawn().unwrap();
+    let mut c = Decoy(Command::new(fixture()).args(["forker", "1", "10"]).arg(&r).spawn().unwrap());
     assert!(wait_until(10, || records(&r).len() == 1), "the child started");
     let parent = (c.id() as i32, sheepr::ident::identity(c.id() as i32).unwrap());
     let child = records(&r)[0];
@@ -365,7 +366,7 @@ fn the_sweep_turns_the_latch_on() {
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
     let r = d.join("untagged");
-    let mut c = Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&r).spawn().unwrap();
+    let mut c = Decoy(Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&r).spawn().unwrap());
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
     forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[p], false);
@@ -712,7 +713,7 @@ fn a_reused_journaled_pid_is_gone_not_withheld() {
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
     let r = d.join("untagged");
-    let mut c = Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&r).spawn().unwrap();
+    let mut c = Decoy(Command::new("/usr/bin/env").args(["-i", fixture(), "sigcount"]).arg(&r).spawn().unwrap());
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
     forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[(p.0, p.1 + WRONG)], false);
@@ -879,7 +880,7 @@ fn a_line_naming_another_users_process_is_never_signalled() {
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
     let r = d.join("nobody");
-    let mut c = Command::new(fixture()).args(["as-uid", "65534", fixture(), "sigcount"]).arg(&r).spawn().unwrap();
+    let mut c = Decoy(Command::new(fixture()).args(["as-uid", "65534", fixture(), "sigcount"]).arg(&r).spawn().unwrap());
     assert!(wait_until(10, || !records(&r).is_empty()), "the other user's process did not start");
     let p = records(&r)[0];
     forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[p], false);
@@ -899,7 +900,7 @@ fn kill_job_refuses_a_header_that_names_no_supervisor() {
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
     let r = d.join("decoy");
-    let mut c = Command::new(fixture()).args(["sigcount"]).arg(&r).spawn().unwrap();
+    let mut c = Decoy(Command::new(fixture()).args(["sigcount"]).arg(&r).spawn().unwrap());
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
     let path = forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[], false);

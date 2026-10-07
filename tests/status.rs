@@ -670,10 +670,11 @@ fn a_closed_status_reader_is_said_on_stderr() {
     let full = piped(&d, "full", Reader::Closed, 0, Opts { full_stderr: true, ..Default::default() });
     assert_eq!(full.code, Some(7), "a full stderr held sheepr; trace:\n{}", full.trace);
     assert_eq!(undelivered(&full).map(|u| u.0), Some("closed".to_string()), "{}", full.trace);
-    // the notice waited its 1 s on the full stderr (more than 500 ms: stderr was full), and no
-    // more (less than 2 s), against the same run with a stderr that takes it
-    let extra = full.ms.saturating_sub(x.ms);
-    assert!((500..2000).contains(&extra), "the notice to a full stderr took {extra} ms more than the control, not its 1 s");
+    // on sheepr's own clock (no process start in it): the notice waited its 1 s on the full stderr
+    // (so stderr was full) and no more; the control's stderr took it at once
+    let notice = |p: &Piped| p.trace.lines().find_map(|l| l.strip_prefix("status-notice ")?.parse::<u64>().ok());
+    assert!(notice(&full).is_some_and(|ms| (900..2000).contains(&ms)), "the notice to a full stderr: {:?} ms, not its 1 s", notice(&full));
+    assert!(notice(&x).is_some_and(|ms| ms < 500), "control: the notice to a stderr that takes it: {:?} ms", notice(&x));
     let _ = std::fs::remove_dir_all(&d);
 }
 
