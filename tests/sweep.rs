@@ -425,7 +425,9 @@ fn sweep_never_touches_its_own_ancestors() {
     let trace = d.join("trace");
     std::fs::write(d.join("trace-env"), trace.to_str().unwrap()).unwrap();
     std::fs::write(&go, b"").unwrap();
-    let finished = wait_until(20, || rc.exists());
+    // wait for the code itself, not the file: the shell creates the file before it writes the
+    // code, and a read between the two parses nothing (seen in the enosys leg)
+    let finished = wait_until(20, || std::fs::read_to_string(&rc).is_ok_and(|t| !t.trim().is_empty()));
     let code: Option<i32> = std::fs::read_to_string(&rc).ok().and_then(|t| t.trim().parse().ok());
     let w_alive = wpid.zip(wid).is_some_and(common::alive);
     // the job is skipped WHOLE: its other member (the root, a counting fixture) is untouched too
