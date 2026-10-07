@@ -9,8 +9,8 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
 ## Unreleased
 
 - `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job
-  is killed. sheepr waits at most 2 s while the reader takes nothing, and 10 s in all; then it
-  says on stderr that the line did not arrive (also with `--quiet`) and exits with its usual
+  is killed. sheepr gives up when the fd accepts nothing for 10 s, and at about 30 s in all; then
+  it says on stderr that the line did not arrive (also with `--quiet`) and exits with its usual
   code. A closed reader gives that line too, also on a usage error, where it could kill sheepr
   with SIGPIPE before ([#14](https://github.com/lukaso/sheepr/issues/14)).
 - `sweep`: a journal it skips because it cannot read it, or will not act on it for safety, is said

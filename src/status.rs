@@ -197,84 +197,105 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
     }
 }
 
-/// How long the status line waits while its reader takes nothing (issue #14). A reader that
+/// How long one write of the status line may go with the fd accepting nothing before sheepr
+/// gives up on its reader (issue #14; debug seam SHEEPR_TEST_STATUS_IDLE_MS). A reader that
 /// drains its end takes the line at once; one that has stopped must never hold sheepr after the
-/// job is killed. Each chunk the reader takes starts the wait again.
-const IDLE_MS: u64 = 2000;
+/// job is killed. Long, so a caller that is alive but stalled (a busy event loop, swap) still
+/// gets its line: on macOS a socketpair, node's stdio pipe, holds only 8 KiB.
+const IDLE_MS: u64 = 10_000;
 /// The longest the line may take in all, however steadily its reader reads (debug seam
 /// SHEEPR_TEST_STATUS_CAP_MS).
-const CAP_MS: u64 = 10_000;
-/// The writer's chunk: a reader that reads slowly but steadily shows progress at least this often.
+const CAP_MS: u64 = 30_000;
+/// The notice that the line did not arrive waits at most this long for stderr.
+const NOTICE_MS: u64 = 1000;
+/// One write's size: each starts a new idle window, so a buffer that fills at once is progress,
+/// and a reader that reads steadily keeps every window short.
 const CHUNK: usize = 4096;
 
-/// Write the status line (once) and return `code`. A line its reader does not take (it has
-/// stopped reading, it is too slow for CAP_MS, or it has closed its end) is said in one stderr
-/// line, also under `--quiet` (the machine-readable record is gone), under the same limits; the
-/// exit code stays the command's.
+/// Write the status line (once) and return `code`. A line its reader does not take (the fd
+/// accepts nothing for IDLE_MS, the line takes longer than CAP_MS, or the reader has closed its
+/// end) is said in one stderr line, also under `--quiet` (the machine-readable record is gone),
+/// which waits at most NOTICE_MS; the exit code stays the command's.
 pub fn write(code: i32) -> i32 {
     let Some((fd, line)) = line(code) else { return code };
     // sheepr's end: only an exit or a raise follows (die_like resets the one signal it raises).
     // A closed reader must be EPIPE, never a SIGPIPE death, also before setup_signals blocked it
     // (a usage error, an early panic)
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    let idle = Duration::from_millis(crate::seam_ms("SHEEPR_TEST_STATUS_IDLE_MS").unwrap_or(IDLE_MS));
     let cap = Duration::from_millis(crate::seam_ms("SHEEPR_TEST_STATUS_CAP_MS").unwrap_or(CAP_MS));
     let (total, start) = (line.len(), Instant::now());
-    if let Err((cause, why, sent)) = bounded_write(fd, line.into_bytes(), cap) {
+    if let Err((cause, why, sent)) = bounded_write(fd, line.as_bytes(), idle, cap) {
         crate::note(format!("status-undelivered {cause} {} {sent}/{total}", start.elapsed().as_millis()));
         let said = format!("sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
-        let _ = bounded_write(2, said.into_bytes(), cap);
+        let notice = idle.min(Duration::from_millis(NOTICE_MS));
+        let _ = bounded_write(2, said.as_bytes(), notice, notice);
     }
     code
 }
 
-enum Wrote {
-    Progress(usize),
-    Done(Result<(), i32>),
+extern "C" fn on_alarm(_: libc::c_int) {}
+
+fn arm(first: Duration, every: Duration) {
+    let tv = |d: Duration| libc::timeval { tv_sec: d.as_secs() as _, tv_usec: d.subsec_micros() as _ };
+    let it = libc::itimerval { it_value: tv(first), it_interval: tv(every) };
+    unsafe { libc::setitimer(libc::ITIMER_REAL, &it, std::ptr::null_mut()) };
 }
 
-/// Write all of `b` to `fd`: a thread of its own writes it in CHUNKs while this one waits, and
-/// the wait gives up when the reader takes nothing for IDLE_MS, or at `cap` in all. The fd is
+/// Write all of `b` to `fd` from this thread, in CHUNKs, as plain blocking writes: the fd is
 /// never changed (its open file description may be shared, e.g. a shell's `3>&2`), so any kind
-/// works: a pipe, a socket, a tty, a file. A writer still blocked when this returns ends with
-/// the process, which ends right after. An EINTR is tried again (sheepr runs no signal handler,
-/// so it is not expected). Err: (cause, why, bytes written).
-fn bounded_write(fd: i32, b: Vec<u8>, cap: Duration) -> Result<(), (&'static str, String, usize)> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let writer = std::thread::Builder::new().name("status-write".into()).spawn(move || {
-        let mut off = 0;
-        while off < b.len() {
-            let end = (off + CHUNK).min(b.len());
-            let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
-            if n > 0 {
-                off += n as usize;
-                let _ = tx.send(Wrote::Progress(off));
-                continue;
-            }
-            let e = if n == 0 { 0 } else { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) };
-            if e != libc::EINTR {
-                let _ = tx.send(Wrote::Done(Err(e)));
-                return;
-            }
-        }
-        let _ = tx.send(Wrote::Done(Ok(())));
-    });
-    if let Err(e) = writer {
-        return Err(("thread", format!("sheepr could not start a thread to write it ({e})"), 0));
+/// works. Before each write a SIGALRM timer is set to `idle` (or what is left of `cap`), and it
+/// repeats; the handler does nothing and has no SA_RESTART, so the tick ends a write that is
+/// waiting: one that took some bytes returns their count, one that took none returns EINTR, and
+/// then sheepr gives up. Nothing is left writing when this returns, so the count is exact, and
+/// no thread is needed (a job can use up the pids). SIGALRM is unblocked for this thread only,
+/// while it writes; sheepr's other thread (macOS `tcc-probe`) starts after setup_signals and
+/// blocks it, so the tick reaches this one. Stated: a tick that falls between setting the timer
+/// and the write itself is missed, and the next one ends the write (twice the limit at worst);
+/// a file on a hard network mount can hold a write that no signal ends.
+/// Err: (cause, why, bytes written).
+fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(), (&'static str, String, usize)> {
+    let (mut old_act, mut old_mask): (libc::sigaction, libc::sigset_t) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = on_alarm as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::sigemptyset(&mut act.sa_mask);
+        libc::sigaction(libc::SIGALRM, &act, &mut old_act);
+        let mut alrm: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut alrm);
+        libc::sigaddset(&mut alrm, libc::SIGALRM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &alrm, &mut old_mask);
     }
     let start = Instant::now();
-    let (mut sent, mut idle_end) = (0, start + Duration::from_millis(IDLE_MS));
-    loop {
-        match rx.recv_timeout(idle_end.min(start + cap).saturating_duration_since(Instant::now())) {
-            Ok(Wrote::Progress(n)) => (sent, idle_end) = (n, Instant::now() + Duration::from_millis(IDLE_MS)),
-            Ok(Wrote::Done(Ok(()))) => return Ok(()),
-            Ok(Wrote::Done(Err(libc::EPIPE))) => return Err(("closed", "its reader has closed it".into(), sent)),
-            Ok(Wrote::Done(Err(0))) => return Err(("error", "a write took nothing".into(), sent)),
-            Ok(Wrote::Done(Err(e))) => return Err(("error", std::io::Error::from_raw_os_error(e).to_string(), sent)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if start.elapsed() >= cap => return Err(("cap", format!("its reader did not take it all within {} ms", cap.as_millis()), sent)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(("timeout", format!("its reader took nothing for {IDLE_MS} ms"), sent)),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(("error", "the writer stopped".into(), sent)),
+    let mut off = 0;
+    let r = loop {
+        if off == b.len() {
+            break Ok(());
         }
+        // past the cap a write gets 1 ms: one that waits ends as `cap` below
+        let window = cap.saturating_sub(start.elapsed()).min(idle).max(Duration::from_millis(1));
+        arm(window, window);
+        let end = (off + CHUNK).min(b.len());
+        let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
+        let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if n > 0 {
+            off += n as usize;
+            continue;
+        }
+        break Err(match (n, e) {
+            (0, _) => ("error", "a write took nothing".to_string(), off),
+            (_, libc::EINTR) if start.elapsed() >= cap => ("cap", format!("its reader did not take it all within {} ms", cap.as_millis()), off),
+            (_, libc::EINTR) => ("timeout", format!("the fd accepted nothing for {} ms", window.as_millis()), off),
+            (_, libc::EPIPE) => ("closed", "its reader has closed it".to_string(), off),
+            (_, e) => ("error", std::io::Error::from_raw_os_error(e).to_string(), off),
+        });
+    };
+    arm(Duration::ZERO, Duration::ZERO);
+    unsafe {
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old_mask, std::ptr::null_mut());
+        libc::sigaction(libc::SIGALRM, &old_act, std::ptr::null_mut());
     }
+    r
 }
 
 /// The status line, and the fd it goes to (taken: the line is written once).

@@ -295,6 +295,8 @@ enum Reader {
     Drain,
     /// a thread reads at most `.0` bytes every `.1` ms, to the newline
     Slow(usize, u64),
+    /// a thread waits `.0` ms, then reads to the end of the pipe (all its writers gone)
+    Stall(u64),
     /// no reader at all: the child makes the pipe and closes its read end before the exec, so no
     /// other process (another cell's child) can hold that end
     Closed,
@@ -305,7 +307,10 @@ struct Piped {
     signal: Option<i32>,
     stderr: String,
     trace: String,
+    /// what the reader got; a `Stuck` reader's is read after sheepr's end, to the end of the pipe
     got: Vec<u8>,
+    /// from the spawn to sheepr's end
+    ms: u128,
     /// O_NONBLOCK on the test's own copy of the write end (the same open file description),
     /// read after sheepr exited; None when the test kept no copy
     nonblock_after: Option<bool>,
@@ -377,18 +382,23 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
         }
         (Some(r), Some(w))
     };
+    let t0 = Instant::now();
     let mut c = cmd.spawn().unwrap();
     let keep = w; // the test's own copy of the write end, read for its flags after the end
     let reading = r.map(|mut r| {
         std::thread::spawn(move || {
             let mut got = Vec::new();
-            let (step, every) = match reader {
-                Reader::Slow(n, ms) => (n, ms),
+            let (step, every, to_end) = match reader {
+                Reader::Slow(n, ms) => (n, ms, false),
                 Reader::Stuck => return (got, Some(r)),
-                _ => (65536, 0),
+                Reader::Stall(ms) => {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    (65536, 0, true)
+                }
+                _ => (65536, 0, false),
             };
             let mut buf = vec![0u8; step];
-            while !got.contains(&b'\n') {
+            while to_end || !got.contains(&b'\n') {
                 match std::io::Read::read(&mut r, &mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => got.extend_from_slice(&buf[..n]),
@@ -410,10 +420,15 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
         }
         std::thread::sleep(Duration::from_millis(10));
     };
+    let ms = t0.elapsed().as_millis();
     let nonblock_after = keep.as_ref().map(|k| unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(k), libc::F_GETFL) } & libc::O_NONBLOCK != 0);
     drop(keep);
-    let (got, held) = reading.map(|t| t.join().unwrap()).unwrap_or_default();
-    drop(held); // the stuck reader and the full stderr are released only now, after sheepr's end
+    let (mut got, held) = reading.map(|t| t.join().unwrap()).unwrap_or_default();
+    // the stuck reader and the full stderr are released only now, after sheepr's end; what the
+    // stuck reader's pipe holds is exactly what sheepr wrote (every writer is gone)
+    if let Some(mut r) = held {
+        let _ = std::io::Read::read_to_end(&mut r, &mut got);
+    }
     drop(held_err);
     Piped {
         code: st.and_then(|s| s.code()),
@@ -421,16 +436,26 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, args: &[&str], env: &
         stderr: std::fs::read_to_string(&err).unwrap_or_default(),
         trace: std::fs::read_to_string(&trace).unwrap_or_default(),
         got,
+        ms,
         nonblock_after,
     }
 }
 
 /// The trace's `status-undelivered CAUSE MS SENT/TOTAL` note, if any: (cause, ms).
 fn undelivered(p: &Piped) -> Option<(String, u64)> {
+    let (cause, ms, _) = undelivered_sent(p)?;
+    Some((cause, ms))
+}
+
+/// The same note with SENT: (cause, ms, sent).
+fn undelivered_sent(p: &Piped) -> Option<(String, u64, usize)> {
     let l = p.trace.lines().find(|l| l.starts_with("status-undelivered "))?;
     let mut w = l.split_whitespace().skip(1);
-    Some((w.next()?.to_string(), w.next()?.parse().ok()?))
+    Some((w.next()?.to_string(), w.next()?.parse().ok()?, w.next()?.split('/').next()?.parse().ok()?))
 }
+
+/// The debug seam that shortens the 10 s idle limit for a cell.
+const IDLE_1S: (&str, &str) = ("SHEEPR_TEST_STATUS_IDLE_MS", "1000");
 
 /// The notice: under `--quiet` it is the only line, and it is sheepr's own.
 fn one_notice(p: &Piped) -> bool {
@@ -445,21 +470,25 @@ fn whole(p: &Piped, pad: usize) -> bool {
 
 /// Issue #14: the status line never holds sheepr's exit. Against a line larger than any pipe
 /// buffer (1 MiB of debug pad) and a reader that never reads, sheepr exits with the command's
-/// code once the reader has taken nothing for 2 s, and no later; it says so in one stderr line
-/// (also under `--quiet`), and it never touches the flags of the write end it was given. The
-/// control drains: the whole line arrives, and stderr and the trace say nothing.
+/// code once the fd has accepted nothing for its idle limit (a seam makes it 3 s here; 10 s by
+/// default), and not much later (a buffer that fills at once is progress: the window starts
+/// at the write that waits, so the give-up is one idle, not two); it says so in one stderr line (also under `--quiet`), and it
+/// never touches the flags of the write end it was given. What the pipe holds after the end is
+/// exactly the count the note gives (review of a19592d, F3: nothing writes after the give-up).
+/// The control drains: the whole line arrives, and stderr and the trace say nothing.
 #[test]
 fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let d = scratch("stuck");
     let pad = 1 << 20;
-    let stuck = piped(&d, "stuck", Reader::Stuck, pad, &[], &[], false);
+    let stuck = piped(&d, "stuck", Reader::Stuck, pad, &[], &[("SHEEPR_TEST_STATUS_IDLE_MS", "3000")], false);
     assert_eq!(stuck.code, Some(7), "sheepr did not exit within 20 s (or not with the command's code); trace:\n{}", stuck.trace);
-    let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
+    let (cause, ms, sent) = undelivered_sent(&stuck).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", stuck.trace));
     assert_eq!(cause, "timeout");
-    assert!((2000..6000).contains(&ms), "waited {ms} ms for the reader, not its 2 s");
+    assert!((3000..5500).contains(&ms), "waited {ms} ms for the reader, not its 3 s");
+    assert_eq!(stuck.got.len(), sent, "the note's count is not what the pipe holds");
     assert!(one_notice(&stuck), "stderr: {:?}", stuck.stderr);
     assert_eq!(stuck.nonblock_after, Some(false), "the caller's write end was left non-blocking");
-    let drain = piped(&d, "drain", Reader::Drain, pad, &[], &[], false);
+    let drain = piped(&d, "drain", Reader::Drain, pad, &[], &[IDLE_1S], false);
     assert_eq!(drain.code, Some(7), "control");
     assert!(whole(&drain, pad), "control: {} bytes", drain.got.len());
     assert_eq!(undelivered(&drain), None, "control:\n{}", drain.trace);
@@ -468,30 +497,40 @@ fn a_reader_that_never_reads_cannot_hold_sheeprs_exit() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Review of a1419bc, P2-3: the 2 s count only the time the reader takes nothing. A reader that
-/// reads slowly but steadily (4 KiB every 25 ms) gets the whole 400 KiB line, which takes it
-/// longer than 2 s. A steady reader of a line too large for any reader is cut at the cap (a
-/// debug seam makes it 2 s here; 10 s by default).
+/// Review of a1419bc, P2-3: the idle limit counts only the time the fd accepts nothing. A reader
+/// that reads slowly but steadily (4 KiB every 25 ms) gets the whole 400 KiB line, which takes
+/// it longer than the 1 s idle. A steady reader of a line too large for it is cut at the cap (a
+/// seam makes it 3 s here, apart from the idle, review of a19592d F6; 30 s by default); the
+/// control, a stuck reader under the same seams, is cut by the idle, before the cap. With a full
+/// stderr too, sheepr still ends within the cap, one idle of tick, and the notice's 1 s (F5).
 #[test]
 fn a_slow_reader_gets_the_line_and_the_cap_still_ends_it() {
     let d = scratch("slow");
     let pad = 400 << 10;
-    let slow = piped(&d, "slow", Reader::Slow(4096, 25), pad, &[], &[], false);
+    let cap = ("SHEEPR_TEST_STATUS_CAP_MS", "3000");
+    let slow = piped(&d, "slow", Reader::Slow(4096, 25), pad, &[], &[IDLE_1S], false);
     assert_eq!(slow.code, Some(7), "{}", slow.trace);
     assert_eq!(undelivered(&slow), None, "a reader that kept reading was cut:\n{}", slow.trace);
     assert!(whole(&slow, pad), "{} bytes", slow.got.len());
-    let capped = piped(&d, "capped", Reader::Slow(4096, 300), 1 << 20, &[], &[("SHEEPR_TEST_STATUS_CAP_MS", "2000")], false);
+    let capped = piped(&d, "capped", Reader::Slow(4096, 300), 1 << 20, &[], &[IDLE_1S, cap], false);
     assert_eq!(capped.code, Some(7), "sheepr did not exit within 20 s:\n{}", capped.trace);
     let (cause, ms) = undelivered(&capped).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", capped.trace));
     assert_eq!(cause, "cap");
-    assert!((2000..6000).contains(&ms), "capped at {ms} ms, not at 2 s");
+    assert!((3000..6000).contains(&ms), "capped at {ms} ms, not at 3 s");
     assert!(one_notice(&capped), "stderr: {:?}", capped.stderr);
+    let stuck = piped(&d, "stuck", Reader::Stuck, 1 << 20, &[], &[IDLE_1S, cap], false);
+    let (cause, ms) = undelivered(&stuck).unwrap_or_else(|| panic!("control: no note:\n{}", stuck.trace));
+    assert_eq!(cause, "timeout", "control");
+    assert!(ms < 3000, "control: {ms} ms, not the idle's 1 s");
+    let full = piped(&d, "capped-full", Reader::Slow(4096, 300), 1 << 20, &[], &[IDLE_1S, cap], true);
+    assert_eq!(full.code, Some(7), "{}", full.trace);
+    assert!(full.ms < 3000 + 1000 + 1000 + 4000, "a capped line and a full stderr took {} ms", full.ms);
     let _ = std::fs::remove_dir_all(&d);
 }
 
 /// Issue #14: a reader that has closed its end gets no line, and sheepr says so on stderr (also
 /// under `--quiet`) and keeps the command's code. Review of a1419bc, P2-1: a full stderr that
-/// nobody reads cannot hold sheepr's exit either (the notice has the same time limit).
+/// nobody reads cannot hold sheepr's exit either (the notice has a limit of its own).
 #[test]
 fn a_closed_status_reader_is_said_on_stderr() {
     let d = scratch("closed");
@@ -517,6 +556,33 @@ fn a_closed_reader_before_the_job_is_not_a_sigpipe_death() {
         assert_eq!((x.code, x.signal), (Some(125), None), "{n}: {}", x.stderr);
         assert_eq!(undelivered(x).map(|u| u.0), Some("closed".to_string()), "{n}: {}", x.trace);
     }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of a19592d, F1: the line needs no new thread, so a process that cannot start one (a
+/// pids limit the job used up; here a stack no thread can get) still delivers it whole.
+#[test]
+fn the_line_needs_no_new_thread() {
+    let d = scratch("nothread");
+    let pad = 1 << 20;
+    let x = piped(&d, "nothread", Reader::Drain, pad, &[], &[("RUST_MIN_STACK", "1125899906842624")], false);
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert!(whole(&x, pad), "{} bytes; trace:\n{}", x.got.len(), x.trace);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Review of a19592d, F3: once sheepr gives up, nothing more is written. A reader that stalls
+/// past the idle and then reads to the end of the pipe, while the notice waits on a full stderr,
+/// gets exactly the count the note gives (and so no status bytes after the notice, either).
+#[test]
+fn nothing_is_written_after_the_give_up() {
+    let d = scratch("late");
+    let pad = 1 << 20;
+    let late = piped(&d, "late", Reader::Stall(2500), pad, &[], &[IDLE_1S], true);
+    assert_eq!(late.code, Some(7), "{}", late.trace);
+    let (cause, _, sent) = undelivered_sent(&late).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", late.trace));
+    assert_eq!(cause, "timeout");
+    assert_eq!(late.got.len(), sent, "bytes were written after sheepr gave up");
     let _ = std::fs::remove_dir_all(&d);
 }
 
