@@ -207,6 +207,8 @@ const IDLE_MS: u64 = 10_000;
 /// The longest the line may take in all, however steadily its reader reads (debug seam
 /// SHEEPR_TEST_STATUS_CAP_MS).
 const CAP_MS: u64 = 30_000;
+/// An EINTR this close to the end of its window counts as the timer's tick.
+const TICK_SLACK: Duration = Duration::from_millis(10);
 /// The notice that the line did not arrive waits at most this long for stderr.
 const NOTICE_MS: u64 = 1000;
 /// One write's size: PIPE_BUF, which a pipe takes whole or not at all (as a macOS socket does
@@ -269,7 +271,8 @@ fn arm(first: Duration, every: Duration) {
 /// while it writes; sheepr's other thread (macOS `tcc-probe`) starts after setup_signals and
 /// blocks it, so the tick reaches this one. A non-blocking fd (the caller's choice; its open file
 /// description is shared, so it is left as it is): an EAGAIN waits in poll for room, in the same
-/// window, and the tick ends that wait as it ends a write. Stated: a tick that falls between setting the timer
+/// window, and the tick ends that wait as it ends a write. A signal from outside that ends a
+/// write or a poll before the window is up is not the tick: the write is tried again. Stated: a tick that falls between setting the timer
 /// and the write itself is missed, and the next one ends the write (twice the limit at worst);
 /// a file on a hard network mount can hold a write that no signal ends.
 /// Err: (cause, why, bytes written).
@@ -301,8 +304,10 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
             _ => {
                 // past the cap a write gets 1 ms: one that waits ends as `cap` below
                 let w = cap.saturating_sub(start.elapsed()).min(idle).max(Duration::from_millis(1));
-                arm(w, w);
+                // the clock before the timer: the timer's tick then comes a full window after
+                // `since`, so an EINTR before that is a signal from outside (below)
                 let since = Instant::now();
+                arm(w, w);
                 window = Some((off, since, w));
                 (since, w)
             }
@@ -333,6 +338,13 @@ fn bounded_write(fd: i32, b: &[u8], idle: Duration, cap: Duration) -> Result<(),
                 continue;
             }
             e = if r == 0 { libc::EINTR } else { errno() };
+        }
+        // an EINTR before the window is up is a signal sent from outside (SIGALRM is unblocked
+        // while the line is written), not the timer's tick: try again in the same window, so the
+        // signal never cuts the line (issue #14). TICK_SLACK takes a tick that comes a little early
+        // for the tick.
+        if n < 0 && e == libc::EINTR && since.elapsed() + TICK_SLACK < w {
+            continue;
         }
         break Err(match (n, e) {
             (0, _) => ("error", "a write took nothing".to_string(), off),

@@ -307,6 +307,9 @@ enum Reader {
     /// a thread waits until the pipe is full (its count unchanged for 200 ms), takes `.0` bytes
     /// once, and reads nothing more while sheepr runs
     TakeThenStop(usize),
+    /// a thread waits until the pipe is full, sends sheepr one SIGALRM from outside, waits 500 ms,
+    /// then reads to the newline
+    AlarmThenDrain,
     /// no reader at all: the child makes the pipe and closes its read end before the exec, so no
     /// other process (another cell's child) can hold that end
     Closed,
@@ -363,6 +366,24 @@ fn waiting(fd: i32) -> i32 {
     let mut n: libc::c_int = 0;
     unsafe { libc::ioctl(fd, libc::FIONREAD, &mut n) };
     n
+}
+
+/// Wait (20 s at most) until the pipe whose read end is `fd` is full: its count has not changed
+/// for 200 ms.
+fn until_full(fd: i32) {
+    let (end, mut last) = (Instant::now() + Duration::from_secs(20), (0, Instant::now()));
+    loop {
+        let w = waiting(fd);
+        if w != last.0 {
+            last = (w, Instant::now());
+        } else if w > 0 && last.1.elapsed() >= Duration::from_millis(200) {
+            return;
+        }
+        if Instant::now() > end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The number of threads of process `pid`, if it can be read.
@@ -439,6 +460,7 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, o: Opts) -> Piped {
     drop(cmd); // its copies of the stderr ends: a reader must see the end of the pipe with sheepr's
     let keep = w; // the test's own copy of the write end, read for its flags after the end
     let note = trace.clone();
+    let pid = c.id() as i32;
     let reading = r.map(|mut r| {
         std::thread::spawn(move || {
             let mut got = Vec::new();
@@ -456,20 +478,14 @@ fn piped(d: &Path, name: &str, reader: Reader, pad: usize, o: Opts) -> Piped {
                     wait_until(&|| std::fs::read_to_string(&note).unwrap_or_default().contains("status-undelivered "));
                     (65536, 0, true)
                 }
+                Reader::AlarmThenDrain => {
+                    until_full(fd);
+                    unsafe { libc::kill(pid, libc::SIGALRM) };
+                    std::thread::sleep(Duration::from_millis(500));
+                    (65536, 0, false)
+                }
                 Reader::TakeThenStop(n) => {
-                    let (end, mut last) = (Instant::now() + Duration::from_secs(20), (0, Instant::now()));
-                    loop {
-                        let w = waiting(fd);
-                        if w != last.0 {
-                            last = (w, Instant::now());
-                        } else if w > 0 && last.1.elapsed() >= Duration::from_millis(200) {
-                            break;
-                        }
-                        if Instant::now() > end {
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
+                    until_full(fd);
                     let at = t0.elapsed().as_millis();
                     let mut buf = vec![0u8; n];
                     if let Ok(k) = std::io::Read::read(&mut r, &mut buf) {
@@ -713,6 +729,23 @@ fn an_fd_that_is_ready_but_takes_nothing_is_cut_at_the_idle() {
     let (cause, ms) = undelivered(&x).unwrap_or_else(|| panic!("no status-undelivered note:\n{}", x.trace));
     assert_eq!(cause, "timeout");
     assert!((1000..3000).contains(&ms), "cut after {ms} ms, not at the 1 s idle");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Issue #14 ("a write interrupted by a signal is retried, so the line is never cut"; whole-branch
+/// review P3-1): one SIGALRM sent from outside while the line waits on a full pipe does not end
+/// the write (only the timer's own tick, a full window in, does): a reader that then drains gets
+/// the whole line, and nothing is said. The idle (5 s) is far longer than the 500 ms between the
+/// signal and the drain, so a give-up there can only be the signal's.
+#[test]
+fn a_signal_from_outside_does_not_cut_the_line() {
+    let d = scratch("alarm");
+    let pad = 200 << 10;
+    let x = piped(&d, "alarm", Reader::AlarmThenDrain, pad, Opts { env: &[("SHEEPR_TEST_STATUS_IDLE_MS", "5000")], ..Default::default() });
+    assert_eq!(x.code, Some(7), "{}", x.trace);
+    assert_eq!(undelivered(&x), None, "a SIGALRM from outside cut the line:\n{}", x.trace);
+    assert!(whole(&x, pad), "{} bytes", x.got.len());
+    assert!(x.stderr.trim().is_empty(), "{}", x.stderr);
     let _ = std::fs::remove_dir_all(&d);
 }
 
