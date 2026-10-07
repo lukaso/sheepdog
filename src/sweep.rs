@@ -17,9 +17,11 @@
 //! Reading a journal is a phase-2 source: the sweep takes the wall's token first (PHASE2.md §0.1),
 //! and does nothing under the phase-1 opt-out.
 //!
-//! Exit codes: 0 done (also: nothing to sweep, which only a folder "not found" means); 1 refused
-//! (the state directory is not safe, or its journal folder cannot be reached or listed);
-//! 2 usage error; 125 a job's kill deadline passed with members alive.
+//! Exit codes: 0 done, also when there is nothing to sweep: no state directory, no boot id, the
+//! phase-1 opt-out, or a journal folder "not found" (any other error on the way to it refuses);
+//! 1 refused: the state directory or its journal folder is not safe, cannot be reached or cannot
+//! be listed, sheepr cannot follow its own chain of parent processes, or (Linux) /proc cannot be
+//! read; 2 usage error; 125 a job's kill deadline passed with members alive.
 
 use crate::kill::{end_supervisors, is_sheepr, parent, protected, Proved};
 use crate::{kill_failed, kill_tree, say, signal, trace, KillOpts};
@@ -402,7 +404,9 @@ fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// The auto-sweep before a `sheepr run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
 /// within 200 ms between journals. A state folder it cannot use, and a journal it cannot read
-/// or will not act on, is a note that names it (issue #15); a deadline missed is `partial`. It takes the wall's
+/// or will not act on for safety (another user's, another boot's header), is a note that names
+/// it (issue #15); another owner's journal and a kept one are skipped silently, as they should
+/// be; a deadline missed is `partial`. It takes the wall's
 /// token only when there is a journal to open: an empty state produces no fact.
 pub fn auto(owner: &str, quiet: bool) {
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else { return };

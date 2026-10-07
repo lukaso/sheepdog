@@ -325,7 +325,8 @@ fn strays_kill_refuses_the_callers_ancestor() {
     c.recs.push(c.path("daemon")); // written when its strays has ended
     let d = c.rec("daemon.d").unwrap();
     // the daemon's strays ends (its code), or the daemon itself was killed
-    assert!(wait_until(30, || c.path("daemon.code").exists() || !common::alive(d)), "the daemon's strays did not end");
+    // wait for the code itself, not the file: the fixture creates it before it writes the code
+    assert!(wait_until(30, || std::fs::read_to_string(c.path("daemon.code")).is_ok_and(|t| !t.is_empty()) || !common::alive(d)), "the daemon's strays did not end");
     assert!(common::alive(d), "the daemon (the caller's ancestor) was killed");
     let code = std::fs::read_to_string(c.path("daemon.code")).unwrap_or_default();
     assert_eq!(code, "1", "the refusal's exit code");

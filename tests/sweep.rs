@@ -425,9 +425,9 @@ fn sweep_never_touches_its_own_ancestors() {
     let trace = d.join("trace");
     std::fs::write(d.join("trace-env"), trace.to_str().unwrap()).unwrap();
     std::fs::write(&go, b"").unwrap();
-    // wait for the code itself, not the file: the shell creates the file before it writes the
-    // code, and a read between the two parses nothing (seen in the enosys leg)
-    let finished = wait_until(20, || std::fs::read_to_string(&rc).is_ok_and(|t| !t.trim().is_empty()));
+    // wait for the code itself, to its newline, not for the file: the shell creates the file
+    // before it writes the code, and a read between the two parses nothing (the enosys leg)
+    let finished = wait_until(20, || std::fs::read_to_string(&rc).is_ok_and(|t| t.ends_with('\n')));
     let code: Option<i32> = std::fs::read_to_string(&rc).ok().and_then(|t| t.trim().parse().ok());
     let w_alive = wpid.zip(wid).is_some_and(common::alive);
     // the job is skipped WHOLE: its other member (the root, a counting fixture) is untouched too
@@ -580,8 +580,8 @@ fn a_folder_sweep_cannot_read_is_refused_and_said() {
 }
 
 /// Review of 35624d5, P2-1: a normal state is swept in silence, exit 0, nothing on stderr: a fresh
-/// state (only the sentinel), `jobs/` with no folder for this boot (as after a reboot), and this
-/// boot's folder empty. Only "not found" means nothing to sweep; liveapp's boot sweep meets the
+/// state (only the sentinel), `jobs/` with no folder for this boot and an old boot's folder that
+/// still holds a journal (as after a reboot), and this boot's folder empty. Only "not found" means nothing to sweep; liveapp's boot sweep meets the
 /// first two on every new instance and after every reboot.
 #[test]
 fn a_normal_state_is_swept_in_silence() {
@@ -589,8 +589,12 @@ fn a_normal_state_is_swept_in_silence() {
     let (here, _, _) = folder(&d);
     let fresh = state(&d.join("fresh"));
     let noboot = state(&d.join("noboot"));
-    std::fs::create_dir_all(noboot.join("jobs")).unwrap();
+    // after a reboot: no folder for this boot, and the old boot's folder still holds a journal
+    let old = noboot.join("jobs").join("00000000-0000-0000-0000-000000000000-0");
+    std::fs::create_dir_all(&old).unwrap();
     mode(&noboot.join("jobs"), 0o700);
+    mode(&old, 0o700);
+    std::fs::write(old.join("j-0ldb00t0.journal"), "not read\n").unwrap();
     let empty = state(&d.join("empty"));
     std::fs::create_dir_all(empty.join("jobs").join(&here)).unwrap();
     mode(&empty.join("jobs"), 0o700);

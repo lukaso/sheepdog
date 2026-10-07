@@ -225,16 +225,21 @@ fn the_auto_sweep_notes_a_folder_it_cannot_read() {
 }
 
 /// Review of 35624d5, P2-1: a normal state gives no auto-sweep note: the first `run` on a fresh
-/// state, and a `run` whose `jobs/` has no folder for this boot (as after a reboot).
+/// state; a second `run` on it (this boot's folder, which the first made, is empty: the state
+/// every later run in a boot meets, review of ac5b568); and a `run` after a reboot (no folder for
+/// this boot, and an old boot's folder that still holds a journal).
 #[test]
 fn a_normal_state_gives_no_auto_sweep_note() {
     let d = scratch("normal");
     let fresh = state(&d.join("fresh"));
     let noboot = state(&d.join("noboot"));
-    std::fs::create_dir_all(noboot.join("jobs")).unwrap();
+    let old = noboot.join("jobs").join("00000000-0000-0000-0000-000000000000-0");
+    std::fs::create_dir_all(&old).unwrap();
     mode(&noboot.join("jobs"), 0o700);
-    for (n, s) in [("fresh", &fresh), ("no boot folder", &noboot)] {
-        let (code, st) = run(&d, s, n.split(' ').next().unwrap(), "", "/bin/sh -c 'exit 0'", &[]);
+    mode(&old, 0o700);
+    std::fs::write(old.join("j-0ldb00t0.journal"), "not read\n").unwrap();
+    for (n, s) in [("fresh", &fresh), ("second run", &fresh), ("after a reboot", &noboot)] {
+        let (code, st) = run(&d, s, &n.replace(' ', "-"), "", "/bin/sh -c 'exit 0'", &[]);
         assert_eq!(code, Some(0), "{n}");
         assert!(st.is_some(), "{n}: a status line");
         assert!(!notes(&st).iter().any(|x| x.starts_with("auto-sweep")), "{n}: {:?}", notes(&st));
@@ -472,7 +477,8 @@ fn the_auto_sweep_skips_a_job_that_holds_the_run() {
     common::send_child(&mut c.0, libc::SIGKILL);
     let _ = c.0.wait();
     std::fs::write(&go, b"").unwrap();
-    let done = wait_until(20, || ran.exists() && std::fs::read_to_string(&out).is_ok_and(|t| !t.is_empty()));
+    // the status line's last byte is its newline: a line longer than one write can be read part way
+    let done = wait_until(20, || ran.exists() && std::fs::read_to_string(&out).is_ok_and(|t| t.ends_with('\n')));
     let st = std::fs::read_to_string(&out).ok().and_then(|t| json::parse(t.trim_end()).ok());
     let (wit_alive, n) = (common::alive(witness), counted(&wit));
     let noted = wpid.is_some_and(|w| notes(&st).iter().any(|n| n.starts_with("auto-sweep skipped job j-") && n.contains(&w.to_string())));
