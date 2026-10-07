@@ -1,5 +1,5 @@
 //! `--status-fd N` (PLAN.md §3.1; PHASE2.md §1 decision 8): one JSON line, written once at the
-//! end, by the supervisor only (a relay drops the fd), within DELIVER_MS (issue #14). Fields: `v`, `job`, `root` (`exited`,
+//! end, by the supervisor only (a relay drops the fd), within IDLE_MS and CAP_MS (issue #14). Fields: `v`, `job`, `root` (`exited`,
 //! `signaled`, `not-started`), `code`, `trigger` (null, `term`; P3 adds `timeout` and `cap`),
 //! `trigger_at` (ms since start), `deadline_missed`, `killed` (`[{pid, cmd, escaped}]`, escaped:
 //! null | `setsid` | `reparented`), `survivors`, `tracking`, `degraded`, `error`, `notes`. The fd
@@ -8,7 +8,7 @@
 
 use std::io::Write;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct Killed {
     pub pid: i32,
@@ -197,61 +197,84 @@ pub fn report(root_status: Option<libc::c_int>, clean: bool) {
     }
 }
 
-/// How long the status line waits for its reader (issue #14). A reader that drains its end takes
-/// the line at once; one that does not must never hold sheepr after the job is killed.
-const DELIVER_MS: u64 = 1000;
+/// How long the status line waits while its reader takes nothing (issue #14). A reader that
+/// drains its end takes the line at once; one that has stopped must never hold sheepr after the
+/// job is killed. Each chunk the reader takes starts the wait again.
+const IDLE_MS: u64 = 2000;
+/// The longest the line may take in all, however steadily its reader reads (debug seam
+/// SHEEPR_TEST_STATUS_CAP_MS).
+const CAP_MS: u64 = 10_000;
+/// The writer's chunk: a reader that reads slowly but steadily shows progress at least this often.
+const CHUNK: usize = 4096;
 
-/// Write the status line (once) and return `code`. A line its reader does not take within
-/// DELIVER_MS, or whose reader has closed its end, is said on stderr (also under `--quiet`: the
-/// machine-readable record is gone) and the exit code stays the command's.
+/// Write the status line (once) and return `code`. A line its reader does not take (it has
+/// stopped reading, it is too slow for CAP_MS, or it has closed its end) is said in one stderr
+/// line, also under `--quiet` (the machine-readable record is gone), under the same limits; the
+/// exit code stays the command's.
 pub fn write(code: i32) -> i32 {
     let Some((fd, line)) = line(code) else { return code };
-    let start = Instant::now();
-    if let Err((cause, why, sent)) = deliver(fd, line.as_bytes(), std::time::Duration::from_millis(DELIVER_MS)) {
-        crate::note(format!("status-undelivered {cause} {} {sent}/{}", start.elapsed().as_millis(), line.len()));
-        crate::say!("sheepr: the status line did not reach fd {fd}: {why} ({sent} of {} bytes written).", line.len());
+    // sheepr's end: only an exit or a raise follows (die_like resets the one signal it raises).
+    // A closed reader must be EPIPE, never a SIGPIPE death, also before setup_signals blocked it
+    // (a usage error, an early panic)
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    let cap = Duration::from_millis(crate::seam_ms("SHEEPR_TEST_STATUS_CAP_MS").unwrap_or(CAP_MS));
+    let (total, start) = (line.len(), Instant::now());
+    if let Err((cause, why, sent)) = bounded_write(fd, line.into_bytes(), cap) {
+        crate::note(format!("status-undelivered {cause} {} {sent}/{total}", start.elapsed().as_millis()));
+        let said = format!("sheepr: the status line did not reach fd {fd}: {why} ({sent} of {total} bytes written).\n");
+        let _ = bounded_write(2, said.into_bytes(), cap);
     }
     code
 }
 
-/// Write all of `b` to `fd` within `limit`. The fd is made non-blocking for the write and its
-/// flags are put back after (the caller may share the open file description); a full pipe is
-/// waited on with poll, and an EINTR is tried again (sheepr runs no signal handler today, so it
-/// is not expected). Err: (cause, why, bytes written).
-fn deliver(fd: i32, b: &[u8], limit: std::time::Duration) -> Result<(), (&'static str, String, usize)> {
-    let end = Instant::now() + limit;
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    let set = flags >= 0 && flags & libc::O_NONBLOCK == 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0;
-    let mut off = 0;
-    let r = loop {
-        if off == b.len() {
-            break Ok(());
-        }
-        let n = unsafe { libc::write(fd, b[off..].as_ptr() as *const libc::c_void, b.len() - off) };
-        if n > 0 {
-            off += n as usize;
-            continue;
-        }
-        let e = if n == 0 { libc::EAGAIN } else { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) };
-        match e {
-            libc::EINTR => {}
-            libc::EPIPE => break Err(("closed", "its reader has closed it".to_string(), off)),
-            e if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {
-                let left = end.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break Err(("timeout", format!("its reader did not take it within {} ms", limit.as_millis()), off));
-                }
-                let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-                // a closed reader or a bad fd wakes the poll, and the next write names it
-                unsafe { libc::poll(&mut p, 1, (left.as_millis() as libc::c_int).saturating_add(1)) };
+enum Wrote {
+    Progress(usize),
+    Done(Result<(), i32>),
+}
+
+/// Write all of `b` to `fd`: a thread of its own writes it in CHUNKs while this one waits, and
+/// the wait gives up when the reader takes nothing for IDLE_MS, or at `cap` in all. The fd is
+/// never changed (its open file description may be shared, e.g. a shell's `3>&2`), so any kind
+/// works: a pipe, a socket, a tty, a file. A writer still blocked when this returns ends with
+/// the process, which ends right after. An EINTR is tried again (sheepr runs no signal handler,
+/// so it is not expected). Err: (cause, why, bytes written).
+fn bounded_write(fd: i32, b: Vec<u8>, cap: Duration) -> Result<(), (&'static str, String, usize)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let writer = std::thread::Builder::new().name("status-write".into()).spawn(move || {
+        let mut off = 0;
+        while off < b.len() {
+            let end = (off + CHUNK).min(b.len());
+            let n = unsafe { libc::write(fd, b[off..end].as_ptr() as *const libc::c_void, end - off) };
+            if n > 0 {
+                off += n as usize;
+                let _ = tx.send(Wrote::Progress(off));
+                continue;
             }
-            e => break Err(("error", std::io::Error::from_raw_os_error(e).to_string(), off)),
+            let e = if n == 0 { 0 } else { std::io::Error::last_os_error().raw_os_error().unwrap_or(0) };
+            if e != libc::EINTR {
+                let _ = tx.send(Wrote::Done(Err(e)));
+                return;
+            }
         }
-    };
-    if set {
-        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        let _ = tx.send(Wrote::Done(Ok(())));
+    });
+    if let Err(e) = writer {
+        return Err(("thread", format!("sheepr could not start a thread to write it ({e})"), 0));
     }
-    r
+    let start = Instant::now();
+    let (mut sent, mut idle_end) = (0, start + Duration::from_millis(IDLE_MS));
+    loop {
+        match rx.recv_timeout(idle_end.min(start + cap).saturating_duration_since(Instant::now())) {
+            Ok(Wrote::Progress(n)) => (sent, idle_end) = (n, Instant::now() + Duration::from_millis(IDLE_MS)),
+            Ok(Wrote::Done(Ok(()))) => return Ok(()),
+            Ok(Wrote::Done(Err(libc::EPIPE))) => return Err(("closed", "its reader has closed it".into(), sent)),
+            Ok(Wrote::Done(Err(0))) => return Err(("error", "a write took nothing".into(), sent)),
+            Ok(Wrote::Done(Err(e))) => return Err(("error", std::io::Error::from_raw_os_error(e).to_string(), sent)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if start.elapsed() >= cap => return Err(("cap", format!("its reader did not take it all within {} ms", cap.as_millis()), sent)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Err(("timeout", format!("its reader took nothing for {IDLE_MS} ms"), sent)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(("error", "the writer stopped".into(), sent)),
+        }
+    }
 }
 
 /// The status line, and the fd it goes to (taken: the line is written once).

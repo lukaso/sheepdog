@@ -8,10 +8,11 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
 
 ## Unreleased
 
-- `run --status-fd`: the status line waits at most 1 s for its reader. A reader that does not
-  read it, or that has closed its end, can no longer keep sheepr running after the job is killed:
-  sheepr says on stderr that the line did not arrive (also with `--quiet`) and exits with its
-  usual code ([#14](https://github.com/lukaso/sheepr/issues/14)).
+- `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job
+  is killed. sheepr waits at most 2 s while the reader takes nothing, and 10 s in all; then it
+  says on stderr that the line did not arrive (also with `--quiet`) and exits with its usual
+  code. A closed reader gives that line too, also on a usage error, where it could kill sheepr
+  with SIGPIPE before ([#14](https://github.com/lukaso/sheepr/issues/14)).
 - `sweep`: a journal it skips because it cannot read it, or will not act on it for safety, is said
   on stderr, one line that names the file; the auto-sweep before each `run` puts the same skip in
   the `--status-fd` notes. Before, only a debug build saw it. A job kept with `--leave-strays` is
