@@ -487,15 +487,20 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
         Command::new(sheepr())
             .args(["run", "--", fixture(), "after", go.to_str().unwrap(), sheepr(), "run", "--", fixture(), "escapee-and-wait", rec.to_str().unwrap()])
             .env("SHEEPR_TEST_TRACE", &itrace)
+            // the outer's root shows in `ps` from its spawn, before the outer resumes it: a pause
+            // there (debug seam) keeps that window open, so the cell holds the wait below
+            .env("SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "1500")
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
     );
-    // the outer's root is waiting for GO (the only process whose argv starts `sr-fixture after`);
+    // the outer's root is waiting for GO (the only process whose argv starts `sr-fixture after`),
+    // and runs: it shows from its spawn, suspended until the outer resumes it, and a SIGKILL
+    // before that would leave it suspended for ever (holding the test's output: cargo would hang);
     // end the outer, then let the inner start
     let go_word = go.to_str().unwrap().to_string();
     let waiting = |w: &[&str]| w.get(2) == Some(&"after");
-    assert!(wait_until(10, || common::scan(&go_word, waiting).is_ok_and(|v| v.len() == 1)), "the outer's root is not waiting");
+    assert!(wait_until(10, || common::scan(&go_word, waiting).is_ok_and(|v| v.len() == 1 && !common::stopped(v[0]))), "the outer's root is not waiting");
     common::send_child(&mut o.0, libc::SIGKILL);
     let _ = o.0.wait();
     std::fs::write(&go, b"").unwrap();
@@ -569,9 +574,9 @@ fn a_burst_of_registrations_is_served() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// Silent clients past the cap do not lock registration out: 40 connect and send nothing (32 are
-/// taken, each dropped after its 100 ms deadline); a member that registers 0.5 s later gets its
-/// ack.
+/// Silent clients past the cap do not lock registration out: 40 connect and send nothing (each
+/// is dropped after the outer's read deadline; neither the cap nor the deadline is checked here);
+/// a member that registers 0.5 s later gets its ack.
 #[cfg(target_os = "macos")]
 #[test]
 fn silent_clients_past_the_cap_do_not_lock_registration_out() {
@@ -623,7 +628,9 @@ fn a_middle_run_holds_the_jobs_nested_in_it() {
 /// The outer guard ends a cell's outer with TERM (and CONT) first, so an outer that has not yet
 /// resumed its root (a cell that fails early) kills that root itself; a SIGKILL alone left it
 /// suspended for ever (two roots of the burst cell were left so on the operator's Mac). A debug
-/// seam holds the outer after the spawn, the guard is dropped there, and the root must be gone.
+/// seam holds the outer after the spawn; the cell stops the outer there (as the burst cell does)
+/// and drops the guard: the CONT lets the outer act on the TERM, so it ends well within the
+/// guard's 5 s before a SIGKILL, and the root is gone.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_outer_guard_leaves_no_root_behind() {
@@ -640,13 +647,18 @@ fn the_outer_guard_leaves_no_root_behind() {
     let roots = || common::scan(&mark, |w| w.get(2) == Some(&"sigcount")).unwrap_or_default();
     let spawned = wait_until(10, || roots().len() == 1);
     let suspended = roots().first().is_some_and(|&r| common::stopped(r));
+    let sup = (o.0.id() as i32, sheepr::ident::identity(o.0.id() as i32).unwrap_or(0));
+    let stopped = common::send(sup.0, sup.1, libc::SIGSTOP);
+    let t = Instant::now();
     drop(o);
+    let took = t.elapsed();
     let gone = wait_until(5, || roots().is_empty());
     let left = roots();
     for p in &left {
         common::send(p.0, p.1, libc::SIGKILL);
     }
-    assert!(spawned && suspended, "control: the outer had spawned its root and not yet resumed it");
+    assert!(spawned && suspended && stopped, "control: the outer had spawned its root, not yet resumed it, and was stopped");
+    assert!(took < Duration::from_secs(3), "the guard took {took:?}: the outer did not act on its TERM");
     assert!(gone, "the guard left the root {left:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
