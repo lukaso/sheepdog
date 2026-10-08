@@ -384,14 +384,14 @@ fn puniq_of(p: i32, id: u64) -> Option<u64> {
 /// it (`kill --dry-run`, `ps`) all ask this, so they agree.
 pub(crate) fn skip_reason(j: &Journal, protected: &[(i32, u64)], proved: &Proved, set: &[(i32, u64)]) -> Option<String> {
     if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| j.members.iter().any(|m| m.pid == p && m.id == id)) {
-        return Some(format!("it holds pid {p}, this sweep or one of its ancestors"));
+        return Some(format!("it holds pid {p}, this sheepr or one of its ancestors"));
     }
     let members: HashSet<i32> = set.iter().map(|&(p, _)| p).collect();
     if let Some(&(p, _)) = protected.iter().find(|&&(p, _)| parent(p).is_some_and(|q| members.contains(&q))) {
-        return Some(format!("pid {p}, this sweep or one of its ancestors, is a child of one of its members"));
+        return Some(format!("pid {p}, this sheepr or one of its ancestors, is a child of one of its members"));
     }
     if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| puniq_of(p, id).is_some_and(|u| proved.ever.contains(&u))) {
-        return Some(format!("pid {p}, this sweep or one of its ancestors, was started by this job (by its sheepr or one of its processes)"));
+        return Some(format!("pid {p}, this sheepr or one of its ancestors, was started by this job (by its sheepr or one of its processes)"));
     }
     None
 }

@@ -1169,7 +1169,7 @@ fn inside_an_unjournaled_root(name: &str, cmd: &[&str]) -> (String, String, usiz
 #[test]
 fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
     let (text, _, kept) = inside_an_unjournaled_root("inroot", &["sweep"]);
-    assert!(text.contains("skipped job") && text.contains("was started by this job"), "the sweep inside the root did not skip its job: {text}");
+    assert!(text.contains("skipped job") && text.contains("this sheepr or one of its ancestors, was started by this job"), "the sweep inside the root did not skip its job: {text}");
     assert_eq!(kept, 1, "the journal is kept: {text}");
 }
 
@@ -1183,7 +1183,7 @@ fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
 fn kill_and_its_dry_runs_inside_an_unjournaled_root_refuse_alike() {
     for (name, cmd) in [("inkill", &["kill", "j-0d1d0041"][..]), ("indry", &["kill", "--dry-run", "--json", "j-0d1d0041"][..]), ("inps", &["ps", "--json", "j-0d1d0041"][..])] {
         let (text, out, kept) = inside_an_unjournaled_root(name, cmd);
-        assert!(text.contains("refusing to sweep j-0d1d0041") && text.contains("was started by this job"), "`{}` inside the root did not refuse as kill does: {text}", cmd.join(" "));
+        assert!(text.contains("refusing to sweep j-0d1d0041") && text.contains("this sheepr or one of its ancestors, was started by this job"), "`{}` inside the root did not refuse as kill does: {text}", cmd.join(" "));
         if cmd.contains(&"--json") {
             assert!(refused_json(&out), "`{}`: not one refused line: {out}", cmd.join(" "));
         } else {
@@ -1354,7 +1354,7 @@ fn a_dead_job_that_holds_the_caller_is_refused_by_every_command() {
         let code = w.try_wait().ok().flatten().and_then(|st| st.code());
         let (o, e) = (std::fs::read_to_string(&out).unwrap_or_default(), std::fs::read_to_string(&err).unwrap_or_default());
         let what = cmd.join(" ");
-        assert!(e.contains(&format!("it holds pid {}", wp.0)), "`{what}`: {e}");
+        assert!(e.contains(&format!("it holds pid {}, this sheepr or one of its ancestors", wp.0)), "`{what}`: {e}");
         if cmd[0] == "sweep" {
             assert_eq!(code, Some(0), "`{what}`: {e}");
         } else {
@@ -1372,8 +1372,9 @@ fn a_dead_job_that_holds_the_caller_is_refused_by_every_command() {
 
 /// The dry runs of a dead job (`ps`, `kill --dry-run`) refuse where `kill j-JOBID` refuses, with
 /// the same line and exit 1: when sheepr cannot read its own chain of parent processes (a debug
-/// seam makes this test's parent unreadable), and for a journal kept with `--leave-strays`. The
-/// control: with the chain readable, `ps` lists the job's witness X.
+/// seam makes this test's parent unreadable), for a journal kept with `--leave-strays`, and for a
+/// busy journal (the cell holds its lock, as another sweep would). The control: with the chain
+/// readable, and once the lock is released, `ps` lists the job's witness X.
 #[test]
 fn the_dry_runs_of_a_dead_job_refuse_where_kill_does() {
     let d = scratch("dryref");
@@ -1382,6 +1383,9 @@ fn the_dry_runs_of_a_dead_job_refuse_where_kill_does() {
     let (_x, xp, xr) = decoy(&d, "x");
     forge(&s, &here, "j-0d1d0061", "default", &boot, &pidns, &[xp], false);
     forge(&s, &here, "j-0d1d0062", "default", &boot, &pidns, &[xp], true);
+    let busy = forge(&s, &here, "j-0d1d0063", "default", &boot, &pidns, &[xp], false);
+    let lock = std::fs::File::open(&busy).unwrap();
+    assert_eq!(unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) }, 0);
     let me = std::process::id().to_string();
     let run = |args: &[&str], env: &[(&str, &str)]| {
         let o = Command::new(sheepr()).args(args).env("SHEEPR_TEST_STATE", &s).envs(env.iter().copied()).output().unwrap();
@@ -1390,8 +1394,10 @@ fn the_dry_runs_of_a_dead_job_refuse_where_kill_does() {
     let unreadable = [("SHEEPR_TEST_PARENT_UNREADABLE", me.as_str())];
     let (_, _, kill_err) = run(&["kill", "j-0d1d0061"], &unreadable);
     let (_, _, kept_err) = run(&["kill", "j-0d1d0062"], &[]);
+    let (_, _, busy_err) = run(&["kill", "j-0d1d0063"], &[]);
     assert!(kill_err.contains("cannot follow its own chain"), "control: kill refuses: {kill_err}");
     assert!(kept_err.contains("left its strays"), "control: kill refuses a kept job: {kept_err}");
+    assert!(busy_err.contains("is busy"), "control: kill refuses a busy job: {busy_err}");
     for dry in [&["ps", "--json"][..], &["kill", "--dry-run", "--json"][..]] {
         let what = dry.join(" ");
         let (code, out, err) = run(&[dry, &["j-0d1d0061"]].concat(), &unreadable);
@@ -1400,7 +1406,14 @@ fn the_dry_runs_of_a_dead_job_refuse_where_kill_does() {
         let (code, out, err) = run(&[dry, &["j-0d1d0062"]].concat(), &[]);
         assert_eq!(code, Some(1), "`{what}` of a kept job: {err}");
         assert!(err.trim_end() == kept_err.trim_end() && refused_json(&out), "`{what}` of a kept job: {err}{out}");
+        let (code, out, err) = run(&[dry, &["j-0d1d0063"]].concat(), &[]);
+        assert_eq!(code, Some(1), "`{what}` of a busy job: {err}");
+        assert!(err.trim_end() == busy_err.trim_end() && refused_json(&out), "`{what}` of a busy job: {err}{out}");
     }
+    drop(lock);
+    let (code, out, err) = run(&["ps", "--json", "j-0d1d0063"], &[]);
+    assert_eq!(code, Some(0), "control: the lock released: {err}");
+    assert!(out.lines().any(|l| json::parse(l).is_ok_and(|j| j.get("pid").and_then(Json::num) == Some(xp.0 as f64))), "control: the lock released, ps lists X: {out}");
     let (code, out, err) = run(&["ps", "--json", "j-0d1d0061"], &[]);
     assert_eq!(code, Some(0), "control: {err}");
     assert!(out.lines().any(|l| json::parse(l).is_ok_and(|j| j.get("pid").and_then(Json::num) == Some(xp.0 as f64))), "control: ps lists X: {out}");
