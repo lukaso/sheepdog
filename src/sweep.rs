@@ -7,7 +7,9 @@
 //! held (a live job), or that carries the leave-strays mark, or another owner tag, is skipped.
 //!
 //! The candidates are the journaled members whose identity still matches, plus the live closure
-//! from them (the ppid chain; macOS also `puniq`, through journaled ids of members now dead). A job
+//! from them (the ppid chain; macOS also `puniq`, through journaled ids of members now dead and the
+//! header's supervisor, whose child the root may have no line; an id a live process has links only
+//! for its own line). A job
 //! that holds this sweep's own process or one of its ancestors is skipped whole (never a signal
 //! to the caller). Holding the lock, the sweep journals every closure candidate before its first
 //! signal (a candidate that survives is still named for the next sweep). A candidate that is a
@@ -55,6 +57,8 @@ pub struct Journal {
     pub boot: String,
     pub pidns: String,
     pub owner: String,
+    /// the header's supervisor (pid, identity), if it names one
+    pub sup: Option<(i32, u64)>,
     pub members: Vec<Line>,
     pub leave_strays: bool,
     /// the file does not end in a newline (a line cut short): an append starts a new line
@@ -126,6 +130,7 @@ pub fn open(path: &Path) -> Result<Journal, Skip> {
         boot: h.get("boot").and_then(Json::str).unwrap_or("").to_string(),
         pidns: h.get("pidns").and_then(Json::str).unwrap_or("").to_string(),
         owner: h.get("owner").and_then(Json::str).unwrap_or("default").to_string(),
+        sup: h.get("sup").and_then(|s| Some((num(s, "pid")? as i32, num(s, "id")? as u64))),
         members: Vec::new(),
         leave_strays: false,
         torn,
@@ -180,6 +185,26 @@ pub fn read_header(path: &Path) -> Option<(String, (i32, u64))> {
 }
 
 impl Journal {
+    /// The proved set a sweep of this dead job starts from (also `ps` and `kill --dry-run` of
+    /// it): the journaled members whose identity still matches, and as `puniq` links (macOS) the
+    /// ids of the members and of the header's supervisor. The supervisor starts one process, the
+    /// root, so its id finds a root that a supervisor SIGKILLed between the spawn and the root's
+    /// line never journaled. An id that a live process has is a link only for that line's own
+    /// member: a forged or corrupt line could name launchd (id 1), the original parent of hundreds
+    /// of this user's processes. A list of live ids that is not credible makes no such link.
+    pub(crate) fn proved(&self, protected: &[(i32, u64)]) -> Proved {
+        let known: HashMap<i32, u64> = self.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
+        // Linux has no `puniq`, so no id there is a link
+        #[cfg(target_os = "macos")]
+        let live = crate::macos::live_ids();
+        #[cfg(not(target_os = "macos"))]
+        let live: Option<HashSet<u64>> = None;
+        let dead = |id: u64| live.as_ref().is_some_and(|l| id != 0 && !l.contains(&id));
+        let mut ever: HashSet<u64> = self.members.iter().filter(|m| known.get(&m.pid) == Some(&m.id) || dead(m.id)).map(|m| m.id).collect();
+        ever.extend(self.sup.map(|(_, id)| id).filter(|&id| dead(id)));
+        Proved { known, ever, protected: protected.to_vec() }
+    }
+
     /// Append lines for `new` (closure candidates no line names yet), before any signal to them.
     fn journal_closure(&mut self, new: &[(i32, u64)]) {
         if new.is_empty() {
@@ -297,9 +322,7 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
     if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| j.members.iter().any(|m| m.pid == p && m.id == id)) {
         return Outcome::Skipped(format!("it holds pid {p}, this sweep or one of its ancestors"));
     }
-    let known: HashMap<i32, u64> = j.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
-    let ever: HashSet<u64> = j.members.iter().map(|m| m.id).collect();
-    let mut proved = Proved { known, ever, protected: protected.to_vec() };
+    let mut proved = j.proved(protected);
     let set = proved.scan();
     let members: HashSet<i32> = set.iter().map(|&(p, _)| p).collect();
     if let Some(&(p, _)) = protected.iter().find(|&&(p, _)| parent(p).is_some_and(|q| members.contains(&q))) {

@@ -700,13 +700,11 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
     }
     if dry_run {
         // what a sweep of this dead job would reach: its journaled members still alive and
-        // their closure (the sweep's own scan)
+        // their closure (the sweep's own proved set and scan)
         let mut rows = Vec::new();
         if let Ok(j) = crate::sweep::open_fenced(&path) {
-            let known: HashMap<i32, u64> = j.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
-            let ever: HashSet<u64> = j.members.iter().map(|m| m.id).collect();
-            let named: HashSet<(i32, u64)> = known.iter().map(|(&p, &id)| (p, id)).collect();
-            let mut proved = Proved { known, ever, protected: protected().unwrap_or_default() };
+            let mut proved = j.proved(&protected().unwrap_or_default());
+            let named: HashSet<(i32, u64)> = proved.known.iter().map(|(&p, &id)| (p, id)).collect();
             for (p, id) in proved.scan() {
                 let ev = if named.contains(&(p, id)) { "journal" } else { "closure" };
                 rows.push(Row { pid: p, id, class: "proved", evidence: vec![ev.to_string()] });

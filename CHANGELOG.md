@@ -6,6 +6,15 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
+## Unreleased
+
+- `sweep` (macOS): a job whose sheepr was killed with SIGKILL just after it started the job's first
+  process, before it wrote that process into the journal, left the process stopped for ever, and
+  `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, and `ps` or
+  `kill --dry-run` of such a job now find that process by its parent: the job's sheepr, as the
+  journal's header names it. A journal line that names a live process at another pid (an edited
+  or damaged journal) no longer brings that process's children into a sweep.
+
 ## 0.1.1 (2026-10-08)
 
 - `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job

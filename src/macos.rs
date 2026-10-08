@@ -122,6 +122,17 @@ fn all_pids() -> Vec<pid_t> {
     buf
 }
 
+/// The uniqueid of every live process, of any user: the uniqueid flavor answers for another
+/// user's process, where the BSD info is refused (measured 2026-10-08: 1,064 of 1,065 pids,
+/// launchd's id 1 among them). None when the list is not credible: it lacks this process.
+pub fn live_ids() -> Option<std::collections::HashSet<u64>> {
+    // debug seam: the list comes back empty
+    let pids = if crate::seam_flag("SHEEPR_TEST_LIVE_IDS_EMPTY") { Vec::new() } else { all_pids() };
+    let ids: std::collections::HashSet<u64> = pids.into_iter().filter(|&p| p > 0).filter_map(|p| uniq(p).map(|u| u.0)).collect();
+    let me = uniq(unsafe { libc::getpid() })?.0;
+    ids.contains(&me).then_some(ids)
+}
+
 struct Info {
     pid: pid_t,
     uniq: u64,
@@ -1167,6 +1178,9 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
             crate::status::set_root_pid(root);
             crate::status::set_root("signaled"); // until the root's own end is known
             crate::seam_sleep("SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS");
+            if crate::seam_flag("SHEEPR_TEST_KILL_BEFORE_ROOT_JOURNAL") {
+                unsafe { libc::raise(libc::SIGKILL) }; // raw signal site: this process (PHASE2.md §0.3)
+            }
             if let Some((u, _)) = uniq(root) {
                 tracker.borrow_mut().ever.insert(u);
                 // before the resuming CONT below: the root is journaled before it runs
