@@ -512,20 +512,31 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
 #[test]
 fn a_burst_of_registrations_is_served() {
     let d = scratch("burst");
-    let (go, trace) = (d.join("go"), d.join("trace"));
+    let (go, trace, started) = (d.join("go"), d.join("trace"), d.join("started"));
     // (the wait for GO is bounded: 10 s)
-    let root = format!(r#"n=0; until [ -e "{}" ] || [ $n -ge 500 ]; do sleep 0.02; n=$((n+1)); done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#, go.display(), d.display());
+    let root = format!(
+        r#": >"{}"; n=0; until [ -e "{}" ] || [ $n -ge 500 ]; do sleep 0.02; n=$((n+1)); done; for i in $(seq 1 40); do "$FX" register env 0 self good "{}/out$i" & done; wait"#,
+        started.display(),
+        go.display(),
+        d.display()
+    );
     let mut o = Outer(
         Command::new(sheepr())
             .args(["run", "--", "/bin/sh", "-c", &root])
             .env("FX", fixture())
             .env("SHEEPR_TEST_TRACE", &trace)
             .env("SR_REG_TIMEOUT_MS", "15000")
+            // the outer listens before it starts and resumes the root: a pause there (debug seam)
+            // keeps the window open, so the cell holds the wait below (issue #11)
+            .env("SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "500")
             .stdin(Stdio::null())
             .spawn()
             .unwrap(),
     );
     assert!(wait_until(10, || read(&trace).lines().any(|l| l.starts_with("listening "))), "the outer is not listening");
+    // stopped before it resumed its root, the outer would hold the root too, and no client would
+    // start (issue #11: "0 of 40", every client refused once the cell ended the outer)
+    assert!(wait_until(10, || started.exists()), "the root did not start");
     let sup = (o.0.id() as i32, sheepr::ident::identity(o.0.id() as i32).unwrap_or(0));
     common::send(sup.0, sup.1, libc::SIGSTOP);
     std::fs::write(&go, b"").unwrap();
