@@ -132,14 +132,21 @@ fn trial(d: &Path, esc: &Path, sups: &[PathBuf], launch: &[String]) -> Result<bo
     Ok(gone)
 }
 
-/// The outer run of a cell, SIGKILLed when the cell ends (a panic too): a live outer holds the
-/// test's output pipe, and cargo would wait for it.
+/// The outer run of a cell, ended when the cell ends (a panic too): a live outer holds the test's
+/// output pipe, and cargo would wait for it. TERM first (and CONT, for an outer the cell stopped),
+/// so the outer ends its own job, and kills a root it has not resumed yet: a SIGKILL alone left
+/// such a root suspended for ever (issue #11). SIGKILL after 5 s.
 struct Outer(Child);
 impl Drop for Outer {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
-            common::send_child(&mut self.0, libc::SIGKILL);
-            let _ = self.0.wait();
+            common::send_child(&mut self.0, libc::SIGTERM);
+            common::send_child(&mut self.0, libc::SIGCONT);
+            let c = &mut self.0;
+            if !wait_until(5, || c.try_wait().ok().flatten().is_some()) {
+                common::send_child(&mut self.0, libc::SIGKILL);
+                let _ = self.0.wait();
+            }
         }
     }
 }
@@ -506,8 +513,9 @@ fn an_inner_run_whose_responsible_process_died_still_disclaims() {
 
 
 /// A burst: 40 members register with one outer at once (the outer is stopped while they
-/// connect, so all 40 wait in its listen backlog); every one gets its ack: the outer takes at most
-/// 32 pending connections and leaves the rest in the backlog, never refusing a member for that.
+/// connect, so all 40 wait in its listen backlog, and none is answered before it runs again);
+/// every one gets its ack: past its cap of pending connections the outer leaves the rest in the
+/// backlog, never refusing a member for that (the cap's value is not checked here).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_burst_of_registrations_is_served() {
@@ -538,7 +546,7 @@ fn a_burst_of_registrations_is_served() {
     // start (issue #11: "0 of 40", every client refused once the cell ended the outer)
     assert!(wait_until(10, || started.exists()), "the root did not start");
     let sup = (o.0.id() as i32, sheepr::ident::identity(o.0.id() as i32).unwrap_or(0));
-    common::send(sup.0, sup.1, libc::SIGSTOP);
+    let stopped = common::send(sup.0, sup.1, libc::SIGSTOP);
     std::fs::write(&go, b"").unwrap();
     // all 40 have connected and sent (queued in the stopped outer's backlog) before it runs
     // again; the clients wait 15 s for their answer (SR_REG_TIMEOUT_MS), so a slow start under
@@ -546,8 +554,12 @@ fn a_burst_of_registrations_is_served() {
     let conn = || (1..=40).filter(|i| d.join(format!("out{i}.conn")).exists()).count();
     let queued = wait_until(10, || conn() == 40);
     let n = conn();
+    // nobody was answered while the outer was stopped: all 40 waited in its backlog
+    let answered = (1..=40).filter(|i| d.join(format!("out{i}")).exists()).count();
     common::send(sup.0, sup.1, libc::SIGCONT);
+    assert!(stopped, "control: the outer was stopped");
     assert!(queued, "only {n} of 40 clients connected before the outer ran again");
+    assert_eq!(answered, 0, "clients were answered while the outer was stopped");
     let code = finished(&mut o.0, 30).and_then(|s| s.code());
     let trace = read(&trace);
     let answers: Vec<String> = (1..=40).map(|i| read(&d.join(format!("out{i}")))).collect();
@@ -605,5 +617,36 @@ fn a_middle_run_holds_the_jobs_nested_in_it() {
     let _ = finished(&mut o.0, 20);
     assert!(a_ended && o_running, "A ended {a_ended}, O still running {o_running}");
     assert!(gone, "B's escapee survived A's end");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The outer guard ends a cell's outer with TERM (and CONT) first, so an outer that has not yet
+/// resumed its root (a cell that fails early) kills that root itself; a SIGKILL alone left it
+/// suspended for ever (two roots of the burst cell were left so on the operator's Mac). A debug
+/// seam holds the outer after the spawn, the guard is dropped there, and the root must be gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_outer_guard_leaves_no_root_behind() {
+    let d = scratch("guard");
+    let mark = d.join("root").display().to_string();
+    let o = Outer(
+        Command::new(sheepr())
+            .args(["run", "--", fixture(), "sigcount", &mark])
+            .env("SHEEPR_TEST_SLEEP_AFTER_SPAWN_MS", "2000")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let roots = || common::scan(&mark, |w| w.get(2) == Some(&"sigcount")).unwrap_or_default();
+    let spawned = wait_until(10, || roots().len() == 1);
+    let suspended = roots().first().is_some_and(|&r| common::stopped(r));
+    drop(o);
+    let gone = wait_until(5, || roots().is_empty());
+    let left = roots();
+    for p in &left {
+        common::send(p.0, p.1, libc::SIGKILL);
+    }
+    assert!(spawned && suspended, "control: the outer had spawned its root and not yet resumed it");
+    assert!(gone, "the guard left the root {left:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
