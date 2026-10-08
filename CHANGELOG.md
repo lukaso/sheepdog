@@ -6,7 +6,7 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
-## Unreleased
+## 0.1.1 (2026-10-08)
 
 - `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job
   is killed. sheepr gives up when the fd accepts nothing for 10 s, and at about 30 s in all; then
