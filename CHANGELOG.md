@@ -10,7 +10,7 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
 
 - `sweep` (macOS): a job whose sheepr was killed with SIGKILL just after it started the job's first
   process, before it wrote that process into the journal, left the process stopped for ever, and
-  `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, `kill j-…`,
+  `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, `kill j-JOBID`,
   and `ps` or `kill --dry-run` of such a job now find that process through the sheepr that started
   it, as the journal's header names it.
 - `sweep`, `kill` and `ps` (macOS): a line of an edited or damaged journal that names launchd,
@@ -20,10 +20,14 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   or `su`) and is still alive no longer leads them to its children that sheepr had not recorded
   yet (started just before sheepr died, or after); 0.1.1 ended those. Its children that the
   journal names are still ended.
-- `sweep` (macOS): a sweep run from inside a process that a dead job started (its original parent
-  was the job's sheepr or one of the job's processes, for example a terminal opened from the job)
-  now skips that job, says so, and keeps its journal, as it already did for a job that holds the
-  sweep's own process. Before, it ended the job's other processes and removed the journal.
+- `sweep`, the auto-sweep and `kill j-JOBID` (macOS): run from inside a process that a dead job
+  started (its original parent was the job's sheepr or one of the job's processes, for example a
+  terminal opened from the job), they leave that job alone and keep its journal, as they already
+  did for a job that holds their own process: `sweep` says it skipped the job, and `kill j-JOBID`
+  refuses with exit 1. Before, they ended the job's other processes and removed the journal.
+- `kill --dry-run j-JOBID` and `ps j-JOBID`: for a dead job that `kill j-JOBID` would refuse to
+  sweep (it holds or started the caller's process), they now refuse with the same line and exit 1.
+  Before, they listed the job's processes.
 
 ## 0.1.1 (2026-10-08)
 

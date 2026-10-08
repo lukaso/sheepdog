@@ -721,9 +721,16 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
         // their closure (the sweep's own proved set and scan)
         let mut rows = Vec::new();
         if let Ok(j) = crate::sweep::open_fenced(&path) {
-            let mut proved = j.proved(&protected().unwrap_or_default());
+            let protected = protected().unwrap_or_default();
+            let mut proved = j.proved(&protected);
             let named: HashSet<(i32, u64)> = proved.known.iter().map(|(&p, &id)| (p, id)).collect();
-            for (p, id) in proved.scan() {
+            let set = proved.scan();
+            // the sweep's own question: a job it would skip, it refuses here too
+            if let Some(why) = crate::sweep::skip_reason(&j, &protected, &proved, &set) {
+                crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
+                return Err(1);
+            }
+            for (p, id) in set {
                 let ev = if named.contains(&(p, id)) { "journal" } else { "closure" };
                 rows.push(Row { pid: p, id, class: "proved", evidence: vec![ev.to_string()] });
             }

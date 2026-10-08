@@ -376,23 +376,35 @@ fn puniq_of(p: i32, id: u64) -> Option<u64> {
     }
 }
 
+/// Why a sweep of this dead job skips it whole (never a signal to the caller, and the journal
+/// stays), or None: the job holds this sweep's own process or one of its ancestors (`protected`),
+/// or started one: its parent is in `set` (the first scan's), or (macOS) its original parent is a
+/// link of `proved` (the header's supervisor, or a member live or dead: a root only the header
+/// ties to the job, a terminal a member started). The sweep, `kill j-JOBID` and the dry runs of
+/// it (`kill --dry-run`, `ps`) all ask this, so they agree.
+pub(crate) fn skip_reason(j: &Journal, protected: &[(i32, u64)], proved: &Proved, set: &[(i32, u64)]) -> Option<String> {
+    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| j.members.iter().any(|m| m.pid == p && m.id == id)) {
+        return Some(format!("it holds pid {p}, this sweep or one of its ancestors"));
+    }
+    let members: HashSet<i32> = set.iter().map(|&(p, _)| p).collect();
+    if let Some(&(p, _)) = protected.iter().find(|&&(p, _)| parent(p).is_some_and(|q| members.contains(&q))) {
+        return Some(format!("pid {p}, this sweep or one of its ancestors, is a child of one of its members"));
+    }
+    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| puniq_of(p, id).is_some_and(|u| proved.ever.contains(&u))) {
+        return Some(format!("pid {p}, this sweep or one of its ancestors, was started by this job (by its sheepr or one of its processes)"));
+    }
+    None
+}
+
 /// Sweep one open journal in `mode`. `protected`: this process and its ancestors.
 pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Outcome {
     let explicit = matches!(mode, Mode::Explicit);
-    // a job that holds this sweep's own process or an ancestor is never touched
-    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| j.members.iter().any(|m| m.pid == p && m.id == id)) {
-        return Outcome::Skipped(format!("it holds pid {p}, this sweep or one of its ancestors"));
-    }
+    // the scan sends nothing: a job that holds or started this sweep's process or an ancestor is
+    // then skipped whole
     let mut proved = j.proved(protected);
     let set = proved.scan();
-    let members: HashSet<i32> = set.iter().map(|&(p, _)| p).collect();
-    if let Some(&(p, _)) = protected.iter().find(|&&(p, _)| parent(p).is_some_and(|q| members.contains(&q))) {
-        return Outcome::Skipped(format!("pid {p}, this sweep or one of its ancestors, is a child of one of its members"));
-    }
-    // (macOS) or was started by the job: its original parent is the header's supervisor or a
-    // member, live or dead (a root only the header ties to the job, a terminal a member started)
-    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| puniq_of(p, id).is_some_and(|u| proved.ever.contains(&u))) {
-        return Outcome::Skipped(format!("pid {p}, this sweep or one of its ancestors, was started by this job (by its sheepr or one of its processes)"));
+    if let Some(why) = skip_reason(&j, protected, &proved, &set) {
+        return Outcome::Skipped(why);
     }
     let mut named: HashSet<(i32, u64)> = j.members.iter().map(|m| (m.pid, m.id)).collect();
     // every candidate is journaled before its first signal, also one a later scan finds

@@ -1119,23 +1119,25 @@ fn kill_of_a_journaled_pid_links_no_live_id_elsewhere() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// A sweep from inside a root that only the header's supervisor ties to its dead job skips that
-/// job whole and keeps its journal (macOS), as for a root a line names: the root is the sweep's
-/// ancestor (never a signal to the caller, and the record stays). The seam leaves the root
-/// unjournaled; the cell continues it (as something else may), and it runs `sheepr sweep` as its
-/// child. The root is the fixture's `nosession`, which does not exec again: `/bin/sh` is a
-/// trampoline that execs the shell, and an exec after the reparenting resets `puniq` to 1.
+/// Runs `sheepr CMD` from inside a root that only the header's supervisor ties to its dead job
+/// (macOS): the seam leaves the root unjournaled; the cell continues it (as something else may),
+/// and it runs `sheepr CMD` as its child. The root is the fixture's `nosession`, which does not
+/// exec again: `/bin/sh` is a trampoline that execs the shell, and an exec after the reparenting
+/// resets `puniq` to 1. The job is j-0d1d0041. Returns (stderr, stdout, journals kept) once the
+/// root has ended.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
-    let d = scratch("inroot");
+fn inside_an_unjournaled_root(name: &str, cmd: &[&str]) -> (String, String, usize) {
+    let d = scratch(name);
     let s = state(&d);
     let mark = d.join("inner").display().to_string();
-    let err = d.join("err");
+    let (err, out) = (d.join("err"), d.join("out"));
     let mut c = Command::new(sheepr())
-        .args(["run", "--", fixture(), "nosession", &mark, sheepr(), "sweep"])
+        .args(["run", "--", fixture(), "nosession", &mark, sheepr()])
+        .args(cmd)
         .env("SHEEPR_TEST_STATE", &s)
         .env("SHEEPR_TEST_KILL_BEFORE_ROOT_JOURNAL", "1")
+        .env("SHEEPR_TEST_JOB_ID", "0d1d0041")
+        .stdout(std::fs::File::create(&out).unwrap())
         .stderr(std::fs::File::create(&err).unwrap())
         .spawn()
         .unwrap();
@@ -1150,15 +1152,40 @@ fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
     if let Some(&r) = roots.first() {
         common::send(r.0, r.1, libc::SIGCONT);
     }
-    let said = || std::fs::read_to_string(&err).unwrap_or_default();
-    let ran = wait_until(30, || said().lines().any(|l| l.contains("swept") || l.contains("skipped")) && said().ends_with('\n'));
-    let text = said();
+    // the root waits for its child and then exits as it did
+    let ran = roots.first().is_some_and(|&r| wait_until(30, || !common::alive(r)));
+    let (e, o) = (std::fs::read_to_string(&err).unwrap_or_default(), std::fs::read_to_string(&out).unwrap_or_default());
     let kept = journals(&s).len();
     assert!(stopped_before, "control: one root, left stopped: {roots:?}");
-    assert!(ran, "control: the continued root ran its sweep: {text}");
+    assert!(ran, "control: the continued root ran `sheepr {}` and ended: {e}", cmd.join(" "));
+    let _ = std::fs::remove_dir_all(&d);
+    (e, o, kept)
+}
+
+/// A sweep from inside a root that only the header's supervisor ties to its dead job skips that
+/// job whole and keeps its journal (macOS), as for a root a line names: the root is the sweep's
+/// ancestor (never a signal to the caller, and the record stays).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
+    let (text, _, kept) = inside_an_unjournaled_root("inroot", &["sweep"]);
     assert!(text.contains("skipped job") && text.contains("was started by this job"), "the sweep inside the root did not skip its job: {text}");
     assert_eq!(kept, 1, "the journal is kept: {text}");
-    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `kill j-JOBID` from inside such a root refuses (it sweeps a dead job the same way), and the
+/// dry runs that say what it would do (`kill --dry-run`, `ps`) refuse with the same line and list
+/// no process (macOS).
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_and_its_dry_runs_inside_an_unjournaled_root_refuse_alike() {
+    for (name, cmd) in [("inkill", &["kill", "j-0d1d0041"][..]), ("indry", &["kill", "--dry-run", "--json", "j-0d1d0041"][..]), ("inps", &["ps", "--json", "j-0d1d0041"][..])] {
+        let (text, out, kept) = inside_an_unjournaled_root(name, cmd);
+        let rows = out.lines().filter(|l| json::parse(l).is_ok_and(|j| j.get("pid").is_some())).count();
+        assert!(text.contains("refusing to sweep j-0d1d0041") && text.contains("was started by this job"), "`{}` inside the root did not refuse as kill does: {text}", cmd.join(" "));
+        assert_eq!(rows, 0, "`{}` listed processes of a job kill would not touch: {out}", cmd.join(" "));
+        assert_eq!(kept, 1, "`{}`: the journal is kept: {text}", cmd.join(" "));
+    }
 }
 
 /// A journal line that names a live process the scan can never hold as a member (launchd: pid 1,
@@ -1242,15 +1269,16 @@ fn member_gone_before_the_scan(name: &str, seam: &str, args: impl Fn(&Path, (i32
         .spawn()
         .unwrap());
     let paused = wait_until(15, || ready.exists());
+    let in_pause = Instant::now();
     end_decoy(&mut p); // P ends inside the pause: C is an orphan whose `puniq` names it
-    let p_gone = wait_until(2, || !common::alive(pp));
+    let p_gone = wait_until(2, || !common::alive(pp)) && in_pause.elapsed() < Duration::from_millis(2500);
     let r = &mut run;
     let ended = wait_until(30, || r.try_wait().ok().flatten().is_some());
     let code = run.try_wait().ok().flatten().and_then(|st| st.code());
     let c_gone = wait_until(5, || !common::alive(c));
     let said = std::fs::read_to_string(&err).unwrap_or_default();
     assert!(paused, "control: sheepr paused after the fence: {said}");
-    assert!(p_gone, "control: P ended inside the pause");
+    assert!(p_gone, "control: P ended inside the 3 s pause (within 2.5 s of it)");
     assert!(ended, "sheepr did not end: {said}");
     let _ = std::fs::remove_dir_all(&d);
     (code, said, c_gone)
