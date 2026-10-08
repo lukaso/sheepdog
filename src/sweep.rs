@@ -210,7 +210,17 @@ fn held_of(procs: Vec<crate::kill::Proc>, uid: u32) -> HashSet<(i32, u64)> {
 impl Fence {
     pub(crate) fn now() -> Fence {
         #[cfg(target_os = "macos")]
-        let f = Fence { live: crate::macos::live_ids(), held: held_of(crate::macos::procs(), unsafe { libc::getuid() }) };
+        let f = {
+            // The order is load-bearing: the held set first, then the live ids. A member that ends
+            // between the two reads is then held, and gone at the second read: a link either way.
+            // Read the other way round, it would be live at the first read and missing from the
+            // held set, so no link, and its orphans would be lost.
+            let held = held_of(crate::macos::procs(), unsafe { libc::getuid() });
+            // debug seam: a pause between the two reads
+            crate::seam_sleep("SHEEPR_TEST_SLEEP_BETWEEN_FENCE_READS_MS");
+            let live = crate::macos::live_ids();
+            Fence { live, held }
+        };
         #[cfg(not(target_os = "macos"))]
         let f = Fence { live: None, held: HashSet::new() };
         // debug seam: a pause after the read, before the caller's first scan

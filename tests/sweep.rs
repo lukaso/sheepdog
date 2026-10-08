@@ -1209,11 +1209,12 @@ fn a_journal_line_naming_launchd_links_nothing() {
 }
 
 /// A journaled member alive when the fence reads the live processes, and gone before the first
-/// scan (a debug seam pauses in between; the cell ends P there), still links its orphan (macOS):
-/// its id was one the scan could hold (alive at its pid, this user's), so it is a link. The
-/// sweep ends C. `run` starts `sheepr` with the seam and waits for it to pause.
+/// scan, still links its orphan (macOS): its id was one the scan could hold (alive at its pid, this
+/// user's), so it is a link, and the sweep ends C. A debug seam pauses after the fence's two reads,
+/// or between them (the held set is read first: a member that ends between the reads is then held,
+/// and gone at the second read); the cell ends P in the pause.
 #[cfg(target_os = "macos")]
-fn member_gone_before_the_scan(name: &str, args: impl Fn(&Path, (i32, u64)) -> Vec<String>, line_under: bool) -> (Option<i32>, String, bool) {
+fn member_gone_before_the_scan(name: &str, seam: &str, args: impl Fn(&Path, (i32, u64)) -> Vec<String>, line_under: bool) -> (Option<i32>, String, bool) {
     use std::io::Write;
     let d = scratch(name);
     let (here, boot, pidns) = folder(&d);
@@ -1234,7 +1235,7 @@ fn member_gone_before_the_scan(name: &str, args: impl Fn(&Path, (i32, u64)) -> V
     let mut run = Run(Command::new(sheepr())
         .args(args(&s, tp))
         .env("SHEEPR_TEST_STATE", &s)
-        .env("SHEEPR_TEST_SLEEP_AFTER_FENCE_MS", "3000")
+        .env(seam, "3000")
         .env("SHEEPR_TEST_READY_FILE", &ready)
         .env("SHEEPR_TEST_DEADLINE_MS", "2000")
         .stderr(std::fs::File::create(&err).unwrap())
@@ -1258,16 +1259,20 @@ fn member_gone_before_the_scan(name: &str, args: impl Fn(&Path, (i32, u64)) -> V
 #[cfg(target_os = "macos")]
 #[test]
 fn a_member_gone_before_the_sweeps_scan_still_links_its_orphan() {
-    let (code, said, c_gone) = member_gone_before_the_scan("gonesw", |_, _| vec!["sweep".into()], false);
-    assert_eq!(code, Some(0), "{said}");
-    assert!(c_gone, "the sweep left the orphan of a member that was alive at the fence: {said}");
-    assert!(said.contains("swept 1 dead job (1 process ended)"), "{said}");
+    for (name, seam) in [("gonesw", "SHEEPR_TEST_SLEEP_AFTER_FENCE_MS"), ("gonesw2", "SHEEPR_TEST_SLEEP_BETWEEN_FENCE_READS_MS")] {
+        let (code, said, c_gone) = member_gone_before_the_scan(name, seam, |_, _| vec!["sweep".into()], false);
+        assert_eq!(code, Some(0), "{seam}: {said}");
+        assert!(c_gone, "{seam}: the sweep left the orphan of a member that was alive at the fence: {said}");
+        assert!(said.contains("swept 1 dead job (1 process ended)"), "{seam}: {said}");
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn a_member_gone_before_kills_scan_still_links_its_orphan() {
-    let (code, said, c_gone) = member_gone_before_the_scan("gonekill", |_, t| vec!["kill".into(), format!("{}:{}", t.0, t.1)], true);
-    assert_eq!(code, Some(0), "{said}");
-    assert!(c_gone, "kill left the orphan of a member that was alive at the fence: {said}");
+    for (name, seam) in [("gonekill", "SHEEPR_TEST_SLEEP_AFTER_FENCE_MS"), ("gonekill2", "SHEEPR_TEST_SLEEP_BETWEEN_FENCE_READS_MS")] {
+        let (code, said, c_gone) = member_gone_before_the_scan(name, seam, |_, t| vec!["kill".into(), format!("{}:{}", t.0, t.1)], true);
+        assert_eq!(code, Some(0), "{seam}: {said}");
+        assert!(c_gone, "{seam}: kill left the orphan of a member that was alive at the fence: {said}");
+    }
 }
