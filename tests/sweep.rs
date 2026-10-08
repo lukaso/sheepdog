@@ -1023,10 +1023,10 @@ fn parent_and_child(d: &Path) -> (Decoy, (i32, u64), (i32, u64), PathBuf) {
     (p, pp, c, r)
 }
 
-/// A journal id is a `puniq` link (macOS) only while no live process has it, or while the live
-/// one is that line's own member: a header or a member line that names a live process's id at
-/// another pid (forged or corrupt; launchd's id 1 is the original parent of hundreds of this
-/// user's processes) brings in none of its children. P is a live `sh` whose child C is a counting
+/// A journal id is a `puniq` link (macOS) only when its process is one the scan can hold (alive at
+/// the line's pid, this user's, above pid 1), or no live process has it: a header or a member line
+/// that names a live process's id at another pid (forged or corrupt; launchd's id 1 is the
+/// original parent of hundreds of this user's processes) brings in none of its children. P is a live `sh` whose child C is a counting
 /// decoy (C's `puniq` is P's id). A forged dead job names P's id as its supervisor, then another
 /// names it in a member line at another pid: C gets nothing. Once P is gone, a list of live ids
 /// read as if other users' processes were refused (a debug seam) lacks launchd, so it is not
@@ -1040,14 +1040,19 @@ fn a_journal_id_of_a_live_process_elsewhere_links_none_of_its_children() {
     let s = state(&d);
     let (mut p, pp, c, r) = parent_and_child(&d);
     let _ends = Ends(c);
-    let as_sup = |job: &str| {
+    let as_sup_at = |job: &str, pid: i32| {
         let path = forge(&s, &here, job, "default", &boot, &pidns, &[], false);
-        let text = std::fs::read_to_string(&path).unwrap().replace(&format!("\"sup\":{{\"pid\":999999,\"id\":{NEVER}}}"), &format!("\"sup\":{{\"pid\":999999,\"id\":{}}}", pp.1));
+        let text = std::fs::read_to_string(&path).unwrap().replace(&format!("\"sup\":{{\"pid\":999999,\"id\":{NEVER}}}"), &format!("\"sup\":{{\"pid\":{pid},\"id\":{}}}", pp.1));
         std::fs::write(&path, text).unwrap();
     };
+    let as_sup = |job: &str| as_sup_at(job, 999999);
     as_sup("j-0d1d0001");
     let (code_sup, said_sup) = sweep_said(&s, &[]);
     let after_sup = (common::alive(c), common::stopped(c), counted(&r));
+    // a header naming P at its own pid: a dead job's supervisor is gone, so a live one is no link
+    as_sup_at("j-0d1d0005", pp.0);
+    let (code_own, said_own) = sweep_said(&s, &[]);
+    let after_own = (common::alive(c), common::stopped(c), counted(&r));
     forge(&s, &here, "j-0d1d0002", "default", &boot, &pidns, &[(999998, pp.1)], false);
     let (code_line, said_line) = sweep_said(&s, &[]);
     let after_line = (common::alive(c), common::stopped(c), counted(&r));
@@ -1061,6 +1066,8 @@ fn a_journal_id_of_a_live_process_elsewhere_links_none_of_its_children() {
     let c_gone = wait_until(5, || !common::alive(c));
     assert_eq!(code_sup, Some(0), "{said_sup}");
     assert_eq!(after_sup, (true, false, 0), "a header naming a live process's id reached its child: {said_sup}");
+    assert_eq!(code_own, Some(0), "{said_own}");
+    assert_eq!(after_own, (true, false, 0), "a header naming a live process at its own pid reached its child: {said_own}");
     assert_eq!(code_line, Some(0), "{said_line}");
     assert_eq!(after_line, (true, false, 0), "a member line naming a live process's id at another pid reached its child: {said_line}");
     assert!(p_gone, "control: P ended");
@@ -1175,9 +1182,16 @@ fn a_journal_line_naming_launchd_links_nothing() {
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(f, "{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":{},\"pid_id\":{},\"puniq\":null,\"cmd\":\"x\"}}", line.0, line.1, tp.0, tp.1).unwrap();
     };
+    // the proved rows only: a suspect row (an orphan in T's session that another cell left) is no
+    // link's work
     let listed = |what: &str| -> Vec<i32> {
         let o = Command::new(sheepr()).args(["ps", "--json", what]).env("SHEEPR_TEST_STATE", &s).output().unwrap();
-        String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| json::parse(l).ok()).filter_map(|j| j.get("pid").and_then(Json::num).map(|n| n as i32)).collect()
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| json::parse(l).ok())
+            .filter(|j| j.get("class").and_then(Json::str) != Some("suspect"))
+            .filter_map(|j| j.get("pid").and_then(Json::num).map(|n| n as i32))
+            .collect()
     };
     let t_arg = format!("{}:{}", tp.0, tp.1);
     job(launchd);
@@ -1192,4 +1206,68 @@ fn a_journal_line_naming_launchd_links_nothing() {
     assert!(ctl_t.contains(&c.0), "control: ps of T lists C through the line of its gone parent: {ctl_t:?}");
     assert!(ctl_job.contains(&c.0), "control: ps of the job lists C through the line of its gone parent: {ctl_job:?}");
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A journaled member alive when the fence reads the live processes, and gone before the first
+/// scan (a debug seam pauses in between; the cell ends P there), still links its orphan (macOS):
+/// its id was one the scan could hold (alive at its pid, this user's), so it is a link. The
+/// sweep ends C. `run` starts `sheepr` with the seam and waits for it to pause.
+#[cfg(target_os = "macos")]
+fn member_gone_before_the_scan(name: &str, args: impl Fn(&Path, (i32, u64)) -> Vec<String>, line_under: bool) -> (Option<i32>, String, bool) {
+    use std::io::Write;
+    let d = scratch(name);
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let (mut p, pp, c, _r) = parent_and_child(&d);
+    let _ends = Ends(c);
+    let (_t, tp, _) = decoy(&d, "t");
+    // a dead job naming P at its own pid: as a member line, or (for `kill T`) under T
+    let path = forge(&s, &here, "j-0d1d0031", "default", &boot, &pidns, &[tp], false);
+    if line_under {
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":{},\"pid_id\":{},\"puniq\":null,\"cmd\":\"x\"}}", pp.0, pp.1, tp.0, tp.1).unwrap();
+    } else {
+        forge(&s, &here, "j-0d1d0031", "default", &boot, &pidns, &[pp], false);
+    }
+    let ready = d.join("ready");
+    let err = d.join("err");
+    let mut run = Run(Command::new(sheepr())
+        .args(args(&s, tp))
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_SLEEP_AFTER_FENCE_MS", "3000")
+        .env("SHEEPR_TEST_READY_FILE", &ready)
+        .env("SHEEPR_TEST_DEADLINE_MS", "2000")
+        .stderr(std::fs::File::create(&err).unwrap())
+        .spawn()
+        .unwrap());
+    let paused = wait_until(15, || ready.exists());
+    end_decoy(&mut p); // P ends inside the pause: C is an orphan whose `puniq` names it
+    let p_gone = wait_until(2, || !common::alive(pp));
+    let r = &mut run;
+    let ended = wait_until(30, || r.try_wait().ok().flatten().is_some());
+    let code = run.try_wait().ok().flatten().and_then(|st| st.code());
+    let c_gone = wait_until(5, || !common::alive(c));
+    let said = std::fs::read_to_string(&err).unwrap_or_default();
+    assert!(paused, "control: sheepr paused after the fence: {said}");
+    assert!(p_gone, "control: P ended inside the pause");
+    assert!(ended, "sheepr did not end: {said}");
+    let _ = std::fs::remove_dir_all(&d);
+    (code, said, c_gone)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_member_gone_before_the_sweeps_scan_still_links_its_orphan() {
+    let (code, said, c_gone) = member_gone_before_the_scan("gonesw", |_, _| vec!["sweep".into()], false);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(c_gone, "the sweep left the orphan of a member that was alive at the fence: {said}");
+    assert!(said.contains("swept 1 dead job (1 process ended)"), "{said}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_member_gone_before_kills_scan_still_links_its_orphan() {
+    let (code, said, c_gone) = member_gone_before_the_scan("gonekill", |_, t| vec!["kill".into(), format!("{}:{}", t.0, t.1)], true);
+    assert_eq!(code, Some(0), "{said}");
+    assert!(c_gone, "kill left the orphan of a member that was alive at the fence: {said}");
 }

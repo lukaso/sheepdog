@@ -12,8 +12,9 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   process, before it wrote that process into the journal, left the process stopped for ever, and
   `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, and `ps` or
   `kill --dry-run` of such a job now find that process by its parent: the job's sheepr, as the
-  journal's header names it. A journal line that names a live process (an edited or damaged
-  journal) no longer brings that process's children into a sweep, a `kill <pid>` or a `ps`.
+  journal's header names it. A journal line (in an edited or damaged journal) that names launchd,
+  another user's process, or a live process at another pid than its own no longer brings that
+  process's children into a sweep, a `kill <pid>` or a `ps`.
 - `sweep` (macOS): a sweep run from inside a process that a dead job started (its original parent
   was the job's sheepr or one of the job's processes, for example a terminal opened from the job)
   now skips that job, says so, and keeps its journal, as it already did for a job that holds the

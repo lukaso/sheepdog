@@ -170,12 +170,18 @@ pub(crate) struct Proved {
     pub(crate) protected: Vec<(i32, u64)>,
 }
 
+/// A process the scan can hold as a member: this user's (`uid`), above pid 1 (launchd or init is
+/// never one, also for root). The sweep's `Fence` links a live id only for such a process.
+pub(crate) fn scan_can_hold(p: &Proc, uid: u32) -> bool {
+    p.pid > 1 && p.uid == uid
+}
+
 impl Proved {
     pub(crate) fn scan(&mut self) -> Vec<(i32, u64)> {
         let uid = unsafe { libc::getuid() };
         let procs: Vec<Proc> = os::procs()
             .into_iter()
-            .filter(|p| p.pid > 1 && p.uid == uid && !self.protected.iter().any(|&(q, id)| q == p.pid && id == p.id))
+            .filter(|p| scan_can_hold(p, uid) && !self.protected.iter().any(|&(q, id)| q == p.pid && id == p.id))
             .collect();
         let mut members: HashMap<i32, u64> =
             procs.iter().filter(|p| self.known.get(&p.pid) == Some(&p.id)).map(|p| (p.pid, p.id)).collect();
@@ -595,6 +601,18 @@ pub(crate) fn clean(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// What the scan can hold: this user's processes above pid 1. For a user, neither another
+    /// user's process nor pid 1; for root, its own processes but never pid 1 (launchd or init).
+    #[test]
+    fn the_scan_holds_only_this_users_processes_above_pid_1() {
+        let p = |pid: i32, uid: u32| Proc { pid, ppid: 1, uid, id: 7, puniq: None, sid: pid, pgid: pid, resp: None };
+        assert!(scan_can_hold(&p(500, 501), 501));
+        assert!(!scan_can_hold(&p(500, 0), 501), "another user's process");
+        assert!(!scan_can_hold(&p(1, 501), 501), "pid 1 of this user");
+        assert!(scan_can_hold(&p(500, 0), 0), "root's own process, for root");
+        assert!(!scan_can_hold(&p(1, 0), 0), "launchd, for root");
+    }
+
     fn pr(pid: i32, ppid: i32, id: u64, sid: i32, pgid: i32, puniq: Option<u64>, resp: Option<u64>) -> Proc {
         Proc { pid, ppid, uid: 501, id, puniq, sid, pgid, resp }
     }
@@ -771,7 +789,7 @@ fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Result<Option<crate
         }
         let fence = crate::sweep::Fence::now();
         for (p, id) in sub {
-            if fence.link(id) {
+            if fence.link(p, id) {
                 proved.ever.insert(id);
             }
             if same(p, id) {

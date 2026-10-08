@@ -184,26 +184,45 @@ pub fn read_header(path: &Path) -> Option<(String, (i32, u64))> {
     Some((h.get("job").and_then(Json::str)?.to_string(), (num(s, "pid")? as i32, num(s, "id")? as u64)))
 }
 
-/// Which ids a journal gives as `puniq` links (macOS; Linux has no `puniq`, so none there): only
-/// an id no live process has, by a credible list. A live process's id enters the links through
-/// the scan, which holds only this user's processes above pid 1: a forged or corrupt line could
-/// name launchd (pid 1, id 1, the original parent of hundreds of this user's processes) or another
-/// user's process, at its own pid or another, and its children are no members. (A child whose
-/// original parent is a live member still has that member as its parent.) Every reader of a dead
-/// job's lineage uses it: `Journal::proved` and `kill`'s journal subtree.
-pub(crate) struct Fence(Option<HashSet<u64>>);
+/// Which ids a journal gives as `puniq` links (macOS; Linux has no `puniq`, so none there), read
+/// once, before the reader's first scan. A line's id is a link when its process is one the scan
+/// can hold (alive at the line's pid, this user's, above pid 1), or when no live process has the
+/// id, by a credible list. So a member alive at the read and gone before the scan still links its
+/// orphans, and a forged or corrupt line that names launchd (pid 1, id 1, the original parent of
+/// hundreds of this user's processes), another user's process, or a process at another pid than
+/// its own brings in none of its children. (A line that names this user's live process at its own
+/// pid makes it a member, as the journal is the record.) Every reader of a dead job's lineage uses
+/// it: `Journal::proved` and `kill`'s journal subtree.
+pub(crate) struct Fence {
+    /// every live process's id, of any user; None when the list is not credible
+    live: Option<HashSet<u64>>,
+    /// what the scan can hold: this user's live processes above pid 1
+    held: HashSet<(i32, u64)>,
+}
 
 impl Fence {
     pub(crate) fn now() -> Fence {
         #[cfg(target_os = "macos")]
-        return Fence(crate::macos::live_ids());
+        let f = {
+            let uid = unsafe { libc::getuid() };
+            let held = crate::macos::procs().into_iter().filter(|p| crate::kill::scan_can_hold(p, uid)).map(|p| (p.pid, p.id)).collect();
+            Fence { live: crate::macos::live_ids(), held }
+        };
         #[cfg(not(target_os = "macos"))]
-        Fence(None)
+        let f = Fence { live: None, held: HashSet::new() };
+        // debug seam: a pause after the read, before the caller's first scan
+        crate::seam_sleep("SHEEPR_TEST_SLEEP_AFTER_FENCE_MS");
+        f
     }
 
-    /// a line's `id` may be a link: no live process has it, by a credible list
-    pub(crate) fn link(&self, id: u64) -> bool {
-        self.0.as_ref().is_some_and(|l| id != 0 && !l.contains(&id))
+    /// the id of a line that names (`pid`, `id`) may be a link
+    pub(crate) fn link(&self, pid: i32, id: u64) -> bool {
+        self.held.contains(&(pid, id)) || self.gone(id)
+    }
+
+    /// no live process has `id`, by a credible list
+    pub(crate) fn gone(&self, id: u64) -> bool {
+        self.live.as_ref().is_some_and(|l| id != 0 && !l.contains(&id))
     }
 }
 
@@ -216,8 +235,9 @@ impl Journal {
     pub(crate) fn proved(&self, protected: &[(i32, u64)]) -> Proved {
         let fence = Fence::now();
         let known: HashMap<i32, u64> = self.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
-        let mut ever: HashSet<u64> = self.members.iter().map(|m| m.id).filter(|&id| fence.link(id)).collect();
-        ever.extend(self.sup.map(|(_, id)| id).filter(|&id| fence.link(id)));
+        let mut ever: HashSet<u64> = self.members.iter().filter(|m| fence.link(m.pid, m.id)).map(|m| m.id).collect();
+        // the supervisor of a dead job is gone (a live one holds the lock)
+        ever.extend(self.sup.map(|(_, id)| id).filter(|&id| fence.gone(id)));
         Proved { known, ever, protected: protected.to_vec() }
     }
 
@@ -633,4 +653,36 @@ pub fn main(args: &[OsString]) -> i32 {
         say!("sheepr: swept {swept} dead job{} ({killed} process{} ended).", if swept == 1 { "" } else { "s" }, if killed == 1 { "" } else { "es" });
     }
     code
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use sheepr::ident::identity;
+
+    /// The fence links what the scan can hold and a gone id, and nothing else: this process (this
+    /// user's, alive at its pid) and an id no process has are links; launchd (pid 1), a root-owned
+    /// process above pid 1 (another user's, where `ps` gives the uid), and this process's id at
+    /// another pid are not.
+    #[test]
+    fn the_fence_links_only_what_the_scan_can_hold_or_a_gone_id() {
+        let me = unsafe { libc::getpid() };
+        let my_id = identity(me).unwrap();
+        let out = std::process::Command::new("ps").args(["-Ao", "pid=,uid="]).output().unwrap();
+        let root_proc = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?.parse::<i32>().ok()?, w.next()?.parse::<u32>().ok()?))
+            })
+            .filter(|&(p, uid)| p > 1 && uid == 0)
+            .find_map(|(p, _)| identity(p).map(|id| (p, id)))
+            .expect("a root-owned process above pid 1");
+        let f = Fence::now();
+        assert!(f.link(me, my_id), "this process");
+        assert!(f.link(999_998, 1 << 40), "an id no process has");
+        assert!(!f.link(1, identity(1).unwrap()), "launchd");
+        assert!(!f.link(root_proc.0, root_proc.1), "root's process {root_proc:?}");
+        assert!(!f.link(999_998, my_id), "this process's id at another pid");
+    }
 }
