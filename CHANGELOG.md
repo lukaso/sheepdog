@@ -26,8 +26,9 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   did for a job that holds their own process: `sweep` says it skipped the job, and `kill j-JOBID`
   refuses with exit 1. Before, they ended the job's other processes and removed the journal.
 - `kill --dry-run j-JOBID` and `ps j-JOBID`: for a dead job that `kill j-JOBID` would refuse to
-  sweep (it holds or started the caller's process), they now refuse with the same line and exit 1.
-  Before, they listed the job's processes.
+  sweep (its journal is busy or kept, sheepr cannot read its own chain of parent processes, or the
+  job holds or started the caller's process), they now refuse with the same line and exit 1.
+  Before, they listed what they could reach, or nothing, and exited 0.
 
 ## 0.1.1 (2026-10-08)
 

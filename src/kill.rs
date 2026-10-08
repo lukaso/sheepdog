@@ -716,49 +716,49 @@ fn job_target(prefix: &str, dry_run: bool, ps: bool) -> Result<JobTarget, i32> {
         }
         return Ok(JobTarget::Live(sup.0, sup.1, path));
     }
-    if dry_run {
-        // what a sweep of this dead job would reach: its journaled members still alive and
-        // their closure (the sweep's own proved set and scan)
-        let mut rows = Vec::new();
-        if let Ok(j) = crate::sweep::open_fenced(&path) {
-            let protected = protected().unwrap_or_default();
-            let mut proved = j.proved(&protected);
-            let named: HashSet<(i32, u64)> = proved.known.iter().map(|(&p, &id)| (p, id)).collect();
-            let set = proved.scan();
-            // the sweep's own question: a job it would skip, it refuses here too
-            if let Some(why) = crate::sweep::skip_reason(&j, &protected, &proved, &set) {
-                crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
-                return Err(1);
-            }
-            for (p, id) in set {
-                let ev = if named.contains(&(p, id)) { "journal" } else { "closure" };
-                rows.push(Row { pid: p, id, class: "proved", evidence: vec![ev.to_string()] });
-            }
-        }
-        return Ok(JobTarget::List(rows));
-    }
-    // a dead job: the sweep of this one journal
+    // a dead job: the sweep of this one journal, or (a dry run, `ps`) what it would reach. Both
+    // take the same steps and refuse alike, so a dry run says what `kill` would do.
     let Ok(protected) = protected() else {
         crate::fail!("sheepr: refusing to sweep {prefix}: sheepr cannot follow its own chain of parent processes. Nothing was signalled.");
         return Err(1);
     };
-    match crate::sweep::open_fenced(&path) {
-        Ok(j) => match crate::sweep::sweep_job_as(j, &protected, crate::sweep::Mode::Explicit) {
-            crate::sweep::Outcome::Swept(_) => Ok(JobTarget::Done(0)),
-            crate::sweep::Outcome::Skipped(why) => {
-                crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
-                Err(1)
-            }
-            crate::sweep::Outcome::Deadline(c) => Ok(JobTarget::Done(c)),
-        },
+    let j = match crate::sweep::open_fenced(&path) {
+        Ok(j) => j,
         Err(crate::sweep::Skip::Live) => {
             crate::fail!("sheepr: job {prefix} is busy (another sweep, or its supervisor is just ending). Nothing was signalled.");
-            Err(1)
+            return Err(1);
         }
         Err(crate::sweep::Skip::Unsafe(why)) | Err(crate::sweep::Skip::Unreadable(why)) | Err(crate::sweep::Skip::Kept(why)) => {
             crate::fail!("sheepr: refusing to sweep job {prefix}: {why}. Nothing was signalled.");
+            return Err(1);
+        }
+    };
+    if dry_run {
+        // its journaled members still alive and their closure (the sweep's own proved set, scan
+        // and skip question)
+        let mut proved = j.proved(&protected);
+        let named: HashSet<(i32, u64)> = proved.known.iter().map(|(&p, &id)| (p, id)).collect();
+        let set = proved.scan();
+        if let Some(why) = crate::sweep::skip_reason(&j, &protected, &proved, &set) {
+            crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
+            return Err(1);
+        }
+        let rows = set
+            .into_iter()
+            .map(|(p, id)| {
+                let ev = if named.contains(&(p, id)) { "journal" } else { "closure" };
+                Row { pid: p, id, class: "proved", evidence: vec![ev.to_string()] }
+            })
+            .collect();
+        return Ok(JobTarget::List(rows));
+    }
+    match crate::sweep::sweep_job_as(j, &protected, crate::sweep::Mode::Explicit) {
+        crate::sweep::Outcome::Swept(_) => Ok(JobTarget::Done(0)),
+        crate::sweep::Outcome::Skipped(why) => {
+            crate::fail!("sheepr: refusing to sweep {prefix}: {why}. Nothing was signalled.");
             Err(1)
         }
+        crate::sweep::Outcome::Deadline(c) => Ok(JobTarget::Done(c)),
     }
 }
 
