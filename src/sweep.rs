@@ -8,10 +8,10 @@
 //!
 //! The candidates are the journaled members whose identity still matches, plus the live closure
 //! from them (the ppid chain; macOS also `puniq`, through journaled ids of members now dead and the
-//! header's supervisor, whose child the root may have no line; an id a live process has links only
-//! for its own line). A job that holds this sweep's own process or one of its ancestors, or is the
-//! parent of one (by the ppid, or on macOS by `puniq`), is skipped whole (never a signal to the
-//! caller). Holding the lock, the sweep journals every closure candidate before its first signal
+//! header's supervisor, whose child the root may have no line; an id a live process has is no link
+//! from a line). A job that holds this sweep's own process or one of its ancestors, or started one
+//! (its parent is a member, or on macOS its `puniq` is the supervisor or a member), is skipped
+//! whole (never a signal to the caller). Holding the lock, the sweep journals every closure candidate before its first signal
 //! (a candidate that survives is still named for the next sweep). A candidate that is a
 //! sheepr supervisor is ended first (TERM, CONT, then its grace plus the deadline); then the
 //! freeze-and-kill loop, without a TERM grace. The journal is removed when every candidate is gone.
@@ -184,12 +184,13 @@ pub fn read_header(path: &Path) -> Option<(String, (i32, u64))> {
     Some((h.get("job").and_then(Json::str)?.to_string(), (num(s, "pid")? as i32, num(s, "id")? as u64)))
 }
 
-/// Which ids a journal gives as `puniq` links (macOS; Linux has no `puniq`, so none there): the
-/// id of a line whose own process is alive at its pid, and an id no live process has. A forged or
-/// corrupt line could name a live process at another pid (launchd's id 1 is the original parent of
-/// hundreds of this user's processes), and its children are no members. A list of live ids that is
-/// not credible makes no link of a dead id either. Every reader of a dead job's lineage uses it:
-/// `Journal::proved` and `kill`'s journal subtree.
+/// Which ids a journal gives as `puniq` links (macOS; Linux has no `puniq`, so none there): only
+/// an id no live process has, by a credible list. A live process's id enters the links through
+/// the scan, which holds only this user's processes above pid 1: a forged or corrupt line could
+/// name launchd (pid 1, id 1, the original parent of hundreds of this user's processes) or another
+/// user's process, at its own pid or another, and its children are no members. (A child whose
+/// original parent is a live member still has that member as its parent.) Every reader of a dead
+/// job's lineage uses it: `Journal::proved` and `kill`'s journal subtree.
 pub(crate) struct Fence(Option<HashSet<u64>>);
 
 impl Fence {
@@ -200,13 +201,8 @@ impl Fence {
         Fence(None)
     }
 
-    /// the id of a line that names `pid` may be a link
-    pub(crate) fn link(&self, pid: i32, id: u64) -> bool {
-        same(pid, id) || self.dead(id)
-    }
-
-    /// no live process has `id`, by a credible list
-    fn dead(&self, id: u64) -> bool {
+    /// a line's `id` may be a link: no live process has it, by a credible list
+    pub(crate) fn link(&self, id: u64) -> bool {
         self.0.as_ref().is_some_and(|l| id != 0 && !l.contains(&id))
     }
 }
@@ -220,8 +216,8 @@ impl Journal {
     pub(crate) fn proved(&self, protected: &[(i32, u64)]) -> Proved {
         let fence = Fence::now();
         let known: HashMap<i32, u64> = self.members.iter().filter(|m| same(m.pid, m.id)).map(|m| (m.pid, m.id)).collect();
-        let mut ever: HashSet<u64> = self.members.iter().filter(|m| fence.link(m.pid, m.id)).map(|m| m.id).collect();
-        ever.extend(self.sup.map(|(_, id)| id).filter(|&id| fence.dead(id)));
+        let mut ever: HashSet<u64> = self.members.iter().map(|m| m.id).filter(|&id| fence.link(id)).collect();
+        ever.extend(self.sup.map(|(_, id)| id).filter(|&id| fence.link(id)));
         Proved { known, ever, protected: protected.to_vec() }
     }
 
@@ -357,8 +353,13 @@ pub fn sweep_job_as(mut j: Journal, protected: &[(i32, u64)], mode: Mode) -> Out
     let mut proved = j.proved(protected);
     let set = proved.scan();
     let members: HashSet<i32> = set.iter().map(|&(p, _)| p).collect();
-    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| parent(p).is_some_and(|q| members.contains(&q)) || puniq_of(p, id).is_some_and(|u| proved.ever.contains(&u))) {
+    if let Some(&(p, _)) = protected.iter().find(|&&(p, _)| parent(p).is_some_and(|q| members.contains(&q))) {
         return Outcome::Skipped(format!("pid {p}, this sweep or one of its ancestors, is a child of one of its members"));
+    }
+    // (macOS) or was started by the job: its original parent is the header's supervisor or a
+    // member, live or dead (a root only the header ties to the job, a terminal a member started)
+    if let Some(&(p, _)) = protected.iter().find(|&&(p, id)| puniq_of(p, id).is_some_and(|u| proved.ever.contains(&u))) {
+        return Outcome::Skipped(format!("pid {p}, this sweep or one of its ancestors, was started by this job (by its sheepr or one of its processes)"));
     }
     let mut named: HashSet<(i32, u64)> = j.members.iter().map(|m| (m.pid, m.id)).collect();
     // every candidate is journaled before its first signal, also one a later scan finds

@@ -986,7 +986,8 @@ fn a_root_its_supervisor_never_journaled_is_swept() {
         common::send_child(&mut c, libc::SIGKILL);
     }
     let st = c.wait().unwrap();
-    let roots = common::scan(&mark, |w| w.get(2) == Some(&"sigcount")).unwrap();
+    // no unwrap before the guard: a stopped root never ends by itself
+    let roots = common::scan(&mark, |w| w.get(2) == Some(&"sigcount")).unwrap_or_default();
     let _ends: Vec<Ends> = roots.iter().map(|&p| Ends(p)).collect();
     let js = journals(&s);
     let root_lines = js.iter().flat_map(|j| std::fs::read_to_string(j).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>()).filter(|l| l.contains("\"root\":true")).count();
@@ -1135,7 +1136,8 @@ fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
         common::send_child(&mut c, libc::SIGKILL);
     }
     let _ = c.wait();
-    let roots = common::scan(&mark, |w| w.get(2) == Some(&"nosession")).unwrap();
+    // no unwrap before the guard: a stopped root never ends by itself
+    let roots = common::scan(&mark, |w| w.get(2) == Some(&"nosession")).unwrap_or_default();
     let _ends: Vec<Ends> = roots.iter().map(|&p| Ends(p)).collect();
     let stopped_before = roots.len() == 1 && common::stopped(roots[0]);
     if let Some(&r) = roots.first() {
@@ -1147,7 +1149,47 @@ fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
     let kept = journals(&s).len();
     assert!(stopped_before, "control: one root, left stopped: {roots:?}");
     assert!(ran, "control: the continued root ran its sweep: {text}");
-    assert!(text.contains("skipped job"), "the sweep inside the root did not skip its job: {text}");
+    assert!(text.contains("skipped job") && text.contains("was started by this job"), "the sweep inside the root did not skip its job: {text}");
     assert_eq!(kept, 1, "the journal is kept: {text}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A journal line that names a live process the scan can never hold as a member (launchd: pid 1,
+/// the original parent of hundreds of this user's processes) is no `puniq` link (macOS), also at
+/// its own pid: `ps` of a target that a dead job's journal names (the line in its subtree) and
+/// `ps` of the job list nothing through it. `ps` only, so a regression signals nothing. The
+/// control: the same line for a parent that is gone (P) lists its orphaned child C both ways.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_journal_line_naming_launchd_links_nothing() {
+    use std::io::Write;
+    let d = scratch("launchd");
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let (mut p, pp, c, _r) = parent_and_child(&d);
+    let _ends = Ends(c);
+    let (_t, tp, _) = decoy(&d, "t");
+    let launchd = (1, sheepr::ident::identity(1).expect("launchd's identity"));
+    let job = |line: (i32, u64)| {
+        let path = forge(&s, &here, "j-0d1d0021", "default", &boot, &pidns, &[tp], false);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":{},\"pid_id\":{},\"puniq\":null,\"cmd\":\"x\"}}", line.0, line.1, tp.0, tp.1).unwrap();
+    };
+    let listed = |what: &str| -> Vec<i32> {
+        let o = Command::new(sheepr()).args(["ps", "--json", what]).env("SHEEPR_TEST_STATE", &s).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| json::parse(l).ok()).filter_map(|j| j.get("pid").and_then(Json::num).map(|n| n as i32)).collect()
+    };
+    let t_arg = format!("{}:{}", tp.0, tp.1);
+    job(launchd);
+    let (by_t, by_job) = (listed(&t_arg), listed("j-0d1d0021"));
+    end_decoy(&mut p); // C is now an orphan whose `puniq` names a dead process
+    let p_gone = wait_until(5, || !common::alive(pp));
+    job(pp);
+    let (ctl_t, ctl_job) = (listed(&t_arg), listed("j-0d1d0021"));
+    assert!(by_t == vec![tp.0], "ps of T lists more than T through a line naming launchd: {} rows", by_t.len());
+    assert!(by_job == vec![tp.0], "ps of the job lists more than T through a line naming launchd: {} rows", by_job.len());
+    assert!(p_gone, "control: P ended");
+    assert!(ctl_t.contains(&c.0), "control: ps of T lists C through the line of its gone parent: {ctl_t:?}");
+    assert!(ctl_job.contains(&c.0), "control: ps of the job lists C through the line of its gone parent: {ctl_job:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

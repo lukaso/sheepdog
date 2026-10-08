@@ -771,7 +771,7 @@ fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Result<Option<crate
         }
         let fence = crate::sweep::Fence::now();
         for (p, id) in sub {
-            if fence.link(p, id) {
+            if fence.link(id) {
                 proved.ever.insert(id);
             }
             if same(p, id) {
