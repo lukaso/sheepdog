@@ -14,7 +14,9 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   `kill --dry-run` of such a job now find that process by its parent: the job's sheepr, as the
   journal's header names it. A journal line (in an edited or damaged journal) that names launchd,
   another user's process, or a live process at another pid than its own no longer brings that
-  process's children into a sweep, a `kill <pid>` or a `ps`.
+  process's children into a sweep, a `kill <pid>` or a `ps`. So a process of the job that became
+  another user's (it ran `sudo` or `su`) and is still alive no longer leads `sweep` to its
+  children; 0.1.1 did.
 - `sweep` (macOS): a sweep run from inside a process that a dead job started (its original parent
   was the job's sheepr or one of the job's processes, for example a terminal opened from the job)
   now skips that job, says so, and keeps its journal, as it already did for a job that holds the

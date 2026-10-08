@@ -8,11 +8,12 @@
 //!
 //! The candidates are the journaled members whose identity still matches, plus the live closure
 //! from them (the ppid chain; macOS also `puniq`, through journaled ids of members now dead and the
-//! header's supervisor, whose child the root may have no line; an id a live process has is no link
-//! from a line). A job that holds this sweep's own process or one of its ancestors, or started one
-//! (its parent is a member, or on macOS its `puniq` is the supervisor or a member), is skipped
-//! whole (never a signal to the caller). Holding the lock, the sweep journals every closure candidate before its first signal
-//! (a candidate that survives is still named for the next sweep). A candidate that is a
+//! header's supervisor, whose child the root may have no line; a line's id is a link only while its
+//! process is one the scan can hold, or once no live process has it: see `Fence`). A job that holds
+//! this sweep's own process or one of its ancestors, or started one (its parent is a member, or on
+//! macOS its `puniq` is the supervisor or a member), is skipped whole (never a signal to the
+//! caller). Holding the lock, the sweep journals every closure candidate before its first signal (a
+//! candidate that survives is still named for the next sweep). A candidate that is a
 //! sheepr supervisor is ended first (TERM, CONT, then its grace plus the deadline); then the
 //! freeze-and-kill loop, without a TERM grace. The journal is removed when every candidate is gone.
 //!
@@ -200,14 +201,16 @@ pub(crate) struct Fence {
     held: HashSet<(i32, u64)>,
 }
 
+/// The (pid, id) pairs of a process list that the scan can hold (`kill::scan_can_hold`).
+#[cfg(target_os = "macos")]
+fn held_of(procs: Vec<crate::kill::Proc>, uid: u32) -> HashSet<(i32, u64)> {
+    procs.into_iter().filter(|p| crate::kill::scan_can_hold(p, uid)).map(|p| (p.pid, p.id)).collect()
+}
+
 impl Fence {
     pub(crate) fn now() -> Fence {
         #[cfg(target_os = "macos")]
-        let f = {
-            let uid = unsafe { libc::getuid() };
-            let held = crate::macos::procs().into_iter().filter(|p| crate::kill::scan_can_hold(p, uid)).map(|p| (p.pid, p.id)).collect();
-            Fence { live: crate::macos::live_ids(), held }
-        };
+        let f = Fence { live: crate::macos::live_ids(), held: held_of(crate::macos::procs(), unsafe { libc::getuid() }) };
         #[cfg(not(target_os = "macos"))]
         let f = Fence { live: None, held: HashSet::new() };
         // debug seam: a pause after the read, before the caller's first scan
@@ -684,5 +687,21 @@ mod tests {
         assert!(!f.link(1, identity(1).unwrap()), "launchd");
         assert!(!f.link(root_proc.0, root_proc.1), "root's process {root_proc:?}");
         assert!(!f.link(999_998, my_id), "this process's id at another pid");
+    }
+
+    /// The fence's held set is what the scan can hold, also for root: never pid 1, never another
+    /// user's process (as a user, `procs()` reads only this user's processes, so only a list built
+    /// here shows the filter at work).
+    #[test]
+    fn the_fences_held_set_is_what_the_scan_can_hold() {
+        let p = |pid: i32, uid: u32| crate::kill::Proc { pid, ppid: 1, uid, id: pid as u64 + 1000, puniq: None, sid: pid, pgid: pid, resp: None };
+        let list = || vec![p(1, 0), p(500, 501), p(600, 0)];
+        let root = held_of(list(), 0);
+        assert!(!root.contains(&(1, 1001)), "launchd, for root");
+        assert!(!root.contains(&(500, 1500)), "another user's process, for root");
+        assert!(root.contains(&(600, 1600)), "root's own process, for root");
+        let user = held_of(list(), 501);
+        assert!(user.contains(&(500, 1500)), "this user's process");
+        assert!(!user.contains(&(600, 1600)) && !user.contains(&(1, 1001)), "root's processes, for a user");
     }
 }
