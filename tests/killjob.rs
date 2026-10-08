@@ -490,11 +490,12 @@ fn kill_job_turns_the_latch_on() {
     let p = records(&ru)[0];
     let h = json::parse(&header).unwrap();
     let field = |k: &str| h.get(k).and_then(Json::str).unwrap().to_string();
-    // a supervisor that is gone: a reaped child's pid with an identity it never had
+    // a supervisor that is gone: a reaped child's pid with an identity no process has had (never
+    // 1, launchd's: a `puniq` link to it would aim at hundreds of the operator's processes)
     let mut dead = Command::new("true").spawn().unwrap();
     let _ = dead.wait();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0002\",\"boot\":\"{}\",\"pidns\":\"{}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":{},\"id\":1099511627776}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":null,\"pid_id\":null,\"puniq\":null,\"cmd\":\"\"}}\n",
         field("boot"),
         field("pidns"),
         unsafe { libc::getuid() },
@@ -537,7 +538,7 @@ fn kill_job_keeps_the_sweep_fences() {
     let h = json::parse(&header).unwrap();
     let pidns = h.get("pidns").and_then(Json::str).unwrap().to_string();
     let forged = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0003\",\"boot\":\"00000000-0000-0000-0000-000000000000\",\"pidns\":\"{pidns}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":999999,\"id\":1}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n",
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"j-5eed0003\",\"boot\":\"00000000-0000-0000-0000-000000000000\",\"pidns\":\"{pidns}\",\"owner\":\"default\",\"uid\":{},\"sup\":{{\"pid\":999999,\"id\":1099511627776}},\"argv\":\"sheepr run\"}}\n{{\"v\":1,\"pid\":{},\"id\":{},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n",
         unsafe { libc::getuid() },
         p.0,
         p.1

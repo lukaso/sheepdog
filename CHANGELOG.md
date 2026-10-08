@@ -13,7 +13,7 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, and `ps` or
   `kill --dry-run` of such a job now find that process by its parent: the job's sheepr, as the
   journal's header names it. A journal line that names a live process at another pid (an edited
-  or damaged journal) no longer brings that process's children into a sweep.
+  or damaged journal) no longer brings that process's children into a sweep or a `kill <pid>`.
 
 ## 0.1.1 (2026-10-08)
 

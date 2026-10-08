@@ -769,8 +769,11 @@ fn journal_subtree(t: i32, tid: u64, proved: &mut Proved) -> Result<Option<crate
         if let Some(&(p, _)) = proved.protected.iter().find(|pr| sub.contains(pr)) {
             return Err(p);
         }
+        let fence = crate::sweep::Fence::now();
         for (p, id) in sub {
-            proved.ever.insert(id);
+            if fence.link(p, id) {
+                proved.ever.insert(id);
+            }
             if same(p, id) {
                 proved.known.insert(p, id);
             }

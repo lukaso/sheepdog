@@ -58,7 +58,7 @@ fn sym<T: Copy>(name: &str) -> Option<T> {
     }
 }
 
-/// This process's (uniqueid, original parent's uniqueid), or None (gone, zombie, not ours).
+/// This process's (uniqueid, original parent's uniqueid), of any user, or None (gone, zombie).
 pub fn uniq(pid: pid_t) -> Option<(u64, u64)> {
     let mut u: UniqInfo = unsafe { zeroed() };
     let n = size_of::<UniqInfo>() as c_int;
@@ -124,13 +124,15 @@ fn all_pids() -> Vec<pid_t> {
 
 /// The uniqueid of every live process, of any user: the uniqueid flavor answers for another
 /// user's process, where the BSD info is refused (measured 2026-10-08: 1,064 of 1,065 pids,
-/// launchd's id 1 among them). None when the list is not credible: it lacks this process.
+/// launchd's id 1 among them). None when the list is not credible: it lacks launchd (pid 1, a
+/// root-owned process), the witness that another user's process was read.
 pub fn live_ids() -> Option<std::collections::HashSet<u64>> {
-    // debug seam: the list comes back empty
-    let pids = if crate::seam_flag("SHEEPR_TEST_LIVE_IDS_EMPTY") { Vec::new() } else { all_pids() };
-    let ids: std::collections::HashSet<u64> = pids.into_iter().filter(|&p| p > 0).filter_map(|p| uniq(p).map(|u| u.0)).collect();
-    let me = uniq(unsafe { libc::getpid() })?.0;
-    ids.contains(&me).then_some(ids)
+    // debug seam: read as if another user's process were refused (only the BSD info's readers)
+    let mine = crate::seam_flag("SHEEPR_TEST_LIVE_IDS_MINE");
+    let ids: std::collections::HashSet<u64> =
+        all_pids().into_iter().filter(|&p| p > 0 && (!mine || bsd(p).is_some())).filter_map(|p| uniq(p).map(|u| u.0)).collect();
+    let launchd = uniq(1)?.0;
+    ids.contains(&launchd).then_some(ids)
 }
 
 struct Info {
@@ -1302,6 +1304,15 @@ pub fn run(a: &Args, sig: &crate::Signals) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `live_ids` reads every user's processes (the sweep's fence depends on it): the list is
+    /// credible on this Mac and holds launchd, a root-owned process, and this one.
+    #[test]
+    fn live_ids_holds_another_users_process() {
+        let ids = live_ids().expect("a credible list");
+        assert!(ids.contains(&uniq(1).expect("launchd").0));
+        assert!(ids.contains(&uniq(unsafe { libc::getpid() }).expect("this process").0));
+    }
 
     #[test]
     fn the_responsibility_spi_answers_for_this_process() {

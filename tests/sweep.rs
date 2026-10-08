@@ -58,6 +58,11 @@ fn journaled(s: &Path) -> Vec<i32> {
 /// created anywhere (another cell's), and a journaled id is a `puniq` link to its children.
 const WRONG: u64 = 1 << 40;
 
+/// The identity a forged header gives its gone supervisor: a uniqueid no process has had (they
+/// count up from boot), never 1, which is launchd's (the original parent of hundreds of the
+/// operator's processes: a sweep's `puniq` links must never be able to aim at them).
+const NEVER: u64 = 1 << 40;
+
 fn records(r: &Path) -> Vec<(i32, u64)> {
     std::fs::read_to_string(r)
         .unwrap_or_default()
@@ -238,7 +243,7 @@ fn forge(s: &Path, dir: &str, job: &str, owner: &str, boot: &str, pidns: &str, m
     std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let uid = unsafe { libc::getuid() };
     let mut text = format!(
-        "{{\"v\":1,\"kind\":\"header\",\"job\":\"{job}\",\"boot\":\"{boot}\",\"pidns\":\"{pidns}\",\"owner\":\"{owner}\",\"uid\":{uid},\"sup\":{{\"pid\":999999,\"id\":1}},\"argv\":\"sheepr run\"}}\n"
+        "{{\"v\":1,\"kind\":\"header\",\"job\":\"{job}\",\"boot\":\"{boot}\",\"pidns\":\"{pidns}\",\"owner\":\"{owner}\",\"uid\":{uid},\"sup\":{{\"pid\":999999,\"id\":{NEVER}}},\"argv\":\"sheepr run\"}}\n"
     );
     for &(p, id) in members {
         text.push_str(&format!("{{\"v\":1,\"pid\":{p},\"id\":{id},\"ppid\":1,\"pid_id\":null,\"puniq\":null,\"cmd\":\"decoy\"}}\n"));
@@ -936,7 +941,7 @@ fn kill_job_refuses_a_header_that_names_no_supervisor() {
     assert!(wait_until(10, || !records(&r).is_empty()));
     let p = records(&r)[0];
     let path = forge(&s, &here, "j-0badf00d", "default", &boot, &pidns, &[], false);
-    let text = std::fs::read_to_string(&path).unwrap().replace("\"sup\":{\"pid\":999999,\"id\":1}", &format!("\"sup\":{{\"pid\":{},\"id\":{}}}", p.0, p.1));
+    let text = std::fs::read_to_string(&path).unwrap().replace(&format!("\"sup\":{{\"pid\":999999,\"id\":{NEVER}}}"), &format!("\"sup\":{{\"pid\":{},\"id\":{}}}", p.0, p.1));
     std::fs::write(&path, text).unwrap();
     let st = Command::new(sheepr()).args(["kill", "j-0badf00d"]).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_DEADLINE_MS", "1000").status().unwrap();
     let (alive, n) = (common::alive(p), counted(&r));
@@ -947,7 +952,9 @@ fn kill_job_refuses_a_header_that_names_no_supervisor() {
 }
 
 /// A process a cell found, SIGKILLed by its identity when the cell ends, a panic too.
+#[cfg(target_os = "macos")]
 struct Ends((i32, u64));
+#[cfg(target_os = "macos")]
 impl Drop for Ends {
     fn drop(&mut self) {
         common::send(self.0 .0, self.0 .1, libc::SIGKILL);
@@ -1003,29 +1010,38 @@ fn a_root_its_supervisor_never_journaled_is_swept() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A live parent P (`/bin/sh`) and its counting decoy child C, whose `puniq` is P's id: P as a
+/// guard, P's and C's (pid, identity), and C's record.
+#[cfg(target_os = "macos")]
+fn parent_and_child(d: &Path) -> (Decoy, (i32, u64), (i32, u64), PathBuf) {
+    let r = d.join("c");
+    let p = Decoy(Command::new("/bin/sh").args(["-c", r#""$0" sigcount "$1" & wait"#]).arg(fixture()).arg(&r).spawn().unwrap());
+    assert!(wait_until(10, || !records(&r).is_empty()), "the child started");
+    let c = records(&r)[0];
+    let pp = common::found(p.id() as i32).expect("P is alive");
+    (p, pp, c, r)
+}
+
 /// A journal id is a `puniq` link (macOS) only while no live process has it, or while the live
 /// one is that line's own member: a header or a member line that names a live process's id at
 /// another pid (forged or corrupt; launchd's id 1 is the original parent of hundreds of this
 /// user's processes) brings in none of its children. P is a live `sh` whose child C is a counting
 /// decoy (C's `puniq` is P's id). A forged dead job names P's id as its supervisor, then another
 /// names it in a member line at another pid: C gets nothing. Once P is gone, a list of live ids
-/// that lacks sheepr itself (a debug seam empties it) is not credible: the header's id is still no
-/// link. The control: the same header's sweep without the seam ends C.
+/// read as if other users' processes were refused (a debug seam) lacks launchd, so it is not
+/// credible: the header's id is still no link. The control: the same header's sweep without the
+/// seam ends C.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_journal_id_of_a_live_process_elsewhere_links_none_of_its_children() {
     let d = scratch("liveid");
     let (here, boot, pidns) = folder(&d);
     let s = state(&d);
-    let r = d.join("c");
-    let mut p = Decoy(Command::new("/bin/sh").args(["-c", r#""$0" sigcount "$1" & wait"#]).arg(fixture()).arg(&r).spawn().unwrap());
-    assert!(wait_until(10, || !records(&r).is_empty()), "the child started");
-    let c = records(&r)[0];
+    let (mut p, pp, c, r) = parent_and_child(&d);
     let _ends = Ends(c);
-    let pp = common::found(p.id() as i32).expect("P is alive");
     let as_sup = |job: &str| {
         let path = forge(&s, &here, job, "default", &boot, &pidns, &[], false);
-        let text = std::fs::read_to_string(&path).unwrap().replace("\"sup\":{\"pid\":999999,\"id\":1}", &format!("\"sup\":{{\"pid\":999999,\"id\":{}}}", pp.1));
+        let text = std::fs::read_to_string(&path).unwrap().replace(&format!("\"sup\":{{\"pid\":999999,\"id\":{NEVER}}}"), &format!("\"sup\":{{\"pid\":999999,\"id\":{}}}", pp.1));
         std::fs::write(&path, text).unwrap();
     };
     as_sup("j-0d1d0001");
@@ -1037,7 +1053,7 @@ fn a_journal_id_of_a_live_process_elsewhere_links_none_of_its_children() {
     end_decoy(&mut p); // C is now an orphan whose `puniq` names a dead process
     let p_gone = wait_until(5, || !common::alive(pp));
     as_sup("j-0d1d0003");
-    let (code_empty, said_empty) = sweep_said_with(&s, &[], &[("SHEEPR_TEST_LIVE_IDS_EMPTY", "1")]);
+    let (code_empty, said_empty) = sweep_said_with(&s, &[], &[("SHEEPR_TEST_LIVE_IDS_MINE", "1")]);
     let after_empty = (common::alive(c), common::stopped(c), counted(&r));
     as_sup("j-0d1d0004");
     let (code_ctl, said_ctl) = sweep_said(&s, &[]);
@@ -1048,9 +1064,90 @@ fn a_journal_id_of_a_live_process_elsewhere_links_none_of_its_children() {
     assert_eq!(after_line, (true, false, 0), "a member line naming a live process's id at another pid reached its child: {said_line}");
     assert!(p_gone, "control: P ended");
     assert_eq!(code_empty, Some(0), "{said_empty}");
-    assert_eq!(after_empty, (true, false, 0), "a list of live ids without sheepr itself made a link: {said_empty}");
+    assert_eq!(after_empty, (true, false, 0), "a list of live ids without other users' processes made a link: {said_empty}");
     assert_eq!(code_ctl, Some(0), "{said_ctl}");
     assert!(c_gone, "control: with P gone, the header's id is a link and the sweep ends C: {said_ctl}");
     assert!(said_ctl.contains("swept 1 dead job (1 process ended)"), "{said_ctl}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// `kill <pid>` keeps to the same fence as the sweep (macOS): when a dead job's journal names the
+/// target T, a line in T's subtree (its parent is T) that names a live process P's id at another
+/// pid brings in none of P's children. The control: once P is gone, the same line under another
+/// target makes `kill` end C.
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_of_a_journaled_pid_links_no_live_id_elsewhere() {
+    use std::io::Write;
+    let d = scratch("killid");
+    let (here, boot, pidns) = folder(&d);
+    let s = state(&d);
+    let (mut p, pp, c, r) = parent_and_child(&d);
+    let _ends = Ends(c);
+    let target = |name: &str, job: &str| -> (Decoy, (i32, u64)) {
+        let (t, tp, _) = decoy(&d, name);
+        let path = forge(&s, &here, job, "default", &boot, &pidns, &[tp], false);
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{\"v\":1,\"pid\":999998,\"id\":{},\"ppid\":{},\"pid_id\":{},\"puniq\":null,\"cmd\":\"x\"}}", pp.1, tp.0, tp.1).unwrap();
+        (t, tp)
+    };
+    let kill = |t: (i32, u64)| Command::new(sheepr()).args(["kill", &format!("{}:{}", t.0, t.1)]).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_DEADLINE_MS", "2000").output().unwrap();
+    let (_t1, tp1) = target("t1", "j-0d1d0011");
+    let o1 = kill(tp1);
+    let t1_gone = wait_until(5, || !common::alive(tp1));
+    let after = (common::alive(c), common::stopped(c), counted(&r));
+    end_decoy(&mut p);
+    let p_gone = wait_until(5, || !common::alive(pp));
+    let (_t2, tp2) = target("t2", "j-0d1d0012");
+    let o2 = kill(tp2);
+    let c_gone = wait_until(5, || !common::alive(c));
+    let said = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(o1.status.code(), Some(0), "{}", said(&o1));
+    assert!(t1_gone, "control: kill ended its target");
+    assert_eq!(after, (true, false, 0), "a journal line naming a live process's id reached its child: {}", said(&o1));
+    assert!(p_gone, "control: P ended");
+    assert_eq!(o2.status.code(), Some(0), "{}", said(&o2));
+    assert!(c_gone, "control: with P gone, the line's id is a link and kill ends C: {}", said(&o2));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A sweep from inside a root that only the header's supervisor ties to its dead job skips that
+/// job whole and keeps its journal (macOS), as for a root a line names: the root is the sweep's
+/// ancestor (never a signal to the caller, and the record stays). The seam leaves the root
+/// unjournaled; the cell continues it (as something else may), and it runs `sheepr sweep` as its
+/// child. The root is the fixture's `nosession`, which does not exec again: `/bin/sh` is a
+/// trampoline that execs the shell, and an exec after the reparenting resets `puniq` to 1.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sweep_inside_an_unjournaled_root_skips_its_job() {
+    let d = scratch("inroot");
+    let s = state(&d);
+    let mark = d.join("inner").display().to_string();
+    let err = d.join("err");
+    let mut c = Command::new(sheepr())
+        .args(["run", "--", fixture(), "nosession", &mark, sheepr(), "sweep"])
+        .env("SHEEPR_TEST_STATE", &s)
+        .env("SHEEPR_TEST_KILL_BEFORE_ROOT_JOURNAL", "1")
+        .stderr(std::fs::File::create(&err).unwrap())
+        .spawn()
+        .unwrap();
+    if !wait_until(30, || c.try_wait().ok().flatten().is_some()) {
+        common::send_child(&mut c, libc::SIGKILL);
+    }
+    let _ = c.wait();
+    let roots = common::scan(&mark, |w| w.get(2) == Some(&"nosession")).unwrap();
+    let _ends: Vec<Ends> = roots.iter().map(|&p| Ends(p)).collect();
+    let stopped_before = roots.len() == 1 && common::stopped(roots[0]);
+    if let Some(&r) = roots.first() {
+        common::send(r.0, r.1, libc::SIGCONT);
+    }
+    let said = || std::fs::read_to_string(&err).unwrap_or_default();
+    let ran = wait_until(30, || said().lines().any(|l| l.contains("swept") || l.contains("skipped")) && said().ends_with('\n'));
+    let text = said();
+    let kept = journals(&s).len();
+    assert!(stopped_before, "control: one root, left stopped: {roots:?}");
+    assert!(ran, "control: the continued root ran its sweep: {text}");
+    assert!(text.contains("skipped job"), "the sweep inside the root did not skip its job: {text}");
+    assert_eq!(kept, 1, "the journal is kept: {text}");
     let _ = std::fs::remove_dir_all(&d);
 }
