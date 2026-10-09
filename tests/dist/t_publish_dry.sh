@@ -22,10 +22,10 @@
 #     blob id it replaces, and the file read back at the PUT's commit. A failure after the PATCH
 #     exits 5 and names `publish-cask`; `__publish-cask-dry` (that step alone) resumes it. The
 #     render must hold exactly one version (the tag's), sha256 (the archive's manifest hash) and
-#     url (the release's archive) line; after the checks nothing of the out dir is read (its cask
-#     or its manifest changed at the PATCH never reaches the tap); a backport publishes with the
-#     cask untouched; curl's real class (__curl-env, from real_tools) and the real entries' bodies
-#     (verify, then real_tools) are pinned.
+#     url (the release's archive) line; after its checks the cask step reads nothing of the out
+#     dir (its cask or its manifest changed at the PATCH never reaches the tap); a backport
+#     publishes with the cask untouched; curl's real class (__curl-env, from real_tools), the real
+#     entries' and real_tools' bodies (each defined once) and their dispatch arms are pinned.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir; fx_repo
@@ -310,11 +310,21 @@ want_publish_cask='publish_cask() {
   real_tools
   publish_cask_exec "$out/$tag"
 }'
-for e in publish publish_cask; do
+want_real_tools='real_tools() {
+  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net CURL=/usr/bin/curl CURLC=web
+}'
+for e in publish publish_cask real_tools; do
   eval "want=\$want_$e"
-  [ "$(body $e)" = "$want" ] && pass "$e: exactly verify, then the one definition of the real tools, then the run" || fail "$e's body: $(body $e | tr '\n' ' ')"
+  [ "$(body $e)" = "$want" ] && pass "$e: exactly its pinned body" || fail "$e's body: $(body $e | tr '\n' ' ')"
+  # defined once, in any spelling (sh runs the last definition)
+  n=$(grep -Ec "(^|[;&|[:space:]])$e[[:space:]]*[(][)]" "$SR_ROOT/scripts/release.sh")
+  [ "$n" = 1 ] && pass "$e: defined once" || fail "$e is defined $n times"
 done
-body real_tools | grep -q 'CURLC=web' && pass "the real tools: curl in the web class" || fail "real_tools: $(body real_tools | tr '\n' ' ')"
+# the dispatch runs the entries themselves
+for arm in '  publish) publish ;;' '  publish-cask) publish_cask ;;'; do
+  [ "$(grep -c "^  $(printf '%s' "$arm" | sed 's/^  //; s/).*//')) " "$SR_ROOT/scripts/release.sh")" = 1 ] && grep -qxF "$arm" "$SR_ROOT/scripts/release.sh" \
+    && pass "the dispatch: '$arm'" || fail "the dispatch arm for '$arm': $(grep -n "^  $(printf '%s' "$arm" | sed 's/^  //; s/).*//'))" "$SR_ROOT/scripts/release.sh")"
+done
 
 # a tag whose template gives another url form: refused before anything is public (the url is
 # checked in the cask that was rendered), and publish-cask before any call
