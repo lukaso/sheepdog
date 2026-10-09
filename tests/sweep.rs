@@ -1420,3 +1420,157 @@ fn the_dry_runs_of_a_dead_job_refuse_where_kill_does() {
     assert_eq!((common::alive(xp), counted(&xr)), (true, 0), "X got a signal");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A run's registration folder (macOS: `$TMPDIR/sr-XXXXXXXX`, holding the socket `s` and an
+/// `owner` record): a run started here with TMPDIR in the cell's scratch, its folder from the
+/// trace's `listening` line, and its root (sigcount) once it runs.
+#[cfg(target_os = "macos")]
+fn listener_run(d: &Path, tmp: &Path, s: &Path, name: &str) -> (Run, PathBuf, (i32, u64)) {
+    let trace = d.join(format!("{name}.trace"));
+    let rec = d.join(format!("{name}.rec"));
+    let c = Run(Command::new(sheepr()).args(["run", "--", fixture(), "sigcount"]).arg(&rec).env("TMPDIR", tmp).env("SHEEPR_TEST_STATE", s).env("SHEEPR_TEST_TRACE", &trace).spawn().unwrap());
+    let line = || std::fs::read_to_string(&trace).unwrap_or_default().lines().find_map(|l| l.strip_prefix("listening ").map(PathBuf::from));
+    assert!(wait_until(15, || line().is_some()), "{name}: the run is not listening");
+    assert!(wait_until(15, || !records(&rec).is_empty()), "{name}: the root did not start");
+    let folder = line().unwrap().parent().unwrap().to_path_buf();
+    (c, folder, records(&rec)[0])
+}
+
+/// A socket file nobody listens on (bound, then closed: the file stays).
+#[cfg(target_os = "macos")]
+fn dead_socket(p: &Path) {
+    drop(std::os::unix::net::UnixListener::bind(p).unwrap());
+}
+
+/// A registration folder made here: 0700, an owner record (if any), a dead socket, extra files.
+#[cfg(target_os = "macos")]
+fn regdir(tmp: &Path, name: &str, owner: Option<&str>, extra: &[&str]) -> PathBuf {
+    let f = tmp.join(name);
+    std::fs::create_dir(&f).unwrap();
+    mode(&f, 0o700);
+    if let Some(o) = owner {
+        std::fs::write(f.join("owner"), o).unwrap();
+    }
+    dead_socket(&f.join("s"));
+    for x in extra {
+        std::fs::write(f.join(x), b"x").unwrap();
+    }
+    f
+}
+
+/// Set a path's modification time to two days ago.
+#[cfg(target_os = "macos")]
+fn age(p: &Path) {
+    let t = std::time::SystemTime::now() - Duration::from_secs(2 * 86400);
+    std::fs::File::open(p).unwrap().set_modified(t).unwrap();
+}
+
+/// Issue #20: a run killed with SIGKILL leaves its registration folder; `sweep` removes it, and
+/// keeps the folder of a run that is alive. A debug build does so only with the seam
+/// SHEEPR_TEST_REAP_LISTENERS=1 (the cell's TMPDIR is its own scratch: the operator's temp folder
+/// is never read). The folder's owner record names the run's supervisor.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_killed_runs_registration_folder_is_removed_by_the_sweep() {
+    let d = scratch("reap");
+    let s = state(&d);
+    let tmp = d.join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    mode(&tmp, 0o700);
+    let (mut dead, fdead, rdead) = listener_run(&d, &tmp, &s, "dead");
+    let (_live, flive, _rlive) = listener_run(&d, &tmp, &s, "live");
+    let owner = std::fs::read_to_string(fdead.join("owner")).unwrap_or_default();
+    let sup = common::found(dead.id() as i32).expect("the supervisor");
+    common::send_child(&mut dead, libc::SIGKILL);
+    let _ = dead.wait();
+    common::send(rdead.0, rdead.1, libc::SIGKILL);
+    let kept_after_kill = fdead.exists();
+    let tmp_s = tmp.display().to_string();
+    let (code0, said0) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str())]);
+    let kept_without_seam = fdead.exists();
+    let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+    assert_eq!(owner, format!("v1 {} {} 0\n", sup.0, sup.1), "the owner record names the supervisor");
+    assert!(kept_after_kill, "control: the killed run's folder stays after the kill");
+    assert_eq!(code0, Some(0), "{said0}");
+    assert!(kept_without_seam, "a debug sweep without the seam removed a folder: {said0}");
+    assert_eq!(code, Some(0), "{said}");
+    assert!(!fdead.exists(), "the sweep left the killed run's folder: {said}");
+    assert!(flive.join("s").exists(), "the sweep removed a live run's folder: {said}");
+    assert!(said.contains("removed 1 registration folder of a sheepr that is gone"), "{said}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// What the sweep removes, and what it leaves (macOS): a folder of a dead owner is removed only
+/// when it is a registration folder exactly (the name `sr-` and 8 characters, this user's, 0700,
+/// not a symlink, holding nothing but `s` and `owner`) and of this pid namespace; each row below
+/// differs from the removed control in one of these. A folder with no owner record (an older
+/// sheepr's) is removed only when it is more than a day old and nothing listens on its socket;
+/// an old empty one (made, then never bound) too.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sweep_removes_only_dead_registration_folders() {
+    let d = scratch("reapx");
+    let s = state(&d);
+    let tmp = d.join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    mode(&tmp, 0o700);
+    let dead = format!("v1 999998 {NEVER} 0\n");
+    let ctl = regdir(&tmp, "sr-Ctl00001", Some(&dead), &[]);
+    let extra = regdir(&tmp, "sr-Xtra0001", Some(&dead), &["x"]);
+    let open = regdir(&tmp, "sr-Mode0755", Some(&dead), &[]);
+    mode(&open, 0o755);
+    let target = regdir(&d, "linked", Some(&dead), &[]);
+    std::os::unix::fs::symlink(&target, tmp.join("sr-Link0001")).unwrap();
+    let ns = regdir(&tmp, "sr-Pidns001", Some(&format!("v1 999998 {NEVER} 9.9\n")), &[]);
+    let short = regdir(&tmp, "sr-short", Some(&dead), &[]);
+    let old = regdir(&tmp, "sr-Old00001", None, &[]);
+    age(&old);
+    let young = regdir(&tmp, "sr-Young001", None, &[]);
+    let listened = tmp.join("sr-Lstn0001");
+    std::fs::create_dir(&listened).unwrap();
+    mode(&listened, 0o700);
+    let _l = std::os::unix::net::UnixListener::bind(listened.join("s")).unwrap();
+    age(&listened);
+    let empty = tmp.join("sr-Empty001");
+    std::fs::create_dir(&empty).unwrap();
+    mode(&empty, 0o700);
+    age(&empty);
+    let tmp_s = tmp.display().to_string();
+    let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+    let gone = |p: &Path| std::fs::symlink_metadata(p).is_err();
+    // a folder that stays keeps everything it held (removing its socket or owner record would
+    // break it even when the folder itself stays)
+    let whole = |p: &Path, owner: bool| p.join("s").exists() && p.join("owner").exists() == owner;
+    assert_eq!(code, Some(0), "{said}");
+    assert!(gone(&ctl), "control: a dead owner's folder is removed: {said}");
+    assert!(whole(&extra, true) && extra.join("x").exists(), "a folder holding another file was touched");
+    assert!(whole(&open, true), "a folder others can read (0755) was touched");
+    assert!(!gone(&tmp.join("sr-Link0001")) && whole(&target, true), "a symlink (or its target) was touched");
+    assert!(whole(&ns, true), "a folder of another pid namespace was touched");
+    assert!(whole(&short, true), "a folder whose name is not a registration folder's was touched");
+    assert!(gone(&old), "an old owner-less folder nobody listens on stayed: {said}");
+    assert!(whole(&young, false), "a young owner-less folder was touched");
+    assert!(whole(&listened, false), "an owner-less folder whose socket is listened on was touched");
+    assert!(gone(&empty), "an old empty folder stayed: {said}");
+    assert!(said.contains("removed 3 registration folders of sheeprs that are gone"), "{said}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The auto-sweep before a `run` removes a gone sheepr's registration folder too (macOS; the
+/// seam, as above), and the run's own folder goes when it ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_auto_sweep_removes_a_dead_registration_folder() {
+    let d = scratch("reapauto");
+    let s = state(&d);
+    let tmp = d.join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    mode(&tmp, 0o700);
+    let f = regdir(&tmp, "sr-Auto0001", Some(&format!("v1 999998 {NEVER} 0\n")), &[]);
+    let st = Command::new(sheepr()).args(["run", "--", "/usr/bin/true"]).env("TMPDIR", &tmp).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_REAP_LISTENERS", "1").status().unwrap();
+    let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(st.code(), Some(0));
+    assert!(!f.exists(), "the auto-sweep left a gone sheepr's folder");
+    assert!(left.is_empty(), "the temp folder still holds {left:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -6,6 +6,14 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
+## Unreleased
+
+- `sweep` and the auto-sweep before each `run` (macOS): they remove the registration folders
+  (`$TMPDIR/sr-XXXXXXXX`, or under `/tmp`) that a sheepr killed with SIGKILL leaves behind. Each
+  folder now records which sheepr owns it, and only the folder of a sheepr that is gone is
+  removed; `sweep` says how many. A folder from an older sheepr is removed when it is more than a
+  day old and nothing listens on it ([#20](https://github.com/lukaso/sheepr/issues/20)).
+
 ## 0.1.2 (2026-10-09)
 
 0.1.1 was never published: its changes (the first two items) are in this release.

@@ -5,6 +5,10 @@
 //! within one 2 s budget. The outer side (`Listener`) is served by the wait loop: non-blocking
 //! accepts and reads, a 100 ms deadline per connection, at most 32 pending. The peer's identity is
 //! the kernel's (`LOCAL_PEERTOKEN`, read after the record); the record's pid is only a claim.
+//!
+//! The listener's folder also holds an `owner` record (`v1 <pid> <identity> <pidns>`), so a later
+//! `sweep` can remove the folder of a sheepr that is gone (issue #20: one killed with SIGKILL
+//! cannot remove its own); `reap` does that.
 
 use sheepr::regwire::{self, Entry};
 use std::os::fd::RawFd;
@@ -174,11 +178,19 @@ impl Listener {
         raw.pop();
         let dir = PathBuf::from(String::from_utf8_lossy(&raw).into_owned());
         let path = dir.join("s");
+        // who owns the folder, before the socket exists (a `sweep` removes it once this sheepr is
+        // gone); best effort: without it, a sweep removes the folder only when it is old and
+        // nothing listens on it
+        let me = unsafe { libc::getpid() };
+        if let Some(id) = sheepr::ident::identity(me) {
+            let _ = std::fs::write(dir.join(OWNER), format!("v1 {me} {id} {}\n", crate::journal::pidns()));
+        }
         let fail = |why: String, fd: RawFd| {
             if fd >= 0 {
                 unsafe { libc::close(fd) };
             }
             let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(dir.join(OWNER));
             let _ = std::fs::remove_dir(&dir);
             say!("sheepr: cannot listen for nested runs ({why}); they are found by the scan only");
             None
@@ -387,8 +399,76 @@ impl Drop for Listener {
         }
         unsafe { libc::close(self.fd) };
         let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(self.dir.join(OWNER));
         let _ = std::fs::remove_dir(&self.dir);
     }
+}
+
+/// The owner record's name in a registration folder.
+const OWNER: &str = "owner";
+
+/// Remove the registration folders of sheeprs that are gone (issue #20), under each of `bases`,
+/// until `deadline`; returns how many. A folder is removed only when it is a registration folder
+/// exactly (named `sr-` and 8 letters or digits, this user's, mode 0700, not a symlink, holding
+/// nothing but the socket `s` and `owner`) and either its owner record (this pid namespace) names
+/// a process that is gone, or it has no owner record (an older sheepr's, or one made and never
+/// bound) and is more than a day old with nothing listening on its socket.
+pub fn reap(bases: &[PathBuf], deadline: Instant) -> usize {
+    let mut n = 0;
+    for base in bases {
+        let Ok(rd) = std::fs::read_dir(base) else { continue };
+        for e in rd.flatten() {
+            if Instant::now() > deadline {
+                return n;
+            }
+            let name = e.file_name();
+            let b = std::os::unix::ffi::OsStrExt::as_bytes(name.as_os_str());
+            if b.len() != 11 || !b.starts_with(b"sr-") || !b[3..].iter().all(|c| c.is_ascii_alphanumeric()) {
+                continue;
+            }
+            let f = base.join(&name);
+            if gone(&f) {
+                let _ = std::fs::remove_file(f.join(OWNER));
+                let _ = std::fs::remove_file(f.join("s"));
+                if std::fs::remove_dir(&f).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Is `f` the registration folder of a sheepr that is gone (see `reap`)?
+fn gone(f: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Ok(m) = std::fs::symlink_metadata(f) else { return false };
+    if !m.file_type().is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o777 != 0o700 {
+        return false;
+    }
+    let Ok(rd) = std::fs::read_dir(f) else { return false };
+    let (mut sock, mut owner) = (false, None);
+    for e in rd.flatten() {
+        let Ok(t) = e.file_type() else { return false };
+        match e.file_name().to_str() {
+            Some("s") if t.is_socket() => sock = true,
+            Some(OWNER) if t.is_file() => owner = Some(std::fs::read_to_string(e.path()).unwrap_or_default()),
+            _ => return false, // anything else: not (only) a registration folder
+        }
+    }
+    if let Some(o) = owner {
+        let w: Vec<&str> = o.trim_end_matches('\n').split(' ').collect();
+        return match (w.as_slice(), w.len()) {
+            (["v1", pid, id, ns], 4) => match (pid.parse::<i32>(), id.parse::<u64>()) {
+                (Ok(p), Ok(i)) if p > 1 && *ns == crate::journal::pidns() => !sheepr::ident::same(p, i),
+                _ => false,
+            },
+            _ => false,
+        };
+    }
+    let old = m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(86400));
+    // an older sheepr's folder: nothing listens on its socket (or it never got one)
+    old && (!sock || std::os::unix::net::UnixStream::connect(f.join("s")).is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused))
 }
 
 /// The peer's audit token (`LOCAL_PEERTOKEN`): eight u32; [1] euid, [3] ruid, [5] pid, [7] pidversion.
