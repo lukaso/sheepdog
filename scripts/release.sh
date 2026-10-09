@@ -33,7 +33,7 @@ set -u
 # one collation and one message language for every sort and comparison (the operator's locale sorts
 # "SHA256SUMS" after "install.sh"; measured)
 LC_ALL=C; export LC_ALL
-DRYHOME=""   # set only by __publish-dry; never inherited (its EXIT trap removes it)
+DRYHOME=""   # set only by the dry entries (__publish-dry, __publish-cask-dry, __publish-npm-dry); never inherited (their EXIT traps remove it)
 root=$(cd "$(dirname "$0")/.." && pwd -P) || exit 1
 usage() { echo "usage: release.sh check|build|npm-check|publish|publish-cask|publish-npm|verify [--sign] [--no-notarize] [--out DIR] vTAG" >&2; exit 2; }
 die() { echo "release: $*" >&2; exit 1; }
@@ -53,13 +53,13 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tag" ] || usage
 case $sub in
-  check|build|publish|publish-cask|publish-npm|npm-check|verify|__publish-dry|__publish-cask-dry|__publish-npm-dry|__npm-env) ;;
+  check|build|publish|publish-cask|publish-npm|npm-check|verify|__publish-dry|__publish-cask-dry|__publish-npm-dry|__npm-env|__curl-env) ;;
   *) usage ;;
 esac
 [ $sign = no ] || [ "$sub" = build ] || usage
 [ $nonot = no ] || [ $sign = yes ] || usage
 
-# the gate of the two operator-only entries
+# the gate of the operator-only entries
 if { [ "$sub" = build ] && [ $sign = yes ]; } || [ "$sub" = publish ] || [ "$sub" = publish-cask ] || [ "$sub" = publish-npm ]; then
   # the system's env and grep, the grep with no environment: neither a tool on PATH nor a variable
   # it reads (GREP_OPTIONS) can hide the test environment; only grep's "no match" (1) lets it on,
@@ -139,6 +139,13 @@ tool() { # class command... (base: HOME PATH TMPDIR USER LOGNAME [DEVELOPER_DIR]
             ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} "$@" ;;
     # npm: its login is the operator's own npmrc (~/.npmrc, or where NPM_CONFIG_USERCONFIG says),
     # never a token from the environment; the dry run's npm gets a temp HOME and no npmrc
+    # web: curl's fetch of the public archive: base and the proxies, no credential and no git/gh
+    # transport (CURL_HOME, which points curl at a curlrc, is dropped too; curl runs with -q)
+    web) /usr/bin/env -i HOME="${HOME:-}" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" USER="${USER:-}" LOGNAME="${LOGNAME:-}" \
+            ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} ${https_proxy:+https_proxy="$https_proxy"} \
+            ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} ${http_proxy:+http_proxy="$http_proxy"} \
+            ${ALL_PROXY:+ALL_PROXY="$ALL_PROXY"} ${all_proxy:+all_proxy="$all_proxy"} \
+            ${NO_PROXY:+NO_PROXY="$NO_PROXY"} ${no_proxy:+no_proxy="$no_proxy"} "$@" ;;
     npm) npm_env "${HOME:-}" "${NPM_CONFIG_USERCONFIG:-${npm_config_userconfig:-}}" "$@" ;;
     npmdry) npm_env "$DRYHOME" "" "$@" ;;
     # the dry publish: a fresh temp HOME and nothing else of the caller's, so even a real gh reached
@@ -350,7 +357,9 @@ publish_exec() { # dir
   # the tap read and its write right checked, so a refusal there leaves nothing public
   case $tag in
     *-rc.*) cask=no; echo "release: an rc: the Homebrew cask is not touched" ;;
-    *) cask=yes; cask_pre "$d" "$pt" ;;
+    *) cask=yes; cask_pre "$d" "$pt"
+       # a backport (a final tag older than the tap's cask): published, the cask never moved back
+       [ "$cask_put" = older ] && { cask=no; echo "release: $TAP's cask is $cask_tap, newer than $tag: the Homebrew cask is not touched"; } ;;
   esac
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepr/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
@@ -399,7 +408,7 @@ publish_exec() { # dir
 }
 publish() {
   verify "$out/$tag"
-  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net CURL=/usr/bin/curl CURLC=base publish_exec "$out/$tag"
+  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net CURL=/usr/bin/curl CURLC=web publish_exec "$out/$tag"
 }
 standins() { # VAR...: each names a stand-in for a dry run, or refuse
   # a stand-in is a script (not a symlink, not a binary), whose real directory is a fixture dir;
@@ -434,7 +443,7 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
 # file is read back at the commit the write made.
 TAP=lukaso/homebrew-tap CASK=Casks/sheepr.rb ARCHIVE=sheepr-macos-universal.tar.gz
 cask_fail() { # publish's failure after the PATCH: the release is public, its cask is not done (5)
-  echo "release: $tag is public, but its Homebrew cask is not updated: $*. Run: sh scripts/release.sh publish-cask $tag" >&2; exit 5
+  echo "release: $tag is public, but its Homebrew cask is not updated: $*. Run: sh scripts/release.sh publish-cask --out \"$out\" $tag" >&2; exit 5
 }
 blob_id() { { printf 'blob %d\0' "$(wc -c < "$1" | tr -d ' ')"; cat "$1"; } | shasum -a 1 | cut -d' ' -f1; }   # git's id of a file's bytes
 cask_pre() { # dir tmp: before anything is public; sets cask_put (yes|no) and cask_blob, or refuses (1)
@@ -446,6 +455,9 @@ cask_pre() { # dir tmp: before anything is public; sets cask_put (yes|no) and ca
   ah=$(man_hash "$cd_" "$ARCHIVE"); [ -n "$ah" ] || die "$ARCHIVE has no manifest hash"
   tool base sh "$ct/src/scripts/lib/render-cask.sh" "$xyz" "$ah" "$ct/cask.rb" || die "cannot render $tag's cask"
   cmp -s "$ct/cask.rb" "$cd_/sheepr.rb" || die "$cd_/sheepr.rb is not the cask the tag renders (its template, the archive's manifest hash)"
+  # from here on only this private copy is used (the PUT, the read back): the out dir may change
+  # while the operator confirms
+  grep -qxF "  url \"https://github.com/lukaso/sheepr/releases/download/v#{version}/$ARCHIVE\"" "$ct/cask.rb" || die "$tag's cask url is not the release's archive"
   # the tap's cask: exactly one version line, never newer than this tag; this version only as these bytes
   tool "$NETC" "$GH" api -H 'Accept: application/vnd.github.raw' "repos/$TAP/contents/$CASK" > "$ct/tap.rb" 2> "$ct/tap.err" || {
     grep -q 'HTTP 404' "$ct/tap.err" && die "$TAP has no $CASK (add it by hand once)"
@@ -453,11 +465,11 @@ cask_pre() { # dir tmp: before anything is public; sets cask_put (yes|no) and ca
   [ "$(grep -c '^  version "' "$ct/tap.rb")" = 1 ] || die "$TAP's $CASK has not exactly one version line"
   tv=$(sed -n 's/^  version "\(.*\)"$/\1/p' "$ct/tap.rb")
   rel=$(sh "$root/scripts/lib/cask-version.sh" "$tv" "$xyz") || die "$TAP's $CASK has a version off the grammar ('$tv')"
-  cask_blob=$(blob_id "$ct/tap.rb") cask_put=yes
+  cask_blob=$(blob_id "$ct/tap.rb") cask_put=yes cask_tap=$tv
   case $rel in
     newer) ;;
-    older) die "$TAP's cask is $tv, newer than $tag: the cask is never moved back" ;;
-    *) cmp -s "$ct/tap.rb" "$cd_/sheepr.rb" && cask_put=no \
+    older) cask_put=older; return 0 ;;   # the caller decides: publish skips the cask, publish-cask refuses
+    *) cmp -s "$ct/tap.rb" "$ct/cask.rb" && cask_put=no \
          || die "$TAP's cask is $xyz with sha256 $(sed -n 's/^  sha256 "\(.*\)"$/\1/p' "$ct/tap.rb"), but this build's archive is $ah: refused (a swapped asset, or a tap edited by hand)" ;;
   esac
   pp=$(tool "$NETC" "$GH" api "repos/$TAP" --jq .permissions.push) || die "gh: cannot read $TAP"
@@ -475,13 +487,12 @@ cask_post() { # dir tmp release-path fail: the release is public; the cask put a
   aid=$(sed -n 2p "$ct/rel"); case $aid in ''|*[!0-9]*) $f "no asset id ($aid)" ;; esac
   tool "$NETC" "$GH" api -H 'Accept: application/octet-stream' "repos/lukaso/sheepr/releases/assets/$aid" > "$ct/dl" || $f "gh: cannot download $ARCHIVE"
   [ "$(shasum -a 256 "$ct/dl" | cut -d' ' -f1)" = "$ah" ] || $f "the published $ARCHIVE is not the build's (its manifest hash)"
-  # what brew downloads: the cask's url, with no credentials (-q first: no curlrc) and https only
-  grep -qF "  url \"https://github.com/lukaso/sheepr/releases/download/v#{version}/$ARCHIVE\"" "$cd_/sheepr.rb" || $f "the cask's url is not the release's archive"
+  # what brew downloads: the cask's url (checked before), with no credentials (-q first: no curlrc) and https only
   url=https://github.com/lukaso/sheepr/releases/download/$tag/$ARCHIVE
   tool "$CURLC" "$CURL" -q -fsSL --proto =https "$url" > "$ct/brew" || $f "curl cannot fetch $url"
   [ "$(shasum -a 256 "$ct/brew" | cut -d' ' -f1)" = "$ah" ] || $f "$url is not the build's archive"
   if [ "$cask_put" = yes ]; then
-    c=$(tool "$NETC" "$GH" api -X PUT "repos/$TAP/contents/$CASK" -f "message=sheepr $xyz" -f "content=$(base64 < "$cd_/sheepr.rb" | tr -d '\n')" \
+    c=$(tool "$NETC" "$GH" api -X PUT "repos/$TAP/contents/$CASK" -f "message=sheepr $xyz" -f "content=$(base64 < "$ct/cask.rb" | tr -d '\n')" \
       -f "sha=$cask_blob" --jq .commit.sha 2> "$ct/put.err") || $f "gh: the cask write was refused ($(head -1 "$ct/put.err"); a 409 means the tap changed since it was read)"
     case $c in ''|*[!0-9a-f]*) $f "no commit id from the cask write ($c)" ;; esac
     tool "$NETC" "$GH" api -H 'Accept: application/vnd.github.raw' "repos/$TAP/contents/$CASK?ref=$c" > "$ct/back" || $f "gh: cannot read the cask back"
@@ -489,7 +500,7 @@ cask_post() { # dir tmp release-path fail: the release is public; the cask put a
     echo "release: $TAP already holds this cask"
     tool "$NETC" "$GH" api -H 'Accept: application/vnd.github.raw' "repos/$TAP/contents/$CASK" > "$ct/back" || $f "gh: cannot read the cask back"
   fi
-  cmp -s "$ct/back" "$cd_/sheepr.rb" || $f "the cask read back from $TAP is not the one put"
+  cmp -s "$ct/back" "$ct/cask.rb" || $f "the cask read back from $TAP is not the one put"
   echo "release: $TAP's $CASK is $xyz"
 }
 publish_cask_exec() { # dir: the cask step alone, for a release that is already public
@@ -505,9 +516,13 @@ publish_cask_exec() { # dir: the cask step alone, for a release that is already 
   pt=$(mktemp -d /private/tmp/sr-publish.XXXXXX) || die "no temp dir"
   trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
   cask_pre "$d" "$pt"
+  [ "$cask_put" = older ] && die "$TAP's cask is $cask_tap, newer than $tag: the cask is never moved back; nothing to do"
   cask_post "$d" "$pt" "releases/tags/$tag" die
 }
-publish_cask() { GH=gh NETC=net CURL=/usr/bin/curl CURLC=base publish_cask_exec "$out/$tag"; }
+publish_cask() {
+  verify "$out/$tag"   # the archive the cask points at, by the real tools, as publish checks it
+  GH=gh NETC=net CURL=/usr/bin/curl CURLC=web publish_cask_exec "$out/$tag"
+}
 publish_cask_dry() { # the cells' entry: stand-ins by path only, never the real gh or curl
   standins SR_PUBLISH_DRY_GH SR_PUBLISH_DRY_CURL
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
@@ -713,5 +728,6 @@ case $sub in
   __publish-npm-dry) publish_npm_dry ;;
   # the cells' view of the npm class: the environment the real run's npm gets (it runs only env)
   __npm-env) tool npm /usr/bin/env ;;
+  __curl-env) tool web /usr/bin/env ;;
   npm-check) npm_check "$out/$tag" ;;
 esac

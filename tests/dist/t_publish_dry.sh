@@ -70,7 +70,9 @@ case "\$*" in
   "api repos/lukaso/sheepr/releases/4242 --jq .assets"*) i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); echo "\$i \$f"; done ;;
   *"releases/assets/"*) for a; do last=\$a; done; id=\${last##*/}; f=\$(ls "$FX/up" | sed -n "\${id}p"); cat "$FX/up/\$f"; [ -e "$FX/corrupt" ] && [ "\$f" = "\$(cat "$FX/corrupt")" ] && echo x
     [ -e "$FX/corruptafter" ] && grep -q PATCH "$FX/calls" && echo x ;;
-  *"PATCH"*) [ -e "$FX/patchfail" ] && exit 1 ;;
+  *"PATCH"*) [ -e "$FX/swapcask" ] && sed -i.bak 's/^  sha256 .*/  sha256 "1111111111111111111111111111111111111111111111111111111111111111"/' "$FX/out/v0.1.0/sheepr.rb" && rm -f "$FX/out/v0.1.0/sheepr.rb.bak"
+    [ -e "$FX/rmcask" ] && rm -f "$FX/out/v0.1.0/sheepr.rb"
+    [ -e "$FX/patchfail" ] && exit 1 ;;
   *"--jq .draft"*) s=\$(cat "$FX/draftstate" 2>/dev/null); [ "\$s" = fail ] && exit 1; echo "\$s" ;;
 esac
 exit 0
@@ -214,7 +216,11 @@ pre() { # label want-text: the last pub refused before anything public
 }
 echo '# edited' >> "$FX/out/v0.1.0/sheepr.rb"; pub v0.1.0 v0.1.0; r=$?; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 pre "an out-dir cask that is not the one the tag renders" "is not the cask the tag renders"
-TAPV=0.2.0; pub v0.1.0 v0.1.0; r=$?; TAPV=; pre "the tap's cask is newer (0.2.0)" "newer than v0.1.0"
+TAPV=0.2.0; pub v0.1.0 v0.1.0; r=$?; TAPV=
+[ $r = 0 ] && grep -q PATCH "$FX/calls" && nowrite && ! grep -q '^curl' "$FX/calls" && grep -q "cask is 0.2.0, newer than v0.1.0: the Homebrew cask is not touched" "$FX/o" \
+  && pass "an older final tag than the tap's cask (a backport): published, the cask not touched, said so (0)" || fail "backport: rc=$r $(seq) $(tail -1 "$FX/o")"
+tapset 0.2.0; cask v0.1.0; r=$?
+[ $r = 1 ] && nowrite && grep -q 'newer than v0.1.0' "$FX/o" && pass "publish-cask of an older tag than the tap's cask: refused, nothing written (1)" || fail "publish-cask backport: rc=$r $(seq) $(tail -1 "$FX/o")"
 TAPV=0.1.0-rc.9; pub v0.1.0 v0.1.0; r=$?; TAPV=
 [ $r = 0 ] && grep -q '^gh api -X PUT' "$FX/calls" && pass "control: the tap's cask is an rc of this version (0.1.0-rc.9): updated (0)" || fail "tap rc of this version: rc=$r $(tail -1 "$FX/o")"
 tapset 0.1.0; TAPKEEP=1; pub v0.1.0 v0.1.0; r=$?; TAPKEEP=; pre "the tap's cask is this version with another archive hash" "0000000000000000000000000000000000000000000000000000000000000007"
@@ -229,7 +235,7 @@ cp "$FX/out/v0.1.0/sheepr.rb" "$FX/tap.cur"; tapset 0.0.9; cp "$FX/tap.cur" "$FX
 
 # after the PATCH, a failure leaves the release public: exit 5, the next command named
 post() { # label: the last pub ended at 5, public, publish-cask named
-  [ $r = 5 ] && grep -q PATCH "$FX/calls" && grep -q 'v0.1.0 is public' "$FX/o" && grep -q 'publish-cask v0.1.0' "$FX/o" \
+  [ $r = 5 ] && grep -q PATCH "$FX/calls" && grep -q 'v0.1.0 is public' "$FX/o" && grep -qF "publish-cask --out \"$FX/out\" v0.1.0" "$FX/o" \
     && pass "$1: exit 5, public said, publish-cask named" || fail "$1: rc=$r $(seq) $(tail -2 "$FX/o" | tr '\n' ' ')"
 }
 touch "$FX/corruptafter"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/corruptafter"; post "the published archive is not the build's"; nowrite && pass "  and no PUT" || fail "  a PUT ran"
@@ -251,6 +257,32 @@ echo '# a later change' >> "$REPO/packaging/homebrew/sheepr.rb.in"; tapset 0.0.9
 sed -i.bak 's/"commit": "[0-9a-f]*"/"commit": "0000000000000000000000000000000000000000"/' "$FX/out/v0.1.0/MANIFEST.json" && rm -f "$FX/out/v0.1.0/MANIFEST.json.bak"
 tapset 0.0.9; cask v0.1.0; r=$?; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "is not v0.1.0's" "$FX/o" && pass "publish-cask with a manifest of another commit: refused before any call (1)" || fail "publish-cask commit: rc=$r $(seq) $(tail -1 "$FX/o")"
+# the cask put is the one checked before anything was public: a change to the out dir while the
+# operator confirms (at the PATCH) never reaches the tap
+cp "$FX/out/v0.1.0/sheepr.rb" "$FX/checked.rb"
+for x in swapcask rmcask; do
+  mkout "$FX/out/v0.1.0" v0.1.0 "$C"; touch "$FX/$x"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/$x"
+  [ $r = 0 ] && cmp -s "$FX/tap/sheepr.rb" "$FX/checked.rb" && pass "the out dir's cask $( [ $x = swapcask ] && echo changed || echo removed) at the PATCH: the tap gets the bytes checked before (0)" || fail "$x: rc=$r $(seq) $(tail -1 "$FX/o")"
+done
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# a tag whose template gives another url form: refused before anything is public (the url is
+# checked in the cask that was rendered), and publish-cask before any call
+sed -i.bak 's|releases/download/v#{version}/|releases/download/#{version}/|' "$REPO/packaging/homebrew/sheepr.rb.in" && rm -f "$REPO/packaging/homebrew/sheepr.rb.in.bak"
+g commit -qam "another url form"; fx_release 0.1.5 3 v0.1.5; C5=$(g rev-parse "v0.1.5^{commit}"); T5=$(g rev-parse v0.1.5)
+mkout "$FX/out/v0.1.5" v0.1.5 "$C5"; printf '%s\trefs/tags/v0.1.5\n%s\trefs/tags/v0.1.5^{}\n' "$T5" "$C5" > "$FX/remote"
+pub v0.1.5 v0.1.5; r=$?; pre "a tag whose cask url is not the release's archive" "url is not the release's archive"
+cask v0.1.5; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "url is not the release's archive" "$FX/o" && pass "publish-cask of that tag: refused before any call (1)" || fail "publish-cask url: rc=$r $(seq) $(tail -1 "$FX/o")"
+g checkout -q v0.1.0 -- packaging/homebrew/sheepr.rb.in; printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# the real run's curl environment (the web class; __curl-env prints it): HOME and a proxy pass, no
+# token and no git/gh transport
+ce=$( (cd "$REPO" && env -i PATH="$PATH" HOME="$FX/ghome" GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" SSH_AUTH_SOCK="$FX/sock" GH_CONFIG_DIR="$FX/ghcfg" \
+  CURL_HOME="$FX/ch" HTTPS_PROXY=http://127.0.0.1:9 no_proxy=localhost sh scripts/release.sh __curl-env v0.1.0) 2>&1)
+printf '%s\n' "$ce" | grep -qx 'HTTPS_PROXY=http://127.0.0.1:9' && printf '%s\n' "$ce" | grep -qx 'no_proxy=localhost' && printf '%s\n' "$ce" | grep -qx "HOME=$FX/ghome" \
+  && pass "the real curl class: HOME and the proxies pass" || fail "the curl class: $(printf '%s' "$ce" | tr '\n' ' ')"
+printf '%s\n' "$ce" | grep -q -e "$DECOY" -e '^SSH_AUTH_SOCK=' -e '^GH_' -e '^CURL_HOME=' && fail "the curl class let a token, a transport or CURL_HOME through" || pass "the real curl class: no token, no git/gh transport, no CURL_HOME"
+
 # curl, as gh and git, gets only the named environment, and no decoy
 pub v0.1.0 v0.1.0 >/dev/null
 bad=""; for f in "$FX"/env.curl.*; do for k in $(sed 's/=.*//' "$f"); do case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac; done; done
