@@ -20,7 +20,12 @@
 #     and the tap can be written; after the PATCH, the release read by its id, its archive
 #     downloaded and fetched as brew fetches it (curl, no credentials), then one PUT carrying the
 #     blob id it replaces, and the file read back at the PUT's commit. A failure after the PATCH
-#     exits 5 and names `publish-cask`; `__publish-cask-dry` (that step alone) resumes it.
+#     exits 5 and names `publish-cask`; `__publish-cask-dry` (that step alone) resumes it. The
+#     render must hold exactly one version (the tag's), sha256 (the archive's manifest hash) and
+#     url (the release's archive) line; after the checks nothing of the out dir is read (its cask
+#     or its manifest changed at the PATCH never reaches the tap); a backport publishes with the
+#     cask untouched; curl's real class (__curl-env, from real_tools) and the real entries' bodies
+#     (verify, then real_tools) are pinned.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir; fx_repo
@@ -293,10 +298,21 @@ printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote
 # the real entries' wiring, which no dry run reaches: both verify the archive first, and both take
 # their tools from one definition, which __curl-env (above) prints the curl class of
 body() { sed -n "/^$1() {/,/^}/p" "$SR_ROOT/scripts/release.sh"; }
+# each body exactly (a looser match passed `verify ... &`, whose refusal ends only a subshell, and
+# real_tools after the run)
+want_publish='publish() {
+  verify "$out/$tag"
+  real_tools
+  publish_exec "$out/$tag"
+}'
+want_publish_cask='publish_cask() {
+  verify "$out/$tag"   # the archive the cask points at, by the real tools, as publish checks it
+  real_tools
+  publish_cask_exec "$out/$tag"
+}'
 for e in publish publish_cask; do
-  b=$(body $e)
-  printf '%s\n' "$b" | sed -n 2p | grep -qx '  verify "$out/$tag".*' && printf '%s\n' "$b" | grep -q '^  real_tools$' \
-    && pass "$e: verify first, then the one definition of the real tools" || fail "$e's body: $(printf '%s' "$b" | tr '\n' ' ')"
+  eval "want=\$want_$e"
+  [ "$(body $e)" = "$want" ] && pass "$e: exactly verify, then the one definition of the real tools, then the run" || fail "$e's body: $(body $e | tr '\n' ' ')"
 done
 body real_tools | grep -q 'CURLC=web' && pass "the real tools: curl in the web class" || fail "real_tools: $(body real_tools | tr '\n' ' ')"
 
