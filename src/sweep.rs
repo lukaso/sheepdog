@@ -509,13 +509,16 @@ fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// elsewhere is a sheepr's of another environment, which reaps it there. A debug build (the
 /// tests) looks only with the seam SHEEPR_TEST_REAP_LISTENERS=1, and only in a folder its cell
 /// marked as its own (the regular file `.sheepr-test-reap`: the operator's temp folders never hold
-/// it, so no cell aims a sweep at them), and never in /tmp itself.
+/// it, so no cell aims a sweep at them), and never in /tmp itself (`register::refused_in_debug`;
+/// the seam SHEEPR_TEST_REFUSE_AS_TMP adds a cell's folder to what it refuses, so a cell can show
+/// the refusal applies without aiming a sweep at /tmp).
 #[cfg(target_os = "macos")]
 fn reap_bases() -> Vec<PathBuf> {
     let base = crate::register::base_for(std::env::var_os("TMPDIR"));
     if cfg!(debug_assertions) {
         let marked = std::fs::symlink_metadata(base.join(".sheepr-test-reap")).is_ok_and(|m| m.is_file());
-        let ok = crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") && marked && !crate::register::is_slash_tmp(&base);
+        let also = std::env::var_os("SHEEPR_TEST_REFUSE_AS_TMP").map(PathBuf::from);
+        let ok = crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") && marked && !crate::register::refused_in_debug(&base, also.as_deref());
         return if ok { vec![base] } else { Vec::new() };
     }
     vec![base]

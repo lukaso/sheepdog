@@ -31,22 +31,36 @@ n=$(grep -c 'j-b4d\.journal' "$FX/err")
 rm -f "${dir}j-b4d.journal"
 # issue #20: a release sweep removes a dead registration folder where its own listener would put
 # it (this TMPDIR), and never one in /private/tmp (the listener's place only when TMPDIR is unset
-# or too long): the host's /tmp is not this cell's
-dead_folder() { # dir: a registration folder whose owner is gone (0700, an owner record, a dead socket)
-  chmod 700 "$1" && printf 'v1 999998 1099511627776 0\n' > "$1/owner" \
-    && /usr/bin/python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1/s"
+# or too long): the host's /tmp is not this cell's. The verdict is the sweep's own count (one
+# folder: its TMPDIR's) with the /tmp decoy still whole. The decoy is shared with every other
+# sheepr on this host whose folder is /tmp, which may remove it: an attempt in which it went is
+# inconclusive and is made again (3 at most); with none conclusive the row says SKIP (red on macOS)
+dead_folder() { # dir: a registration folder whose owner is gone, complete only at its last step
+  # (the socket, then the owner record renamed into place: until then the folder holds no owner
+  # record, or another file, and no sweep removes it)
+  chmod 700 "$1" && /usr/bin/python3 -I -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1/s" \
+    && printf 'v1 999998 1099511627776 0\n' > "$1/owner.n" && mv "$1/owner.n" "$1/owner"
 }
-TD=$(mktemp -d /private/tmp/sr-XXXXXXXX) && dead_folder "$TD" || { fail "a /tmp decoy"; finish; }
-OD=$(mktemp -d "$FX/h/sr-XXXXXXXX") && dead_folder "$OD" || { fail "a TMPDIR folder"; finish; }
-sr sweep; r=$?
-# the verdict is the sweep's own count (one folder: the one in its TMPDIR); the /tmp decoy also
-# shows it, but another sheepr on this host whose folder is /tmp may remove it meanwhile, and then
-# the row says so instead of failing
-if [ "$r" = 0 ] && [ ! -e "$OD" ] && grep -q 'removed 1 registration folder of a sheepr that is gone' "$FX/err"; then
-  if [ -S "$TD/s" ] && [ -f "$TD/owner" ]; then pass "a release sweep removes a dead registration folder in its TMPDIR, and leaves /private/tmp's"
-  else echo "inconclusive: the sweep removed one folder (its TMPDIR's), but the /tmp decoy went too: another sheepr on this host swept /tmp meanwhile"; fi
-else fail "rc=$r, TMPDIR folder $( [ -e "$OD" ] && echo kept || echo removed), /tmp folder $( [ -S "$TD/s" ] && echo whole || echo touched): $(tr '\n' ' ' < "$FX/err")"; fi
-rm -rf "$TD"; TD=""
+reg_whole() { [ -S "$1/s" ] && [ -f "$1/owner" ]; }
+verdict="" i=0
+while [ -z "$verdict" ] && [ $i -lt 3 ]; do
+  i=$((i + 1))
+  TD=$(mktemp -d /private/tmp/sr-XXXXXXXX) && dead_folder "$TD" || { fail "a /tmp decoy"; finish; }
+  OD=$(mktemp -d "$FX/h/sr-XXXXXXXX") && dead_folder "$OD" || { fail "a TMPDIR folder"; finish; }
+  if reg_whole "$TD"; then
+    sr sweep; r=$?
+    if [ "$r" = 0 ] && [ ! -e "$OD" ] && grep -q 'removed 1 registration folder of a sheepr that is gone' "$FX/err"; then
+      reg_whole "$TD" && verdict=pass   # else another sheepr took the decoy meanwhile: again
+    else verdict=fail; fi
+  fi
+  [ "$verdict" = fail ] || rm -rf "${TD:?}" "${OD:?}"
+done
+case $verdict in
+  pass) pass "a release sweep removes a dead registration folder in its TMPDIR, and leaves /private/tmp's (attempt $i)" ;;
+  fail) fail "rc=$r, TMPDIR folder $( [ -e "$OD" ] && echo kept || echo removed), /tmp folder $(reg_whole "$TD" && echo whole || echo touched): $(tr '\n' ' ' < "$FX/err")" ;;
+  *) echo "SKIP: no conclusive attempt in 3: each time another sheepr on this host removed the /tmp decoy before the verdict" ;;
+esac
+rm -rf "${TD:?}"; TD=""
 # control 1: a dead job's readable journal (its supervisor SIGKILLed): read, swept, not named
 # (env, not the renv function: a function in the background is a subshell, and $! must be sheepr)
 env -i PATH=/usr/bin:/bin HOME="$FX/h" XDG_STATE_HOME="$FX/h/x" SHEEPR_STATE="$FX/h/s" TMPDIR="$FX/h" "$B" run --no-sweep -- /bin/sh -c "$wait_go" < /dev/null > /dev/null 2> "$FX/err.dead" &

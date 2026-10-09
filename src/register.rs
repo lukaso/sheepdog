@@ -371,6 +371,18 @@ mod base_tests {
         assert!(!is_slash_tmp(Path::new("/")) && !is_slash_tmp(Path::new("/private/var/tmp")));
         assert!(!is_slash_tmp(Path::new("/no/such/folder")));
     }
+
+    /// What a debug sweep refuses: /tmp under any spelling, the fallback base for a TMPDIR too long
+    /// (`base_for` gives /tmp), and a folder the seam adds; the seam only adds, so /tmp stays
+    /// refused with it. Not refused: another folder.
+    #[test]
+    fn a_debug_sweep_refuses_tmp_and_what_the_seam_adds() {
+        let me = std::env::temp_dir();
+        assert!(refused_in_debug(Path::new("/private/tmp"), None));
+        assert!(refused_in_debug(&base_for(Some(format!("/x/{}", "a".repeat(120)).into())), None), "the fallback base");
+        assert!(refused_in_debug(Path::new("/tmp"), Some(&me)), "the seam only adds");
+        assert!(refused_in_debug(&me, Some(&me)) && !refused_in_debug(&me, None), "the seam's folder, and only with it");
+    }
 }
 
 #[cfg(test)]
@@ -506,14 +518,25 @@ fn gone(f: &Path) -> bool {
     old && (!sock || std::os::unix::net::UnixStream::connect(f.join("s")).is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused))
 }
 
-/// Is `p` the folder /tmp is (the same device and inode: /private/tmp, or the Data volume's path of
-/// it, whatever the spelling)? False when either cannot be read.
-pub fn is_slash_tmp(p: &Path) -> bool {
+/// Are `a` and `b` the same folder (the same device and inode, whatever the spelling)? False when
+/// either cannot be read.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(p), std::fs::metadata("/tmp")) {
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
         (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
         _ => false,
     }
+}
+
+/// Is `p` the folder /tmp is (/private/tmp, or the Data volume's path of it)?
+pub fn is_slash_tmp(p: &Path) -> bool {
+    same_dir(p, Path::new("/tmp"))
+}
+
+/// Does a debug sweep refuse the base `base`? /tmp always; and `also` (the cells' seam
+/// SHEEPR_TEST_REFUSE_AS_TMP: a folder of their own refused as /tmp is), which only adds.
+pub fn refused_in_debug(base: &Path, also: Option<&Path>) -> bool {
+    is_slash_tmp(base) || also.is_some_and(|x| same_dir(base, x))
 }
 
 /// Is the owner `p` (identity `i`) gone? Only on positive evidence: its identity read and another,

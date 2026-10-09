@@ -109,7 +109,7 @@ RH=$FX/rh; mkdir -p "$RH"
 # the job's PATH has node's directory too, as a user's would (so a node launcher could run: the
 # D9 mutant must fail on the signal state, not on a missing node)
 JP=/usr/bin:/bin:$(dirname "$(command -v node)")
-job() { env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPR_STATE="$RH/s" "$@"; }
+job() { env -i PATH="$JP" HOME="$RH" XDG_STATE_HOME="$RH/x" SHEEPR_STATE="$RH/s" TMPDIR="$RH" "$@"; }
 callers() { # entry -> the probe's output for three callers, into $FX/c.<caller>
   for c in default ignore block; do
     case $c in

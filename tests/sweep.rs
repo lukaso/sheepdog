@@ -1640,7 +1640,13 @@ fn a_debug_sweep_reaps_only_a_folder_its_cell_marked() {
         rows.push((ts, code, said));
     }
     let tmp_s = tmp.display().to_string();
+    // the refusal is applied to the base: a marked folder the seam refuses as it would /tmp keeps
+    // its dead folder (the same folder, without the seam, is the control below)
+    let (code_r, said_r) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1"), ("SHEEPR_TEST_REFUSE_AS_TMP", tmp_s.as_str())]);
+    let kept_refused = whole(&ctl);
     let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+    assert_eq!(code_r, Some(0), "{said_r}");
+    assert!(kept_refused && !said_r.contains("registration folder"), "a folder refused as /tmp is, marked, was reaped: {said_r}");
     for (t, c, said) in &rows {
         assert_eq!(*c, Some(0), "TMPDIR {t}: {said}");
         assert!(!said.contains("registration folder"), "TMPDIR {t} (not marked as the cell's): {said}");
