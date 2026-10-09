@@ -4,13 +4,16 @@
 # or too long. A test leg that hand-runs a release build must not do that in the operator's /tmp
 # with the code under test. So every hand-run of a sheepr binary in a test leg (`env -i` with
 # SHEEPR_STATE=, the convention for one) names its own TMPDIR or passes --no-sweep, on the same
-# logical line (backslash continuations joined; a comment line is skipped and never continued, as
-# in sh). The control: a line with
-# neither is caught, the two forms that pass pass, and a path the scan cannot read fails it. The
-# real scan must read every path it names (each pattern matches a file, awk exits 0) and see the
-# two hand-runs it caught before their fix (release-refusal.sh, t_npm_install.sh's `job`), so a
-# scan that read nothing never passes. Bounds: a hand-run spelled without `env -i` and
-# SHEEPR_STATE= is not seen; a TMPDIR too long for a socket path would still mean /tmp.
+# logical line (backslash continuations joined; a line that starts with a comment is skipped and
+# never continued, as sh never continues one). The control: a line with neither is caught (also
+# after a comment ending in a backslash), the two forms that pass pass, and a path the scan cannot
+# read fails it. The real scan must read every path it names (each pattern matches a file, awk
+# exits 0) and see the two hand-runs it caught before their fix (release-refusal.sh,
+# t_npm_install.sh's `job`), so a scan that read nothing never passes. Bounds: a hand-run spelled
+# without `env -i` and SHEEPR_STATE= is not seen; a TMPDIR too long for a socket path would still
+# mean /tmp; the scan is not a shell parser: a comment INSIDE a continued command, or after it on
+# its line, is read as part of it, so a `TMPDIR=` or `--no-sweep` written only in such a comment
+# passes (and its `\` is taken as a continuation, where sh ends the command at the comment).
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
