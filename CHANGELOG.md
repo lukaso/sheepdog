@@ -6,31 +6,9 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
-## Unreleased
+## 0.1.2 (2026-10-09)
 
-- `sweep` (macOS): a job whose sheepr was killed with SIGKILL just after it started the job's first
-  process, before it wrote that process into the journal, left the process stopped for ever, and
-  `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, `kill j-JOBID`,
-  and `ps` or `kill --dry-run` of such a job now find that process through the sheepr that started
-  it, as the journal's header names it ([#19](https://github.com/lukaso/sheepr/issues/19)).
-- `sweep`, `kill` and `ps` (macOS): a line of an edited or damaged journal that names launchd,
-  another user's process, or a live process at another pid than its own no longer brings that
-  process's children in.
-- `sweep`, `kill` and `ps` (macOS): a process of the job that became another user's (it ran `sudo`
-  or `su`) and is still alive no longer leads them to its children that sheepr had not recorded
-  yet (started just before sheepr died, or after); 0.1.1 ended those. Its children that the
-  journal names are still ended.
-- `sweep`, the auto-sweep and `kill j-JOBID` (macOS): run from inside a process that a dead job
-  started (its original parent was the job's sheepr or one of the job's processes, for example a
-  terminal opened from the job), they leave that job alone and keep its journal, as they already
-  did for a job that holds their own process: `sweep` says it skipped the job, and `kill j-JOBID`
-  refuses with exit 1. Before, they ended the job's other processes and removed the journal.
-- `kill --dry-run j-JOBID` and `ps j-JOBID`: for a dead job that `kill j-JOBID` would refuse to
-  sweep (its journal is busy or kept, sheepr cannot read its own chain of parent processes, or the
-  job holds or started the caller's process), they now refuse with the same line and exit 1.
-  Before, they listed what they could reach, or nothing, and exited 0.
-
-## 0.1.1 (2026-10-08)
+0.1.1 was never published: its changes (the first two items) are in this release.
 
 - `run --status-fd`: a reader that stops reading can no longer keep sheepr running after the job
   is killed. sheepr gives up when the fd accepts nothing for 10 s, and at about 30 s in all; then
@@ -48,6 +26,27 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   sweep": one sheepr cannot reach or list (no permission, not a directory) is no longer taken as
   empty, so `sweep` refuses it (exit 1, as an unsafe folder) and the auto-sweep notes it
   ([#15](https://github.com/lukaso/sheepr/issues/15)).
+- `sweep` (macOS): a job whose sheepr was killed with SIGKILL just after it started the job's first
+  process, before it wrote that process into the journal, left the process stopped for ever, and
+  `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, `kill j-JOBID`,
+  and `ps` or `kill --dry-run` of such a job now find that process through the sheepr that started
+  it, as the journal's header names it ([#19](https://github.com/lukaso/sheepr/issues/19)).
+- `sweep`, `kill` and `ps` (macOS): a line of an edited or damaged journal that names launchd,
+  another user's process, or a live process at another pid than its own no longer brings that
+  process's children in.
+- `sweep`, `kill` and `ps` (macOS): a process of the job that became another user's (it ran `sudo`
+  or `su`) and is still alive no longer leads them to its children that sheepr had not recorded
+  yet (started just before sheepr died, or after); 0.1.0 ended those. Its children that the
+  journal names are still ended.
+- `sweep`, the auto-sweep and `kill j-JOBID` (macOS): run from inside a process that a dead job
+  started (its original parent was the job's sheepr or one of the job's processes, for example a
+  terminal opened from the job), they leave that job alone and keep its journal, as they already
+  did for a job that holds their own process: `sweep` says it skipped the job, and `kill j-JOBID`
+  refuses with exit 1. Before, they ended the job's other processes and removed the journal.
+- `kill --dry-run j-JOBID` and `ps j-JOBID`: for a dead job that `kill j-JOBID` would refuse to
+  sweep (its journal is busy or kept, sheepr cannot read its own chain of parent processes, or the
+  job holds or started the caller's process), they now refuse with the same line and exit 1.
+  Before, they listed what they could reach, or nothing, and exited 0.
 
 ## 0.1.0 (2026-10-06)
 

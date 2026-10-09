@@ -40,7 +40,7 @@ curl -fsSL https://github.com/lukaso/sheepr/releases/latest/download/install.sh 
 **Docker**, pinned and checked:
 
 ```dockerfile
-ARG SHEEPR_VERSION=0.1.1
+ARG SHEEPR_VERSION=0.1.2
 RUN a=$(uname -m) \
  && case $a in x86_64) sum='<sha256 of sheepr-linux-x86_64>' ;; aarch64) sum='<sha256 of sheepr-linux-aarch64>' ;; *) exit 1 ;; esac \
  && curl -fsSL -o /usr/local/bin/sheepr "https://github.com/lukaso/sheepr/releases/download/v${SHEEPR_VERSION}/sheepr-linux-$a" \
