@@ -28,7 +28,7 @@
 #
 # Exit codes: 0 done; 1 a check failed or a step failed; 2 usage; 3 refused in a test environment;
 # 4 refused without a terminal (or the typed tag did not match); 5 (publish) the release is public
-# but its Homebrew cask is not updated: `release.sh publish-cask vTAG` does that step alone.
+# but its Homebrew cask is not updated: `release.sh publish-cask --out DIR vTAG` does that step alone.
 set -u
 # one collation and one message language for every sort and comparison (the operator's locale sorts
 # "SHA256SUMS" after "install.sh"; measured)
@@ -391,7 +391,7 @@ publish_exec() { # dir
   done < "$pt/assets"
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote2" || die "git ls-remote $UPSTREAM"
   cmp -s "$pt/remote" "$pt/remote2" || die "the remote tag changed during the upload; the draft $id stays a draft"
-  confirm "release: the draft $id holds the five files, each matching. Type the tag again to make it public$( [ $cask = yes ] && echo " and update $TAP"):" || die "not confirmed; the draft $id stays a draft"
+  confirm "release: the draft $id holds the five files, each matching. Type the tag again to make it public$( [ $cask = yes ] && [ "$cask_put" = yes ] && echo " and update $TAP"):" || die "not confirmed; the draft $id stays a draft"
   if ! tool "$NETC" "$GH" api -X PATCH "repos/lukaso/sheepr/releases/$id" -F draft=false >/dev/null; then
     # the request failed, but GitHub may have made the release public anyway: read it again
     st=$(tool "$NETC" "$GH" api "repos/lukaso/sheepr/releases/$id" --jq .draft) || st=""
@@ -406,9 +406,15 @@ publish_exec() { # dir
   echo "release: $tag published"
   [ $cask = no ] || cask_post "$d" "$pt" "releases/$id" cask_fail
 }
+# the real run's tools and classes, one definition for publish, publish-cask and __curl-env (which
+# prints the curl class, so a cell sees the class the real entries use)
+real_tools() {
+  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net CURL=/usr/bin/curl CURLC=web
+}
 publish() {
   verify "$out/$tag"
-  GH=gh GITCMD=git NPM=npm NPMC=npm DRY=no NETC=net CURL=/usr/bin/curl CURLC=web publish_exec "$out/$tag"
+  real_tools
+  publish_exec "$out/$tag"
 }
 standins() { # VAR...: each names a stand-in for a dry run, or refuse
   # a stand-in is a script (not a symlink, not a binary), whose real directory is a fixture dir;
@@ -457,7 +463,14 @@ cask_pre() { # dir tmp: before anything is public; sets cask_put (yes|no) and ca
   cmp -s "$ct/cask.rb" "$cd_/sheepr.rb" || die "$cd_/sheepr.rb is not the cask the tag renders (its template, the archive's manifest hash)"
   # from here on only this private copy is used (the PUT, the read back): the out dir may change
   # while the operator confirms
-  grep -qxF "  url \"https://github.com/lukaso/sheepr/releases/download/v#{version}/$ARCHIVE\"" "$ct/cask.rb" || die "$tag's cask url is not the release's archive"
+  # the render is this release's cask: one version line (brew builds the url from it), one sha256
+  # line (the archive's), one url line (the release's archive); a template that hard-codes one of
+  # them renders the same in the build, so the out dir alone would not show it
+  for kv in "version|  version \"$xyz\"" "sha256|  sha256 \"$ah\"" "url|  url \"https://github.com/lukaso/sheepr/releases/download/v#{version}/$ARCHIVE\""; do
+    k=${kv%%|*} want=${kv#*|}
+    [ "$(grep -c "^  $k " "$ct/cask.rb")" = 1 ] && grep -qxF "$want" "$ct/cask.rb" || die "$tag's cask is not this release's: its $k line is not '$want' (exactly once)"
+  done
+  cask_ah=$ah   # the archive's hash as checked: nothing of the out dir is read after this
   # the tap's cask: exactly one version line, never newer than this tag; this version only as these bytes
   tool "$NETC" "$GH" api -H 'Accept: application/vnd.github.raw' "repos/$TAP/contents/$CASK" > "$ct/tap.rb" 2> "$ct/tap.err" || {
     grep -q 'HTTP 404' "$ct/tap.err" && die "$TAP has no $CASK (add it by hand once)"
@@ -476,8 +489,7 @@ cask_pre() { # dir tmp: before anything is public; sets cask_put (yes|no) and ca
   [ "$pp" = true ] || die "this gh login cannot write $TAP"
 }
 cask_post() { # dir tmp release-path fail: the release is public; the cask put and read back
-  cd_=$1 ct=$2 rp=$3 f=$4 xyz=${tag#v}
-  ah=$(man_hash "$cd_" "$ARCHIVE")
+  ct=$2 rp=$3 f=$4 xyz=${tag#v} ah=$cask_ah   # the hash checked before; the out dir ($1) is not read again
   tool "$NETC" "$GH" api "repos/lukaso/sheepr/$rp" --jq '.draft, (.assets[] | select(.name == "'"$ARCHIVE"'" and .state == "uploaded") | .id)' \
     > "$ct/rel" 2> "$ct/rel.err" || {
     grep -q 'HTTP 404' "$ct/rel.err" && $f "no published release $tag on GitHub"
@@ -521,7 +533,8 @@ publish_cask_exec() { # dir: the cask step alone, for a release that is already 
 }
 publish_cask() {
   verify "$out/$tag"   # the archive the cask points at, by the real tools, as publish checks it
-  GH=gh NETC=net CURL=/usr/bin/curl CURLC=web publish_cask_exec "$out/$tag"
+  real_tools
+  publish_cask_exec "$out/$tag"
 }
 publish_cask_dry() { # the cells' entry: stand-ins by path only, never the real gh or curl
   standins SR_PUBLISH_DRY_GH SR_PUBLISH_DRY_CURL
@@ -728,6 +741,6 @@ case $sub in
   __publish-npm-dry) publish_npm_dry ;;
   # the cells' view of the npm class: the environment the real run's npm gets (it runs only env)
   __npm-env) tool npm /usr/bin/env ;;
-  __curl-env) tool web /usr/bin/env ;;
+  __curl-env) real_tools; tool "$CURLC" /usr/bin/env ;;
   npm-check) npm_check "$out/$tag" ;;
 esac

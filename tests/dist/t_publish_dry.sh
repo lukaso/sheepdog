@@ -72,6 +72,7 @@ case "\$*" in
     [ -e "$FX/corruptafter" ] && grep -q PATCH "$FX/calls" && echo x ;;
   *"PATCH"*) [ -e "$FX/swapcask" ] && sed -i.bak 's/^  sha256 .*/  sha256 "1111111111111111111111111111111111111111111111111111111111111111"/' "$FX/out/v0.1.0/sheepr.rb" && rm -f "$FX/out/v0.1.0/sheepr.rb.bak"
     [ -e "$FX/rmcask" ] && rm -f "$FX/out/v0.1.0/sheepr.rb"
+    [ -e "$FX/swaphash" ] && sed -i.bak "s/\"sheepr-macos-universal.tar.gz\", \"sha256\": \"[0-9a-f]*\"/\"sheepr-macos-universal.tar.gz\", \"sha256\": \"\$(cat "$FX/swaphash")\"/" "$FX/out/v0.1.0/MANIFEST.json" && rm -f "$FX/out/v0.1.0/MANIFEST.json.bak"
     [ -e "$FX/patchfail" ] && exit 1 ;;
   *"--jq .draft"*) s=\$(cat "$FX/draftstate" 2>/dev/null); [ "\$s" = fail ] && exit 1; echo "\$s" ;;
 esac
@@ -265,18 +266,53 @@ for x in swapcask rmcask; do
   [ $r = 0 ] && cmp -s "$FX/tap/sheepr.rb" "$FX/checked.rb" && pass "the out dir's cask $( [ $x = swapcask ] && echo changed || echo removed) at the PATCH: the tap gets the bytes checked before (0)" || fail "$x: rc=$r $(seq) $(tail -1 "$FX/o")"
 done
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# nothing of the out dir is read after the checks: the manifest's archive hash changed at the PATCH
+# (with the published archive changed to match it) is a mismatch (5, no PUT); the manifest alone
+# changed is not read at all (0, the checked cask put)
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; cp "$FX/out/v0.1.0/sheepr.rb" "$FX/checked.rb"
+{ cat "$FX/out/v0.1.0/sheepr-macos-universal.tar.gz"; echo x; } | shasum -a 256 | cut -d' ' -f1 > "$FX/swaphash"
+touch "$FX/corruptafter" "$FX/curlcorrupt"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/corruptafter" "$FX/curlcorrupt"
+post "the manifest and the published archive changed together at the PATCH"; nowrite && pass "  and no PUT" || fail "  a PUT ran"
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; printf '%064d\n' 3 > "$FX/swaphash"; pub v0.1.0 v0.1.0; r=$?
+[ $r = 0 ] && cmp -s "$FX/tap/sheepr.rb" "$FX/checked.rb" && pass "the manifest alone changed at the PATCH: not read again, the checked cask put (0)" || fail "manifest changed: rc=$r $(seq) $(tail -1 "$FX/o")"
+rm -f "$FX/swaphash"; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# a tag whose template hard-codes the version or the sha256 renders the same in the build, so the
+# out dir matches: the render's version, sha256 and url lines are each checked (one, and the
+# release's), before anything is public
+n=6
+for edit in 's|^  version "@VERSION@"|  version "9.9.9"|' 's|^  sha256 "@SHA256@"|  sha256 "1111111111111111111111111111111111111111111111111111111111111111"|' 's|^  sha256 "@SHA256@"|  sha256 "@SHA256@"\n  sha256 "@SHA256@"|'; do
+  sed -i.bak "$edit" "$REPO/packaging/homebrew/sheepr.rb.in" && rm -f "$REPO/packaging/homebrew/sheepr.rb.in.bak"
+  g commit -qam "a template edit $n"; fx_release 0.1.$n 4 v0.1.$n; Cn=$(g rev-parse "v0.1.$n^{commit}"); Tn=$(g rev-parse v0.1.$n)
+  mkout "$FX/out/v0.1.$n" v0.1.$n "$Cn"; printf '%s\trefs/tags/v0.1.%s\n%s\trefs/tags/v0.1.%s^{}\n' "$Tn" "$n" "$Cn" "$n" > "$FX/remote"
+  pub v0.1.$n v0.1.$n; r=$?; pre "a tag whose template has $edit" "cask is not this release's"
+  cask v0.1.$n; r=$?
+  [ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "cask is not this release's" "$FX/o" && pass "  publish-cask of it: refused before any call (1)" || fail "  publish-cask: rc=$r $(seq) $(tail -1 "$FX/o")"
+  g checkout -q v0.1.0 -- packaging/homebrew/sheepr.rb.in; g commit -qam "the template back" >/dev/null; n=$((n + 1))
+done
+printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+# the real entries' wiring, which no dry run reaches: both verify the archive first, and both take
+# their tools from one definition, which __curl-env (above) prints the curl class of
+body() { sed -n "/^$1() {/,/^}/p" "$SR_ROOT/scripts/release.sh"; }
+for e in publish publish_cask; do
+  b=$(body $e)
+  printf '%s\n' "$b" | sed -n 2p | grep -qx '  verify "$out/$tag".*' && printf '%s\n' "$b" | grep -q '^  real_tools$' \
+    && pass "$e: verify first, then the one definition of the real tools" || fail "$e's body: $(printf '%s' "$b" | tr '\n' ' ')"
+done
+body real_tools | grep -q 'CURLC=web' && pass "the real tools: curl in the web class" || fail "real_tools: $(body real_tools | tr '\n' ' ')"
+
 # a tag whose template gives another url form: refused before anything is public (the url is
 # checked in the cask that was rendered), and publish-cask before any call
 sed -i.bak 's|releases/download/v#{version}/|releases/download/#{version}/|' "$REPO/packaging/homebrew/sheepr.rb.in" && rm -f "$REPO/packaging/homebrew/sheepr.rb.in.bak"
 g commit -qam "another url form"; fx_release 0.1.5 3 v0.1.5; C5=$(g rev-parse "v0.1.5^{commit}"); T5=$(g rev-parse v0.1.5)
 mkout "$FX/out/v0.1.5" v0.1.5 "$C5"; printf '%s\trefs/tags/v0.1.5\n%s\trefs/tags/v0.1.5^{}\n' "$T5" "$C5" > "$FX/remote"
-pub v0.1.5 v0.1.5; r=$?; pre "a tag whose cask url is not the release's archive" "url is not the release's archive"
+pub v0.1.5 v0.1.5; r=$?; pre "a tag whose cask url is not the release's archive" "cask is not this release's: its url line"
 cask v0.1.5; r=$?
-[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "url is not the release's archive" "$FX/o" && pass "publish-cask of that tag: refused before any call (1)" || fail "publish-cask url: rc=$r $(seq) $(tail -1 "$FX/o")"
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "cask is not this release's: its url line" "$FX/o" && pass "publish-cask of that tag: refused before any call (1)" || fail "publish-cask url: rc=$r $(seq) $(tail -1 "$FX/o")"
 g checkout -q v0.1.0 -- packaging/homebrew/sheepr.rb.in; printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 # the real run's curl environment (the web class; __curl-env prints it): HOME and a proxy pass, no
 # token and no git/gh transport
+# (__curl-env takes the class from real_tools, the entries' own definition)
 ce=$( (cd "$REPO" && env -i PATH="$PATH" HOME="$FX/ghome" GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" SSH_AUTH_SOCK="$FX/sock" GH_CONFIG_DIR="$FX/ghcfg" \
   CURL_HOME="$FX/ch" HTTPS_PROXY=http://127.0.0.1:9 no_proxy=localhost sh scripts/release.sh __curl-env v0.1.0) 2>&1)
 printf '%s\n' "$ce" | grep -qx 'HTTPS_PROXY=http://127.0.0.1:9' && printf '%s\n' "$ce" | grep -qx 'no_proxy=localhost' && printf '%s\n' "$ce" | grep -qx "HOME=$FX/ghome" \
