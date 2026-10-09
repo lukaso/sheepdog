@@ -12,7 +12,7 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   process, before it wrote that process into the journal, left the process stopped for ever, and
   `sweep` said "0 processes ended" and removed the journal. `sweep`, the auto-sweep, `kill j-JOBID`,
   and `ps` or `kill --dry-run` of such a job now find that process through the sheepr that started
-  it, as the journal's header names it.
+  it, as the journal's header names it ([#19](https://github.com/lukaso/sheepr/issues/19)).
 - `sweep`, `kill` and `ps` (macOS): a line of an edited or damaged journal that names launchd,
   another user's process, or a live process at another pid than its own no longer brings that
   process's children in.
