@@ -4,7 +4,8 @@
 # or too long. A test leg that hand-runs a release build must not do that in the operator's /tmp
 # with the code under test. So every hand-run of a sheepr binary in a test leg (`env -i` with
 # SHEEPR_STATE=, the convention for one) names its own TMPDIR or passes --no-sweep, on the same
-# logical line (backslash continuations joined; comment lines skipped). The control: a line with
+# logical line (backslash continuations joined; a comment line is skipped and never continued, as
+# in sh). The control: a line with
 # neither is caught, the two forms that pass pass, and a path the scan cannot read fails it. The
 # real scan must read every path it names (each pattern matches a file, awk exits 0) and see the
 # two hand-runs it caught before their fix (release-refusal.sh, t_npm_install.sh's `job`), so a
@@ -16,10 +17,11 @@ fx_dir
 scan() { # file... -> "SEEN file:line" for each hand-run, "BAD file:line" for each that breaks the
   # rule; awk's exit status (not 0 when a file cannot be read)
   awk 'FNR == 1 { buf = "" }
-    { if (buf == "") start = FNR
+    { if (buf == "" && $0 ~ /^[ \t]*#/) next   # a comment line: never continued, even ending in a backslash
+      if (buf == "") start = FNR
       if ($0 ~ /\\$/) { buf = buf substr($0, 1, length($0) - 1) " "; next }
       buf = buf $0
-      if (buf !~ /^[ \t]*#/ && buf ~ /env [-]i/ && buf ~ /SHEEPR_STATE[=]/) {
+      if (buf ~ /env [-]i/ && buf ~ /SHEEPR_STATE[=]/) {
         print "SEEN " FILENAME ":" start
         if (buf !~ /TMPDIR[=]/ && buf !~ /--no-sweep/) print "BAD " FILENAME ":" start }
       buf = "" }' "$@"
@@ -29,9 +31,11 @@ ei="env -i" st="SHEEPR_STATE"
 { printf '%s\n' "# $ei PATH=/x $st=/s \"\$b\" run -- true"
   printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" \"\$b\" run -- true"
   printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" TMPDIR=\"\$h/t\" \"\$b\" run -- true"
-  printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" \\" "  \"\$b\" run --no-sweep -- true"; } > "$FX/control.sh"
-got=$(scan "$FX/control.sh" | sed -n 's/^BAD //p')
-[ "$got" = "$FX/control.sh:2" ] && pass "control: a hand-run with neither TMPDIR nor --no-sweep is caught, the others pass" || fail "control: '$got'"
+  printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" \\" "  \"\$b\" run --no-sweep -- true"
+  # a comment ending in a backslash does not continue (sh runs the next line): line 7 is a hand-run
+  printf '%s\n' "# a comment that ends in a backslash \\" "$ei PATH=/usr/bin:/bin $st=\"\$h/s\" \"\$b\" run -- true"; } > "$FX/control.sh"
+got=$(scan "$FX/control.sh" | sed -n 's/^BAD //p' | tr '\n' ' ')
+[ "$got" = "$FX/control.sh:2 $FX/control.sh:7 " ] && pass "control: a hand-run with neither TMPDIR nor --no-sweep is caught (also after a comment ending in a backslash), the others pass" || fail "control: '$got'"
 scan "$FX/missing.sh" "$FX/control.sh" > /dev/null 2>&1 && fail "control: a path the scan cannot read passed" || pass "control: a path the scan cannot read fails the scan"
 cd "$SR_ROOT" || { fail "cd $SR_ROOT"; finish; }
 for g in 'tests/dist/*.sh' 'tests/rc/*.sh' 'scripts/*.sh' 'scripts/lib/*.sh' 'test-all'; do
