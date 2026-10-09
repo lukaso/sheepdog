@@ -14,7 +14,13 @@
 #   - a PATCH that fails: the release read again, and its real state said (public: 0; a draft or
 #     unreadable: 1);
 #   - an rc tag's draft is a prerelease;
-#   - __publish-dry refuses stand-ins outside /private/tmp/sr-p3-fixtures.*.
+#   - __publish-dry refuses stand-ins outside /private/tmp/sr-p3-fixtures.*;
+#   - the Homebrew cask (a final tag): before anything is public, the out dir's cask is the one
+#     the tag's own template renders, the tap's cask is read (its version older, or the same bytes)
+#     and the tap can be written; after the PATCH, the release read by its id, its archive
+#     downloaded and fetched as brew fetches it (curl, no credentials), then one PUT carrying the
+#     blob id it replaces, and the file read back at the PUT's commit. A failure after the PATCH
+#     exits 5 and names `publish-cask`; `__publish-cask-dry` (that step alone) resumes it.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir; fx_repo
@@ -33,20 +39,37 @@ mkout() { # dir tag commit: the five files, the manifest naming each one's hash,
       printf '%s    {"name": "%s", "sha256": "%s"}' "$sep" "$f" "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)"; sep=",
 "; done; printf '\n  ]\n}\n'; } > "$1/MANIFEST.json"
   printf '%s %s\n' "$2" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)" > "$1/NPM-CHECKED"
+  # the cask, as `build` renders it (render-cask.sh, the archive's hash)
+  sh "$REPO/scripts/lib/render-cask.sh" "$v" "$(shasum -a 256 "$1/sheepr-macos-universal.tar.gz" | cut -d' ' -f1)" "$1/sheepr.rb" || exit 3
 }
+# the tap's cask, as the contents API serves it: a cask rendered for VERSION (HASH: another archive)
+tapset() { rm -rf "$FX/tap"; mkdir -p "$FX/tap"; sh "$REPO/scripts/lib/render-cask.sh" "$1" "${2:-$(printf '%064d' 7)}" "$FX/tap/sheepr.rb" || exit 3; }
+blob() { { printf 'blob %d\0' "$(wc -c < "$1" | tr -d ' ')"; cat "$1"; } | shasum -a 1 | cut -d' ' -f1; }
 # the stand-ins
 cat > "$FX/gh" <<EOF
 #!/bin/sh
 n=\$(ls "$FX" | grep -c '^env\\.gh\\.'); env > "$FX/env.gh.\$n"
 echo "gh \$*" >> "$FX/calls"
 case "\$*" in
+  *"repos/lukaso/homebrew-tap --jq .permissions.push"*) cat "$FX/tapperm" 2>/dev/null || echo true ;;
+  *"-X PUT repos/lukaso/homebrew-tap/contents/Casks/sheepr.rb"*)
+    [ -e "$FX/put409" ] && { echo "gh: Conflict (HTTP 409)" >&2; exit 1; }
+    for a; do case \$a in content=*) printf '%s' "\${a#content=}" | base64 -d > "$FX/tap/sheepr.rb" ;; message=*) printf '%s\n' "\${a#message=}" > "$FX/tap/message" ;; sha=*) printf '%s\n' "\${a#sha=}" > "$FX/tap/putsha" ;; esac; done
+    echo c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff ;;
+  *"homebrew-tap/contents/Casks/sheepr.rb?ref=c0ffee"*) cat "$FX/tap/sheepr.rb"; [ -e "$FX/readbackdiff" ] && echo x; exit 0 ;;
+  *"homebrew-tap/contents/Casks/sheepr.rb"*) [ -f "$FX/tap/sheepr.rb" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$FX/tap/sheepr.rb" ;;
+  *"releases/tags/"*"--jq .draft, (.assets"*|*"releases/4242 --jq .draft, (.assets"*)
+    case "\$*" in *releases/tags/*) [ -e "$FX/notpublished" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;; esac
+    cat "$FX/draftafter" 2>/dev/null || echo false
+    i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); [ "\$f" = sheepr-macos-universal.tar.gz ] && echo \$i; done ;;
   *"releases --paginate"*) cat "$FX/existing" 2>/dev/null ;;
   "api -X POST repos/lukaso/sheepr/releases "*) echo 4242 ;;
   *"uploads.github.com"*) prev=""; for a; do case \$a in *assets\\?name=*) nm=\${a##*name=} ;; esac; [ "\$prev" = --input ] && in=\$a; prev=\$a; done
     [ -e "$FX/mutate" ] && [ "\$nm" = "\$(cat "$FX/mutate")" ] && echo changed >> "\$in"
     mkdir -p "$FX/up"; cp "\$in" "$FX/up/\$nm"; echo 1 ;;
   "api repos/lukaso/sheepr/releases/4242 --jq .assets"*) i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); echo "\$i \$f"; done ;;
-  *"releases/assets/"*) for a; do last=\$a; done; id=\${last##*/}; f=\$(ls "$FX/up" | sed -n "\${id}p"); cat "$FX/up/\$f"; [ -e "$FX/corrupt" ] && [ "\$f" = "\$(cat "$FX/corrupt")" ] && echo x ;;
+  *"releases/assets/"*) for a; do last=\$a; done; id=\${last##*/}; f=\$(ls "$FX/up" | sed -n "\${id}p"); cat "$FX/up/\$f"; [ -e "$FX/corrupt" ] && [ "\$f" = "\$(cat "$FX/corrupt")" ] && echo x
+    [ -e "$FX/corruptafter" ] && grep -q PATCH "$FX/calls" && echo x ;;
   *"PATCH"*) [ -e "$FX/patchfail" ] && exit 1 ;;
   *"--jq .draft"*) s=\$(cat "$FX/draftstate" 2>/dev/null); [ "\$s" = fail ] && exit 1; echo "\$s" ;;
 esac
@@ -68,24 +91,48 @@ case \$1 in owner) p=\$3
 esac
 exit 1
 EOF
-chmod +x "$FX/gh" "$FX/git" "$FX/npm"
+cat > "$FX/curl" <<EOF
+#!/bin/sh
+n=\$(ls "$FX" | grep -c '^env\\.curl\\.'); env > "$FX/env.curl.\$n"
+echo "curl \$*" >> "$FX/calls"
+cat "$FX/up/sheepr-macos-universal.tar.gz" 2>/dev/null; [ -e "$FX/curlcorrupt" ] && echo x
+exit 0
+EOF
+chmod +x "$FX/gh" "$FX/git" "$FX/npm" "$FX/curl"
 printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
-pub() { # tag answers -> rc; output in $FX/o
+pub() { # tag answers -> rc; output in $FX/o (a fresh tap: TAPV's cask, 0.0.9 when unset; TAPKEEP=1:
+       # the tap as it is). Set them as plain assignments and clear them after: a VAR=x prefix on
+       # a function call persists in POSIX sh
   rm -rf "$FX/calls" "$FX"/env.* "$FX/up"; printf '%s\n' "$2" > "$FX/ask"
+  [ "${TAPKEEP:-}" = 1 ] || tapset "${TAPV:-0.0.9}"
   (cd "$REPO" && env -u LC_ALL LANG=en_GB.UTF-8 LC_COLLATE=en_GB.UTF-8 HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     GH_TOKEN="$DECOY" GITHUB_TOKEN="$DECOY" APPLE_APP_SPECIFIC_PASSWORD="$DECOY" NPM_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" \
-    SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls" \
+    SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_PUBLISH_DRY_CURL="$FX/curl" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls" \
     sh scripts/release.sh __publish-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
 }
-seq() { sed -e '/^npm /d' -e 's/^gh api -X POST repos.*/POST/; s/^gh api -X POST -H .*/UPLOAD/; s/^gh api repos\/lukaso\/sheepr\/releases --paginate.*/LIST/' \
+cask() { # tag -> rc: `__publish-cask-dry` (the cask step alone); the tap as it is; output in $FX/o
+  rm -rf "$FX/calls" "$FX"/env.*
+  (cd "$REPO" && env -u LC_ALL HOME="$FX/ghome" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GH_TOKEN="$DECOY" \
+    SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_CURL="$FX/curl" sh scripts/release.sh __publish-cask-dry --out "$FX/out" "$1") > "$FX/o" 2>&1
+}
+nowrite() { ! grep -q -e '^gh api -X PUT' "$FX/calls"; }
+nopublic() { ! grep -q -e '^gh api -X POST' -e '^gh api -X PATCH' "$FX/calls"; }
+seq() { sed -e '/^npm /d' -e 's/^gh api -H .*homebrew-tap.*ref=.*/READBACK/; s/^gh api -H .*homebrew-tap.*/TAPGET/; s/^gh api repos\/lukaso\/homebrew-tap --jq.*/TAPPERM/; s/^gh api -X PUT.*/PUT/; s/^curl .*/CURL/' \
+  -e 's/^gh api -X POST repos.*/POST/; s/^gh api -X POST -H .*/UPLOAD/; s/^gh api repos\/lukaso\/sheepr\/releases --paginate.*/LIST/' \
   -e 's/^gh api repos\/lukaso\/sheepr\/releases\/4242 .*/READ/; s/^gh api -H .*assets.*/DL/; s/^gh api -X PATCH.*/PATCH/' \
   -e 's/^git ls-remote .*/LSREMOTE/; s/^ask .*/ASK/' "$FX/calls" | tr '\n' ' '; }
 
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 pub v0.1.0 v0.1.0; r=$?
 [ $r = 0 ] && pass "a dry publish in the operator's locale: done" || fail "dry publish: rc=$r $(tail -2 "$FX/o" | tr '\n' ' ')"
-[ "$(seq)" = "LSREMOTE LIST POST UPLOAD UPLOAD UPLOAD UPLOAD UPLOAD READ DL DL DL DL DL LSREMOTE ASK PATCH " ] \
-  && pass "the order: tag, list, draft, 5 uploads, read, 5 downloads, tag again, confirm, publish" || fail "the order: $(seq)"
+[ "$(seq)" = "TAPGET TAPPERM LSREMOTE LIST POST UPLOAD UPLOAD UPLOAD UPLOAD UPLOAD READ DL DL DL DL DL LSREMOTE ASK PATCH READ DL CURL PUT READBACK " ] \
+  && pass "the order: the tap read and its write right checked, tag, list, draft, 5 uploads, read, 5 downloads, tag again, confirm, publish; then the release read, its archive downloaded and fetched as brew does, the cask PUT and read back" || fail "the order: $(seq)"
+cmp -s "$FX/tap/sheepr.rb" "$FX/out/v0.1.0/sheepr.rb" && pass "the tap now holds the out dir's cask, byte for byte" || fail "the tap's cask is not the out dir's"
+[ "$(cat "$FX/tap/message")" = "sheepr 0.1.0" ] && pass "the cask commit's message is 'sheepr 0.1.0'" || fail "the message: $(cat "$FX/tap/message" 2>/dev/null)"
+tapset 0.0.9; want=$(blob "$FX/tap/sheepr.rb"); pub v0.1.0 v0.1.0
+[ "$(cat "$FX/tap/putsha" 2>/dev/null)" = "$want" ] && pass "the PUT carries the blob id of the cask it read (GitHub refuses it if the file changed since)" || fail "the PUT's sha: $(cat "$FX/tap/putsha" 2>/dev/null), want $want"
+grep -q '^curl -q -fsSL --proto =https https://github.com/lukaso/sheepr/releases/download/v0.1.0/sheepr-macos-universal.tar.gz$' "$FX/calls" \
+  && pass "the archive is fetched at the cask's url, with no curlrc and https only" || fail "the curl call: $(grep '^curl' "$FX/calls")"
 # the npm names are checked before anything else: GitHub must not go public when npm would then
 # refuse (the first v0.1.0 did exactly that). `npm owner ls` needs no login; the owner is release.conf's
 REG="--registry=https://registry.npmjs.org/"
@@ -142,9 +189,10 @@ mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 # the last request fails: the release is read again and its real state reported
 touch "$FX/patchfail"
 echo false > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
-[ $r = 0 ] && grep -q 'v0.1.0 is public' "$FX/o" && pass "the PATCH failed but the release is public: said so (0)" || fail "patch failed, public: rc=$r $(tail -1 "$FX/o")"
+[ $r = 0 ] && grep -q 'v0.1.0 is public' "$FX/o" && grep -q '^gh api -X PUT' "$FX/calls" && cmp -s "$FX/tap/sheepr.rb" "$FX/out/v0.1.0/sheepr.rb" \
+  && pass "the PATCH failed but the release is public: said so, and the cask step still ran (0)" || fail "patch failed, public: rc=$r $(seq) $(tail -1 "$FX/o")"
 echo true > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
-[ $r = 1 ] && grep -q 'still a draft' "$FX/o" && grep -q 'draft 4242' "$FX/o" && grep -q 'delete' "$FX/o" && pass "the PATCH failed and the release is still a draft: said so, with the draft and the way on (1)" || fail "patch failed, draft: rc=$r $(tail -1 "$FX/o")"
+[ $r = 1 ] && nowrite && grep -q 'still a draft' "$FX/o" && grep -q 'draft 4242' "$FX/o" && grep -q 'delete' "$FX/o" && pass "the PATCH failed and the release is still a draft: said so, with the draft and the way on (1)" || fail "patch failed, draft: rc=$r $(tail -1 "$FX/o")"
 echo fail > "$FX/draftstate"; pub v0.1.0 v0.1.0; r=$?
 [ $r = 1 ] && grep -q 'check it on GitHub' "$FX/o" && pass "the PATCH failed and the state cannot be read: said so (1)" || fail "patch failed, unreadable: rc=$r $(tail -1 "$FX/o")"
 rm -f "$FX/patchfail" "$FX/draftstate"
@@ -154,6 +202,59 @@ printf '%s\trefs/tags/v0.1.1-rc.1\n' "$C2" > "$FX/remote"
 mkout "$FX/out/v0.1.1-rc.1" v0.1.1-rc.1 "$C2"
 pub v0.1.1-rc.1 v0.1.1-rc.1; r=$?
 [ $r = 0 ] && grep -q '^gh api -X POST repos/lukaso/sheepr/releases -F draft=true -F prerelease=true ' "$FX/calls" && pass "an rc tag: the draft is a prerelease" || fail "rc: rc=$r $(grep POST "$FX/calls" | head -1)"
+! grep -q -e homebrew-tap -e '^curl' "$FX/calls" && grep -q 'an rc: the Homebrew cask is not touched' "$FX/o" && pass "an rc tag: no call to the tap or curl, said so" || fail "rc and the tap: $(grep -e homebrew-tap -e '^curl' "$FX/calls" | head -1) $(tail -1 "$FX/o")"
+cask v0.1.1-rc.1; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'an rc' "$FX/o" && pass "publish-cask of an rc: refused before any call (1)" || fail "publish-cask rc: rc=$r $(seq) $(tail -1 "$FX/o")"
+
+# the cask, before anything is public: each refusal comes before the POST (nothing public), names
+# what it saw, and writes nothing to the tap
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; printf '%s\trefs/tags/v0.1.0\n%s\trefs/tags/v0.1.0^{}\n' "$T" "$C" > "$FX/remote"
+pre() { # label want-text: the last pub refused before anything public
+  [ $r = 1 ] && nopublic && nowrite && grep -q "$2" "$FX/o" && pass "$1: refused before anything is public (1)" || fail "$1: rc=$r $(seq) $(tail -1 "$FX/o")"
+}
+echo '# edited' >> "$FX/out/v0.1.0/sheepr.rb"; pub v0.1.0 v0.1.0; r=$?; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+pre "an out-dir cask that is not the one the tag renders" "is not the cask the tag renders"
+TAPV=0.2.0; pub v0.1.0 v0.1.0; r=$?; TAPV=; pre "the tap's cask is newer (0.2.0)" "newer than v0.1.0"
+TAPV=0.1.0-rc.9; pub v0.1.0 v0.1.0; r=$?; TAPV=
+[ $r = 0 ] && grep -q '^gh api -X PUT' "$FX/calls" && pass "control: the tap's cask is an rc of this version (0.1.0-rc.9): updated (0)" || fail "tap rc of this version: rc=$r $(tail -1 "$FX/o")"
+tapset 0.1.0; TAPKEEP=1; pub v0.1.0 v0.1.0; r=$?; TAPKEEP=; pre "the tap's cask is this version with another archive hash" "0000000000000000000000000000000000000000000000000000000000000007"
+grep -q "$(shasum -a 256 "$FX/out/v0.1.0/sheepr-macos-universal.tar.gz" | cut -d' ' -f1)" "$FX/o" && pass "  that refusal names both hashes" || fail "  the refusal names: $(tail -1 "$FX/o")"
+tapset 0.0.9; sed 's/^\(  version .*\)$/\1\n\1/' "$FX/tap/sheepr.rb" > "$FX/t2" && mv "$FX/t2" "$FX/tap/sheepr.rb"
+TAPKEEP=1; pub v0.1.0 v0.1.0; r=$?; TAPKEEP=; pre "the tap's cask with two version lines" "one version line"
+rm -rf "$FX/tap"; mkdir -p "$FX/tap"; TAPKEEP=1; pub v0.1.0 v0.1.0; r=$?; TAPKEEP=; pre "no Casks/sheepr.rb in the tap" "has no Casks/sheepr.rb"
+echo false > "$FX/tapperm"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/tapperm"; pre "no right to write the tap" "cannot write lukaso/homebrew-tap"
+# the tap already holds this cask: no PUT (a resumed run), the file read again
+cp "$FX/out/v0.1.0/sheepr.rb" "$FX/tap.cur"; tapset 0.0.9; cp "$FX/tap.cur" "$FX/tap/sheepr.rb"; TAPKEEP=1; pub v0.1.0 v0.1.0; r=$?; TAPKEEP=
+[ $r = 0 ] && nowrite && grep -q 'already' "$FX/o" && pass "the tap already holds this cask: no PUT (0)" || fail "tap current: rc=$r $(seq) $(tail -1 "$FX/o")"
+
+# after the PATCH, a failure leaves the release public: exit 5, the next command named
+post() { # label: the last pub ended at 5, public, publish-cask named
+  [ $r = 5 ] && grep -q PATCH "$FX/calls" && grep -q 'v0.1.0 is public' "$FX/o" && grep -q 'publish-cask v0.1.0' "$FX/o" \
+    && pass "$1: exit 5, public said, publish-cask named" || fail "$1: rc=$r $(seq) $(tail -2 "$FX/o" | tr '\n' ' ')"
+}
+touch "$FX/corruptafter"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/corruptafter"; post "the published archive is not the build's"; nowrite && pass "  and no PUT" || fail "  a PUT ran"
+touch "$FX/curlcorrupt"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/curlcorrupt"; post "the archive brew would fetch is not the build's"; nowrite && pass "  and no PUT" || fail "  a PUT ran"
+echo true > "$FX/draftafter"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/draftafter"; post "the release reads as a draft after the PATCH"; nowrite && pass "  and no PUT" || fail "  a PUT ran"
+touch "$FX/put409"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/put409"; post "the PUT is refused (the tap changed)"
+touch "$FX/readbackdiff"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/readbackdiff"; post "the cask read back is not the one put"
+# publish-cask alone resumes it: the release is public, the tap is updated
+touch "$FX/put409"; pub v0.1.0 v0.1.0 >/dev/null; rm -f "$FX/put409"; cask v0.1.0; r=$?
+[ $r = 0 ] && grep -q '^gh api -X PUT' "$FX/calls" && cmp -s "$FX/tap/sheepr.rb" "$FX/out/v0.1.0/sheepr.rb" && ! grep -q -e 'POST' -e 'PATCH' "$FX/calls" \
+  && pass "publish-cask after a failed cask step: the cask put, nothing else published (0)" || fail "publish-cask resume: rc=$r $(seq) $(tail -1 "$FX/o")"
+cask v0.1.0; r=$?
+[ $r = 0 ] && nowrite && pass "publish-cask again: the tap is current, no PUT (0)" || fail "publish-cask current: rc=$r $(seq) $(tail -1 "$FX/o")"
+touch "$FX/notpublished"; tapset 0.0.9; cask v0.1.0; r=$?; rm -f "$FX/notpublished"
+[ $r = 1 ] && nowrite && grep -q 'no published release' "$FX/o" && ! grep -q 'is public' "$FX/o" && pass "publish-cask with no published release: refused, nothing written, 'public' never said (1)" || fail "publish-cask unpublished: rc=$r $(seq) $(tail -1 "$FX/o")"
+# the cask is rendered from the tag's template, not the checkout's
+echo '# a later change' >> "$REPO/packaging/homebrew/sheepr.rb.in"; tapset 0.0.9; cask v0.1.0; r=$?; g checkout -q packaging/homebrew/sheepr.rb.in
+[ $r = 0 ] && cmp -s "$FX/tap/sheepr.rb" "$FX/out/v0.1.0/sheepr.rb" && pass "publish-cask with the checkout's template changed after the tag: the tag's renders, the cask put (0)" || fail "template changed: rc=$r $(tail -1 "$FX/o")"
+sed -i.bak 's/"commit": "[0-9a-f]*"/"commit": "0000000000000000000000000000000000000000"/' "$FX/out/v0.1.0/MANIFEST.json" && rm -f "$FX/out/v0.1.0/MANIFEST.json.bak"
+tapset 0.0.9; cask v0.1.0; r=$?; mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q "is not v0.1.0's" "$FX/o" && pass "publish-cask with a manifest of another commit: refused before any call (1)" || fail "publish-cask commit: rc=$r $(seq) $(tail -1 "$FX/o")"
+# curl, as gh and git, gets only the named environment, and no decoy
+pub v0.1.0 v0.1.0 >/dev/null
+bad=""; for f in "$FX"/env.curl.*; do for k in $(sed 's/=.*//' "$f"); do case $k in HOME|PATH|TMPDIR|USER|LOGNAME|PWD|SHLVL|_|OLDPWD) ;; *) bad="$bad $k" ;; esac; done; done
+[ -e "$FX/env.curl.0" ] && [ -z "$bad" ] && ! grep -l "$DECOY" "$FX"/env.curl.* >/dev/null 2>&1 && pass "curl got only the named environment, no decoy" || fail "curl's environment:$bad"
 
 # __publish-dry refuses every way to reach a gh outside the fixtures. The "real gh" here is a
 # recording stand-in outside them (never the real one), run with a temp HOME; it must never be called.
@@ -163,7 +264,7 @@ ln -s "$OUT/gh" "$FX/gh-link"
 printf '#!/bin/sh\nexec "%s" "$@"\n' "$OUT/gh" > "$FX/gh-wrap"; chmod +x "$FX/gh-wrap"
 for spec in "outside:$OUT/gh" "symlink:$FX/gh-link" "dotdot:$FX/../$(basename "$OUT")/gh"; do
   l=${spec%%:*} p=${spec#*:}; rm -f "$OUT/called"
-  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$p" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$p" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_PUBLISH_DRY_CURL="$FX/curl" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
     sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
   [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_GH' "$FX/o" && pass "__publish-dry, a $l gh: refused for the gh stand-in, the outside gh never called" || fail "__publish-dry, $l: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 done
@@ -172,7 +273,7 @@ done
 nl='
 '
 cp "$FX/gh" "$FX/ghn$nl"; ln -s "$OUT/gh" "$FX/ghn"; rm -f "$OUT/called"
-(cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/ghn$nl" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+(cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/ghn$nl" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_PUBLISH_DRY_CURL="$FX/curl" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
   sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
 [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_GH' "$FX/o" && pass "a stand-in name ending in a newline: refused for the gh stand-in, the symlink's target never called" || fail "newline name: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1)"
 # a wrapper inside the fixtures that execs a gh outside them cannot be seen before it runs: what
@@ -180,7 +281,7 @@ cp "$FX/gh" "$FX/ghn$nl"; ln -s "$OUT/gh" "$FX/ghn"; rm -f "$OUT/called"
 # have no login and could not write
 rm -f "$OUT/called" "$OUT/env"
 (cd "$REPO" && env HOME="$FX/ghome" GH_TOKEN="$DECOY" GH_CONFIG_DIR="$FX/ghcfg" SSH_AUTH_SOCK="$FX/sock" SR_PUBLISH_DRY_GH="$FX/gh-wrap" \
-  SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1
+  SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_PUBLISH_DRY_CURL="$FX/curl" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1
 if [ -e "$OUT/env" ]; then
   h=$(sed -n 's/^HOME=//p' "$OUT/env")
   case $h in /private/tmp/sr-*) ! grep -q -e '^GH_TOKEN=' -e '^GH_CONFIG_DIR=' -e '^SSH_AUTH_SOCK=' -e '^GITHUB_TOKEN=' "$OUT/env" \
@@ -190,9 +291,18 @@ else fail "a wrapper reaching an outside gh: not reached, so its environment is 
 printf '#!/bin/sh\necho "OUTSIDE npm $*" >> "%s/called"\nexit 0\n' "$OUT" > "$OUT/npm"; chmod +x "$OUT/npm"; ln -s "$OUT/npm" "$FX/npm-link"
 for spec in "outside:$OUT/npm" "symlink:$FX/npm-link"; do
   l=${spec%%:*} p=${spec#*:}; rm -f "$OUT/called"
-  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$p" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+  (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$p" SR_PUBLISH_DRY_CURL="$FX/curl" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
     sh scripts/release.sh __publish-dry --out "$FX/out" v0.1.1-rc.1) > "$FX/o" 2>&1; r=$?
   [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_NPM' "$FX/o" && pass "__publish-dry, a $l npm: refused for the npm stand-in, the outside npm never called" || fail "__publish-dry, $l npm: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1) $(tail -1 "$FX/o")"
+done
+printf '#!/bin/sh\necho "OUTSIDE curl $*" >> "%s/called"\nexit 0\n' "$OUT" > "$OUT/curl"; chmod +x "$OUT/curl"; ln -s "$OUT/curl" "$FX/curl-link"
+for spec in "outside:$OUT/curl" "symlink:$FX/curl-link"; do
+  l=${spec%%:*} p=${spec#*:}
+  for entry in __publish-dry __publish-cask-dry; do rm -f "$OUT/called"
+    (cd "$REPO" && env HOME="$FX/ghome" SR_PUBLISH_DRY_GH="$FX/gh" SR_PUBLISH_DRY_GIT="$FX/git" SR_PUBLISH_DRY_NPM="$FX/npm" SR_PUBLISH_DRY_CURL="$p" SR_ASK_SCRIPT="$FX/ask" SR_ASK_RECORD="$FX/calls2" \
+      sh scripts/release.sh $entry --out "$FX/out" v0.1.0) > "$FX/o" 2>&1; r=$?
+    [ $r != 0 ] && [ ! -e "$OUT/called" ] && grep -q 'SR_PUBLISH_DRY_CURL' "$FX/o" && pass "$entry, a $l curl: refused for the curl stand-in, the outside curl never called" || fail "$entry, $l curl: rc=$r called=$(cat "$OUT/called" 2>/dev/null | head -1) $(tail -1 "$FX/o")"
+  done
 done
 # the dry run's gh and git get a fresh temp HOME, and no GH_CONFIG_DIR or SSH_AUTH_SOCK: even a
 # real gh that got this far would have no login
