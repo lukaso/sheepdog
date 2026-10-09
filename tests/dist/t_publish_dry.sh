@@ -316,9 +316,11 @@ want_real_tools='real_tools() {
 for e in publish publish_cask real_tools; do
   eval "want=\$want_$e"
   [ "$(body $e)" = "$want" ] && pass "$e: exactly its pinned body" || fail "$e's body: $(body $e | tr '\n' ' ')"
-  # defined once: NAME() and NAME ( ), and bash's `function NAME` (macOS sh is bash; sh runs the
-  # last definition)
-  n=$(grep -Ec "(^|[;&|[:space:]])(function[[:space:]]+$e([[:space:]{(]|\$)|$e[[:space:]]*[(][[:space:]]*[)])" "$SR_ROOT/scripts/release.sh")
+  # defined once: NAME() and NAME ( ), also right after `)` or `;`, and bash's `function NAME`
+  # (macOS sh is bash; sh runs the last definition). A line-based count cannot see a name split
+  # by backslash-newline, or a definition made by eval or `.`; a comment naming NAME() counts
+  # (a false red, the safe side)
+  n=$(grep -Ec "(^|[;&|()[:space:]])(function[[:space:]]+$e([[:space:]{(]|\$)|$e[[:space:]]*[(][[:space:]]*[)])" "$SR_ROOT/scripts/release.sh")
   [ "$n" = 1 ] && pass "$e: defined once" || fail "$e is defined $n times"
 done
 # the dispatch runs the entries themselves
