@@ -29,8 +29,11 @@
 //!   bits) in `SHEEPR_TEST_TAG`, a canary `SHEEPR_TEST_STATE` without the sentinel, a
 //!   withheld sink in `SHEEPR_TEST_SINK`, and first on PATH a directory whose `sheepr` is a
 //!   symlink to the debug binary next to TESTBIN's `deps` directory; every other inherited
-//!   `SHEEPR_*` and `XDG_STATE_HOME` removed. It forwards TERM and INT, waits, passes the exit
-//!   status on, and fails the run if anything was written to the canary or the sink.
+//!   `SHEEPR_*` and `XDG_STATE_HOME` removed, and TMPDIR a new folder `srt.XXXXXX` under the
+//!   runner's own. It forwards TERM and INT, waits, passes the exit status on, and fails the run
+//!   if anything was written to the canary or the sink. It then removes the temp folder, a failed
+//!   run's too, with what the binary left in it (a killed sheepr's registration folder, a failed
+//!   cell's scratch: issue #20); with SR_TEST_KEEP_TMP=1 it keeps it and names it.
 //! - `term-logger M R [stop]`: as `escape`, but G does not exec: it catches TERM, appends
 //!   `TERM <pid>` to `<R>.term` and exits 0. With `stop`, G first stops itself (SIGSTOP), so it
 //!   can only see a TERM if someone continues it. G's argv carries the marker M.
@@ -741,6 +744,26 @@ fn test_env(argv: &[String]) -> ! {
         eprintln!("sr-test-env: cannot make {}: {e}", dir.display());
         std::process::exit(125);
     }
+    // the test binary's own temp folder (TMPDIR): what it leaves there goes with it, never into the
+    // runner's temp folder (issue #20). A short name: sockets under it must fit in sun_path.
+    let tmp = {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let tmpl = std::env::temp_dir().join("srt.XXXXXX");
+        let mut raw = CString::new(tmpl.as_os_str().as_bytes()).map(CString::into_bytes_with_nul).unwrap_or_default();
+        if raw.is_empty() || unsafe { libc::mkdtemp(raw.as_mut_ptr() as *mut libc::c_char) }.is_null() {
+            eprintln!("sr-test-env: cannot make a temp folder under {}", std::env::temp_dir().display());
+            std::process::exit(125);
+        }
+        raw.pop();
+        PathBuf::from(std::ffi::OsString::from_vec(raw))
+    };
+    let end_tmp = || {
+        if std::env::var("SR_TEST_KEEP_TMP").as_deref() == Ok("1") {
+            eprintln!("sr-test-env: kept the test binary's temp folder {}", tmp.display());
+        } else if !remove_all(&tmp) {
+            eprintln!("sr-test-env: cannot remove the test binary's temp folder {}", tmp.display());
+        }
+    };
     let mut cmd = std::process::Command::new(&bin);
     cmd.args(&argv[1..]);
     for (k, _) in std::env::vars_os() {
@@ -756,11 +779,13 @@ fn test_env(argv: &[String]) -> ! {
         .env("SHEEPR_TEST_TAG", &tag)
         .env("SHEEPR_TEST_STATE", &canary)
         .env("SHEEPR_TEST_SINK", &sink)
+        .env("TMPDIR", &tmp)
         .env("PATH", newpath);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("sr-test-env: cannot run {}: {e}", bin.display());
+            end_tmp();
             std::process::exit(125);
         }
     };
@@ -803,7 +828,28 @@ fn test_env(argv: &[String]) -> ! {
     } else {
         let _ = std::fs::remove_dir_all(&dir);
     }
+    end_tmp();
     std::process::exit(rc)
+}
+
+/// Remove `p` and everything in it; a folder made read-only in it is opened first (never through
+/// a symlink). True when it is gone.
+fn remove_all(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fn open_up(p: &std::path::Path) {
+        let Ok(m) = std::fs::symlink_metadata(p) else { return };
+        if m.is_dir() {
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(m.permissions().mode() | 0o700));
+            for e in std::fs::read_dir(p).into_iter().flatten().flatten() {
+                open_up(&e.path());
+            }
+        }
+    }
+    if std::fs::remove_dir_all(p).is_ok() {
+        return true;
+    }
+    open_up(p);
+    std::fs::remove_dir_all(p).is_ok() || !p.exists()
 }
 
 fn main() {

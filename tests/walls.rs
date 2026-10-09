@@ -115,6 +115,49 @@ fn the_runner_sets_the_test_environment() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// PHASE2.md §0.4 (issue #20): the runner gives each test binary its own temp folder (TMPDIR, a
+/// new folder under the runner's own), and removes it after the binary, a failed one too, with
+/// what it left: a registration folder of a sheepr it killed, a cell's scratch, a folder it made
+/// read-only. The control: with SR_TEST_KEEP_TMP=1 the folder stays, and the runner names it.
+#[test]
+fn the_runner_gives_each_test_binary_its_own_temp_folder_and_removes_it() {
+    let d = scratch("tmp");
+    let parent = d.join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    let seen = d.join("seen");
+    let bin = fake_test_binary(
+        &d,
+        "leaker",
+        &format!(
+            r#"echo "$TMPDIR" > "{}"; mkdir -m 700 "$TMPDIR/sr-ABCDEFGH" && : > "$TMPDIR/sr-ABCDEFGH/owner" && mkdir -p "$TMPDIR/sr-sw-cell-1/ro" && : > "$TMPDIR/sr-sw-cell-1/ro/f" && chmod 500 "$TMPDIR/sr-sw-cell-1/ro" && exit 101"#,
+            seen.display()
+        ),
+    );
+    let run = |keep: bool| {
+        let mut c = Command::new(runner());
+        c.arg(&bin).env("TMPDIR", &parent).stderr(std::process::Stdio::piped());
+        if keep {
+            c.env("SR_TEST_KEEP_TMP", "1");
+        } else {
+            c.env_remove("SR_TEST_KEEP_TMP");
+        }
+        let o = c.output().unwrap();
+        let t = PathBuf::from(std::fs::read_to_string(&seen).unwrap().trim_end());
+        (o.status.code(), t, String::from_utf8_lossy(&o.stderr).into_owned())
+    };
+    let (code, t, err) = run(false);
+    assert_eq!(code, Some(101), "the test binary's own code: {err}");
+    assert!(t.parent() == Some(parent.as_path()) && t.file_name().is_some_and(|n| n.to_string_lossy().starts_with("srt.")), "TMPDIR is a new folder under the runner's: {}", t.display());
+    assert!(!t.exists(), "the test binary's temp folder is removed after a failed run: {err}");
+    let left: Vec<_> = std::fs::read_dir(&parent).unwrap().flatten().map(|e| e.file_name()).filter(|n| n.to_string_lossy().starts_with("srt.")).collect();
+    assert!(left.is_empty(), "nothing of it is left: {left:?}");
+    let (code, t, err) = run(true);
+    assert_eq!(code, Some(101), "{err}");
+    assert!(t.join("sr-ABCDEFGH/owner").exists() && err.contains(&t.display().to_string()), "control: kept and named with SR_TEST_KEEP_TMP=1: {err}");
+    let _ = std::fs::set_permissions(t.join("sr-sw-cell-1/ro"), std::fs::Permissions::from_mode(0o700));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// PHASE2.md §0.4: a TERM to the runner reaches the test binary (it dies of TERM and the runner
 /// reports it), so ctrl-C and test-all's cleanup still end a run.
 #[test]
