@@ -504,22 +504,19 @@ fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(v)
 }
 
-/// Where registration folders are (register.rs's Listener: `$TMPDIR`, or /tmp when that path would
-/// be too long). A debug build reads none of them unless the seam SHEEPR_TEST_REAP_LISTENERS=1 is
-/// set, and then only `$TMPDIR` (a cell's own scratch): a test never touches the operator's temp folder.
+/// Where `sweep` and the auto-sweep look for registration folders (issue #20): only where this
+/// sheepr's own listener would put its folder (`register::base_for`, from TMPDIR). A folder
+/// elsewhere is a sheepr's of another environment, which reaps it there. A debug build (the
+/// tests) looks only with the seam SHEEPR_TEST_REAP_LISTENERS=1, and never in /tmp: a cell's own
+/// TMPDIR, so a test never touches the operator's temp folder.
 #[cfg(target_os = "macos")]
 fn reap_bases() -> Vec<PathBuf> {
-    let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = crate::register::base_for(std::env::var_os("TMPDIR"));
     if cfg!(debug_assertions) {
-        return if crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") { tmp.into_iter().collect() } else { Vec::new() };
+        let is_tmp = std::fs::canonicalize(&base).ok() == std::fs::canonicalize("/tmp").ok();
+        return if crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") && !is_tmp { vec![base] } else { Vec::new() };
     }
-    let mut v: Vec<PathBuf> = tmp.into_iter().collect();
-    let slash_tmp = PathBuf::from("/tmp");
-    let same = |a: &Path, b: &Path| std::fs::canonicalize(a).ok().is_some_and(|x| std::fs::canonicalize(b).ok() == Some(x));
-    if !v.iter().any(|p| same(p, &slash_tmp)) {
-        v.push(slash_tmp);
-    }
-    v
+    vec![base]
 }
 
 /// The auto-sweep before a `sheepr run` (PHASE2.md §3.5-§3.7): the same owner's dead jobs,
@@ -533,7 +530,8 @@ pub fn auto(owner: &str, quiet: bool) {
     // registration socket), whatever the state
     #[cfg(target_os = "macos")]
     {
-        let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_millis(50));
+        let ms = crate::seam_ms("SHEEPR_TEST_REAP_MS").unwrap_or(50);
+        let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_millis(ms));
         if n > 0 {
             crate::note(format!("auto-sweep removed {n} registration folder(s)"));
         }

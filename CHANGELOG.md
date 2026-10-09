@@ -12,7 +12,9 @@ each message sheepr itself writes to stderr (for a usage error, that line says w
   (`$TMPDIR/sr-XXXXXXXX`, or under `/tmp`) that a sheepr killed with SIGKILL leaves behind. Each
   folder now records which sheepr owns it, and only the folder of a sheepr that is gone is
   removed; `sweep` says how many. A folder from an older sheepr is removed when it is more than a
-  day old and nothing listens on it ([#20](https://github.com/lukaso/sheepr/issues/20)).
+  day old and nothing listens on it. A sweep looks only where its own sheepr would make that
+  folder (`$TMPDIR`, or `/tmp` when that path is too long)
+  ([#20](https://github.com/lukaso/sheepr/issues/20)).
 
 ## 0.1.2 (2026-10-09)
 

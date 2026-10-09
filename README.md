@@ -96,10 +96,11 @@ A caller that sends INT to sheepr's pid alone and then SIGKILLs it (for example 
 `child.kill('SIGINT')` and then `child.kill('SIGKILL')`) kills sheepr (on Linux, the command it
 started dies with it), not the rest of the tree. Such a caller should send TERM instead. Your next
 `sheepr run` or `sheepr sweep` with the same `--owner` and the same state directory, before a
-reboot (in a container: in the same container), ends most of what was left, and removes the
-registration folder (`sr-…` in the temp folder) the killed sheepr left; a process sheepr never
-saw can stay, and `sheepr strays` lists it. A `run` with `--no-sweep` skips that sweep, and
-a `run` stops sweeping after 200 ms, so when many jobs were left, it can take more than one run.
+reboot (in a container: in the same container), ends most of what was left; a process sheepr
+never saw can stay, and `sheepr strays` lists it. On macOS, any later `run` or `sweep` with the
+same temp folder (`TMPDIR`) also removes the registration folder (`sr-…`) the killed sheepr left.
+A `run` with `--no-sweep` skips both, and a `run` stops sweeping jobs after 200 ms (and folders
+after 50 ms more), so when many were left, it can take more than one run.
 
 On macOS a running job costs some CPU: sheepr checks your processes four times a second to find
 the ones that escaped. Measured on a busy Mac (about 1000 of your processes, load average 16): about 1.5% of one CPU

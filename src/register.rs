@@ -164,10 +164,7 @@ impl Listener {
             say!("sheepr: no entropy for a registration nonce; nested runs are found by the scan only");
             return None;
         }
-        let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| "/tmp".into());
-        // mkdtemp's name: "sr-" + 8 characters; the socket's name: "s"
-        let fits = |base: &Path| base.join("sr-XXXXXXXX").join("s").as_os_str().len() <= PATH_MAX;
-        let base = if fits(&tmp) { tmp } else { PathBuf::from("/tmp") };
+        let base = base_for(std::env::var_os("TMPDIR"));
         let tmpl = std::ffi::CString::new(format!("{}/sr-XXXXXXXX", base.display().to_string().trim_end_matches('/'))).ok()?;
         let mut raw = tmpl.into_bytes_with_nul();
         let d = unsafe { libc::mkdtemp(raw.as_mut_ptr() as *mut libc::c_char) };
@@ -349,6 +346,21 @@ impl Listener {
 }
 
 #[cfg(test)]
+mod base_tests {
+    use super::*;
+
+    /// Where a listener puts its folder, and so where `reap` looks: $TMPDIR when the socket path
+    /// under it fits, else /tmp (also with no TMPDIR, or a relative one).
+    #[test]
+    fn the_folder_base_is_tmpdir_when_the_path_fits_else_tmp() {
+        assert_eq!(base_for(Some("/var/folders/ab/T".into())), PathBuf::from("/var/folders/ab/T"));
+        assert_eq!(base_for(Some(format!("/x/{}", "a".repeat(120)).into())), PathBuf::from("/tmp"));
+        assert_eq!(base_for(None), PathBuf::from("/tmp"));
+        assert_eq!(base_for(Some("relative".into())), PathBuf::from("/tmp"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -407,12 +419,21 @@ impl Drop for Listener {
 /// The owner record's name in a registration folder.
 const OWNER: &str = "owner";
 
+/// Where a listener puts its folder, and so where `reap` looks (issue #20): `tmpdir` when the
+/// socket path under it fits, else /tmp (also with no TMPDIR, or a relative one).
+pub fn base_for(tmpdir: Option<std::ffi::OsString>) -> PathBuf {
+    let tmp = tmpdir.map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| "/tmp".into());
+    // mkdtemp's name: "sr-" + 8 characters; the socket's name: "s"
+    if tmp.join("sr-XXXXXXXX").join("s").as_os_str().len() <= PATH_MAX { tmp } else { PathBuf::from("/tmp") }
+}
+
 /// Remove the registration folders of sheeprs that are gone (issue #20), under each of `bases`,
 /// until `deadline`; returns how many. A folder is removed only when it is a registration folder
 /// exactly (named `sr-` and 8 letters or digits, this user's, mode 0700, not a symlink, holding
 /// nothing but the socket `s` and `owner`) and either its owner record (this pid namespace) names
-/// a process that is gone, or it has no owner record (an older sheepr's, or one made and never
-/// bound) and is more than a day old with nothing listening on its socket.
+/// a process that is gone, or it has no owner record that parses (an older sheepr's, one made and
+/// never bound, or a write that failed) and is more than a day old with nothing listening on its
+/// socket.
 pub fn reap(bases: &[PathBuf], deadline: Instant) -> usize {
     let mut n = 0;
     for base in bases {
@@ -458,17 +479,30 @@ fn gone(f: &Path) -> bool {
     }
     if let Some(o) = owner {
         let w: Vec<&str> = o.trim_end_matches('\n').split(' ').collect();
-        return match (w.as_slice(), w.len()) {
-            (["v1", pid, id, ns], 4) => match (pid.parse::<i32>(), id.parse::<u64>()) {
-                (Ok(p), Ok(i)) if p > 1 && *ns == crate::journal::pidns() => !sheepr::ident::same(p, i),
-                _ => false,
-            },
-            _ => false,
-        };
+        if let ["v1", pid, id, ns] = w.as_slice() {
+            if let (Ok(p), Ok(i)) = (pid.parse::<i32>(), id.parse::<u64>()) {
+                if p > 1 {
+                    return *ns == crate::journal::pidns() && owner_gone(p, i);
+                }
+            }
+        }
+        // a record that does not parse (an empty or cut write): as no record
     }
     let old = m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(86400));
     // an older sheepr's folder: nothing listens on its socket (or it never got one)
     old && (!sock || std::os::unix::net::UnixStream::connect(f.join("s")).is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused))
+}
+
+/// Is the owner `p` (identity `i`) gone? Only on positive evidence: its identity read and another,
+/// or no process `p` at all (ESRCH). An identity that cannot be read for a live process (a zombie
+/// not yet reaped, a policy that refuses the read) keeps the folder. The debug seam
+/// SHEEPR_TEST_IDENTITY_UNREADABLE=<pid> makes that pid's identity unreadable.
+fn owner_gone(p: i32, i: u64) -> bool {
+    let unreadable = cfg!(debug_assertions) && std::env::var("SHEEPR_TEST_IDENTITY_UNREADABLE").ok().and_then(|v| v.parse::<i32>().ok()) == Some(p);
+    match if unreadable { None } else { sheepr::ident::identity(p) } {
+        Some(x) => x != i,
+        None => (unsafe { libc::kill(p, 0) }) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH),
+    }
 }
 
 /// The peer's audit token (`LOCAL_PEERTOKEN`): eight u32; [1] euid, [3] ruid, [5] pid, [7] pidversion.

@@ -1535,8 +1535,28 @@ fn the_sweep_removes_only_dead_registration_folders() {
     std::fs::create_dir(&empty).unwrap();
     mode(&empty, 0o700);
     age(&empty);
+    // an owner record that does not parse (an empty one: a failed or cut write) counts as none
+    let blank = regdir(&tmp, "sr-Blank001", Some(""), &[]);
+    age(&blank);
+    let cut = regdir(&tmp, "sr-Cut00001", Some("v1 999998"), &[]);
+    age(&cut);
+    let blank_young = regdir(&tmp, "sr-Blank002", Some(""), &[]);
+    // only positive evidence that the owner is gone: a live owner whose identity cannot be read
+    // (a debug seam) stays; a pid that now holds another process (its identity differs) is gone
+    let (_x, xp, _) = decoy(&d, "owner");
+    let (_y, yp, _) = decoy(&d, "other");
+    let alive = regdir(&tmp, "sr-Alive001", Some(&format!("v1 {} {} 0\n", xp.0, xp.1)), &[]);
+    let reused = regdir(&tmp, "sr-Reuse001", Some(&format!("v1 {} {NEVER} 0\n", yp.0)), &[]);
+    // a record that does not parse, on an old folder whose socket is listened on: kept
+    let blank_listened = tmp.join("sr-Blank003");
+    std::fs::create_dir(&blank_listened).unwrap();
+    mode(&blank_listened, 0o700);
+    std::fs::write(blank_listened.join("owner"), "").unwrap();
+    let _bl = std::os::unix::net::UnixListener::bind(blank_listened.join("s")).unwrap();
+    age(&blank_listened);
     let tmp_s = tmp.display().to_string();
-    let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+    let xs = xp.0.to_string();
+    let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1"), ("SHEEPR_TEST_IDENTITY_UNREADABLE", xs.as_str())]);
     let gone = |p: &Path| std::fs::symlink_metadata(p).is_err();
     // a folder that stays keeps everything it held (removing its socket or owner record would
     // break it even when the folder itself stays)
@@ -1552,7 +1572,12 @@ fn the_sweep_removes_only_dead_registration_folders() {
     assert!(whole(&young, false), "a young owner-less folder was touched");
     assert!(whole(&listened, false), "an owner-less folder whose socket is listened on was touched");
     assert!(gone(&empty), "an old empty folder stayed: {said}");
-    assert!(said.contains("removed 3 registration folders of sheeprs that are gone"), "{said}");
+    assert!(gone(&blank) && gone(&cut), "an old folder whose owner record does not parse stayed: {said}");
+    assert!(whole(&blank_young, true), "a young folder whose owner record does not parse was touched");
+    assert!(whole(&blank_listened, true), "an old folder whose owner record does not parse, listened on, was touched");
+    assert!(whole(&alive, true), "a live owner's folder was removed because its identity could not be read");
+    assert!(gone(&reused), "a folder whose owner's pid now holds another process stayed: {said}");
+    assert!(said.contains("removed 6 registration folders of sheeprs that are gone"), "{said}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
@@ -1567,10 +1592,55 @@ fn the_auto_sweep_removes_a_dead_registration_folder() {
     std::fs::create_dir(&tmp).unwrap();
     mode(&tmp, 0o700);
     let f = regdir(&tmp, "sr-Auto0001", Some(&format!("v1 999998 {NEVER} 0\n")), &[]);
-    let st = Command::new(sheepr()).args(["run", "--", "/usr/bin/true"]).env("TMPDIR", &tmp).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_REAP_LISTENERS", "1").status().unwrap();
+    // the auto-sweep's 50 ms for the folders, widened here (one stall under load would skip the
+    // only entry)
+    let st = Command::new(sheepr()).args(["run", "--", "/usr/bin/true"]).env("TMPDIR", &tmp).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_REAP_LISTENERS", "1").env("SHEEPR_TEST_REAP_MS", "5000").status().unwrap();
     let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(st.code(), Some(0));
     assert!(!f.exists(), "the auto-sweep left a gone sheepr's folder");
     assert!(left.is_empty(), "the temp folder still holds {left:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A debug build never reaps /tmp, also with the seam (macOS): with a TMPDIR too long for a socket
+/// path (the listener would use /tmp) and with TMPDIR=/private/tmp itself, a dead registration
+/// folder this cell plants in /private/tmp stays whole. The control: the same folder in the cell's
+/// own TMPDIR is removed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_debug_sweep_never_reaps_tmp() {
+    let d = scratch("reaptmp");
+    let s = state(&d);
+    let tmp = d.join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    mode(&tmp, 0o700);
+    let out = Command::new("mktemp").args(["-d", "/private/tmp/sr-XXXXXXXX"]).output().unwrap();
+    let decoy_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    struct Rm(PathBuf);
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _rm = Rm(decoy_dir.clone());
+    let dead = format!("v1 999998 {NEVER} 0\n");
+    std::fs::write(decoy_dir.join("owner"), &dead).unwrap();
+    dead_socket(&decoy_dir.join("s"));
+    let ctl = regdir(&tmp, "sr-Ctl00001", Some(&dead), &[]);
+    let long = format!("{}/{}", tmp.display(), "a".repeat(120));
+    let whole = || decoy_dir.join("s").exists() && decoy_dir.join("owner").exists();
+    let mut rows = Vec::new();
+    for t in [long.as_str(), "/private/tmp", "/tmp"] {
+        let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", t), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+        rows.push((t.chars().take(40).collect::<String>(), code, whole(), said));
+    }
+    let tmp_s = tmp.display().to_string();
+    let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+    for (t, c, w, said) in &rows {
+        assert_eq!(*c, Some(0), "TMPDIR {t}: {said}");
+        assert!(*w, "a debug sweep with TMPDIR {t} touched a folder in /private/tmp: {said}");
+    }
+    assert_eq!(code, Some(0), "{said}");
+    assert!(!ctl.exists() && whole(), "control: the cell's own TMPDIR folder is removed, the /tmp one is not: {said}");
     let _ = std::fs::remove_dir_all(&d);
 }
