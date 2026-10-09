@@ -507,6 +507,7 @@ fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// Where registration folders are (register.rs's Listener: `$TMPDIR`, or /tmp when that path would
 /// be too long). A debug build reads none of them unless the seam SHEEPR_TEST_REAP_LISTENERS=1 is
 /// set, and then only `$TMPDIR` (a cell's own scratch): a test never touches the operator's temp folder.
+#[cfg(target_os = "macos")]
 fn reap_bases() -> Vec<PathBuf> {
     let tmp = std::env::var_os("TMPDIR").map(PathBuf::from).filter(|p| p.is_absolute());
     if cfg!(debug_assertions) {
@@ -528,10 +529,14 @@ fn reap_bases() -> Vec<PathBuf> {
 /// be; a deadline missed is `partial`. It takes the wall's
 /// token only when there is a journal to open: an empty state produces no fact.
 pub fn auto(owner: &str, quiet: bool) {
-    // the registration folders of sheeprs that are gone (issue #20), whatever the state
-    let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_millis(50));
-    if n > 0 {
-        crate::note(format!("auto-sweep removed {n} registration folder(s)"));
+    // the registration folders of sheeprs that are gone (issue #20; macOS: Linux has no
+    // registration socket), whatever the state
+    #[cfg(target_os = "macos")]
+    {
+        let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_millis(50));
+        if n > 0 {
+            crate::note(format!("auto-sweep removed {n} registration folder(s)"));
+        }
     }
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else { return };
     let Some(dir) = folder(&state) else { return };
@@ -635,10 +640,14 @@ pub fn main(args: &[OsString]) -> i32 {
         crate::fail!("sheepr: {why}, so sweep cannot tell which processes are which. Nothing was signalled.");
         return 1;
     }
-    // the registration folders of sheeprs that are gone (issue #20), whatever the state
-    let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_secs(5));
-    if n > 0 {
-        say!("sheepr: removed {n} registration folder{} of {} that {} gone.", if n == 1 { "" } else { "s" }, if n == 1 { "a sheepr" } else { "sheeprs" }, if n == 1 { "is" } else { "are" });
+    // the registration folders of sheeprs that are gone (issue #20; macOS: Linux has no
+    // registration socket), whatever the state
+    #[cfg(target_os = "macos")]
+    {
+        let n = crate::register::reap(&reap_bases(), std::time::Instant::now() + std::time::Duration::from_secs(5));
+        if n > 0 {
+            say!("sheepr: removed {n} registration folder{} of {} that {} gone.", if n == 1 { "" } else { "s" }, if n == 1 { "a sheepr" } else { "sheeprs" }, if n == 1 { "is" } else { "are" });
+        }
     }
     let Some(state) = crate::state::resolve(cfg!(debug_assertions), |k| std::env::var_os(k), |p| p.exists()) else {
         crate::note("state-unset".into());
