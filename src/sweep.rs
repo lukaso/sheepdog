@@ -507,14 +507,16 @@ fn journals(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// Where `sweep` and the auto-sweep look for registration folders (issue #20): only where this
 /// sheepr's own listener would put its folder (`register::base_for`, from TMPDIR). A folder
 /// elsewhere is a sheepr's of another environment, which reaps it there. A debug build (the
-/// tests) looks only with the seam SHEEPR_TEST_REAP_LISTENERS=1, and never in /tmp: a cell's own
-/// TMPDIR, so a test never touches the operator's temp folder.
+/// tests) looks only with the seam SHEEPR_TEST_REAP_LISTENERS=1, and only in a folder its cell
+/// marked as its own (the regular file `.sheepr-test-reap`: the operator's temp folders never hold
+/// it, so no cell aims a sweep at them), and never in /tmp itself.
 #[cfg(target_os = "macos")]
 fn reap_bases() -> Vec<PathBuf> {
     let base = crate::register::base_for(std::env::var_os("TMPDIR"));
     if cfg!(debug_assertions) {
-        let is_tmp = std::fs::canonicalize(&base).ok() == std::fs::canonicalize("/tmp").ok();
-        return if crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") && !is_tmp { vec![base] } else { Vec::new() };
+        let marked = std::fs::symlink_metadata(base.join(".sheepr-test-reap")).is_ok_and(|m| m.is_file());
+        let ok = crate::seam_flag("SHEEPR_TEST_REAP_LISTENERS") && marked && !crate::register::is_slash_tmp(&base);
+        return if ok { vec![base] } else { Vec::new() };
     }
     vec![base]
 }

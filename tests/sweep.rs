@@ -1458,6 +1458,20 @@ fn regdir(tmp: &Path, name: &str, owner: Option<&str>, extra: &[&str]) -> PathBu
     f
 }
 
+/// The mark a debug sweep needs in its TMPDIR before it reaps there (src/sweep.rs reap_bases).
+#[cfg(target_os = "macos")]
+const MARK: &str = ".sheepr-test-reap";
+
+/// A cell's own temp folder for the registration-folder cells: `<d>/t`, 0700, marked as the cell's.
+#[cfg(target_os = "macos")]
+fn reap_tmp(d: &Path) -> PathBuf {
+    let tmp = d.join("t");
+    std::fs::create_dir(&tmp).unwrap();
+    mode(&tmp, 0o700);
+    std::fs::write(tmp.join(MARK), b"").unwrap();
+    tmp
+}
+
 /// Set a path's modification time to two days ago.
 #[cfg(target_os = "macos")]
 fn age(p: &Path) {
@@ -1474,9 +1488,7 @@ fn age(p: &Path) {
 fn a_killed_runs_registration_folder_is_removed_by_the_sweep() {
     let d = scratch("reap");
     let s = state(&d);
-    let tmp = d.join("t");
-    std::fs::create_dir(&tmp).unwrap();
-    mode(&tmp, 0o700);
+    let tmp = reap_tmp(&d);
     let (mut dead, fdead, rdead) = listener_run(&d, &tmp, &s, "dead");
     let (_live, flive, _rlive) = listener_run(&d, &tmp, &s, "live");
     let owner = std::fs::read_to_string(fdead.join("owner")).unwrap_or_default();
@@ -1511,9 +1523,7 @@ fn a_killed_runs_registration_folder_is_removed_by_the_sweep() {
 fn the_sweep_removes_only_dead_registration_folders() {
     let d = scratch("reapx");
     let s = state(&d);
-    let tmp = d.join("t");
-    std::fs::create_dir(&tmp).unwrap();
-    mode(&tmp, 0o700);
+    let tmp = reap_tmp(&d);
     let dead = format!("v1 999998 {NEVER} 0\n");
     let ctl = regdir(&tmp, "sr-Ctl00001", Some(&dead), &[]);
     let extra = regdir(&tmp, "sr-Xtra0001", Some(&dead), &["x"]);
@@ -1588,59 +1598,56 @@ fn the_sweep_removes_only_dead_registration_folders() {
 fn the_auto_sweep_removes_a_dead_registration_folder() {
     let d = scratch("reapauto");
     let s = state(&d);
-    let tmp = d.join("t");
-    std::fs::create_dir(&tmp).unwrap();
-    mode(&tmp, 0o700);
+    let tmp = reap_tmp(&d);
     let f = regdir(&tmp, "sr-Auto0001", Some(&format!("v1 999998 {NEVER} 0\n")), &[]);
     // the auto-sweep's 50 ms for the folders, widened here (one stall under load would skip the
     // only entry)
     let st = Command::new(sheepr()).args(["run", "--", "/usr/bin/true"]).env("TMPDIR", &tmp).env("SHEEPR_TEST_STATE", &s).env("SHEEPR_TEST_REAP_LISTENERS", "1").env("SHEEPR_TEST_REAP_MS", "5000").status().unwrap();
-    let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let left: Vec<String> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n != MARK).collect();
     assert_eq!(st.code(), Some(0));
     assert!(!f.exists(), "the auto-sweep left a gone sheepr's folder");
     assert!(left.is_empty(), "the temp folder still holds {left:?}");
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// A debug build never reaps /tmp, also with the seam (macOS): with a TMPDIR too long for a socket
-/// path (the listener would use /tmp) and with TMPDIR=/private/tmp itself, a dead registration
-/// folder this cell plants in /private/tmp stays whole. The control: the same folder in the cell's
-/// own TMPDIR is removed.
+/// A debug build reaps only a temp folder its cell marked as its own (`.sheepr-test-reap`, a
+/// regular file), also with the seam (macOS): the operator's temp folders never hold the mark, so
+/// no cell aims a sweep at them. A dead registration folder in an unmarked folder of the cell
+/// stays, and in one whose mark is a symlink; the control: the same in the marked folder goes.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_debug_sweep_never_reaps_tmp() {
-    let d = scratch("reaptmp");
+fn a_debug_sweep_reaps_only_a_folder_its_cell_marked() {
+    let d = scratch("reapmark");
     let s = state(&d);
-    let tmp = d.join("t");
-    std::fs::create_dir(&tmp).unwrap();
-    mode(&tmp, 0o700);
-    let out = Command::new("mktemp").args(["-d", "/private/tmp/sr-XXXXXXXX"]).output().unwrap();
-    let decoy_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    struct Rm(PathBuf);
-    impl Drop for Rm {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let _rm = Rm(decoy_dir.clone());
     let dead = format!("v1 999998 {NEVER} 0\n");
-    std::fs::write(decoy_dir.join("owner"), &dead).unwrap();
-    dead_socket(&decoy_dir.join("s"));
-    let ctl = regdir(&tmp, "sr-Ctl00001", Some(&dead), &[]);
-    let long = format!("{}/{}", tmp.display(), "a".repeat(120));
-    let whole = || decoy_dir.join("s").exists() && decoy_dir.join("owner").exists();
+    let unmarked = d.join("u");
+    std::fs::create_dir(&unmarked).unwrap();
+    mode(&unmarked, 0o700);
+    let in_unmarked = regdir(&unmarked, "sr-Unmk0001", Some(&dead), &[]);
+    let linked = d.join("l");
+    std::fs::create_dir(&linked).unwrap();
+    mode(&linked, 0o700);
+    std::fs::write(d.join("elsewhere"), b"").unwrap();
+    std::os::unix::fs::symlink(d.join("elsewhere"), linked.join(MARK)).unwrap();
+    let in_linked = regdir(&linked, "sr-Link0002", Some(&dead), &[]);
+    let tmp = reap_tmp(&d);
+    let ctl = regdir(&tmp, "sr-Ctl00002", Some(&dead), &[]);
+    let whole = |p: &Path| p.join("s").exists() && p.join("owner").exists();
     let mut rows = Vec::new();
-    for t in [long.as_str(), "/private/tmp", "/tmp"] {
-        let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", t), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
-        rows.push((t.chars().take(40).collect::<String>(), code, whole(), said));
+    for t in [&unmarked, &linked] {
+        let ts = t.display().to_string();
+        let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", ts.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
+        rows.push((ts, code, said));
     }
     let tmp_s = tmp.display().to_string();
     let (code, said) = sweep_said_with(&s, &[], &[("TMPDIR", tmp_s.as_str()), ("SHEEPR_TEST_REAP_LISTENERS", "1")]);
-    for (t, c, w, said) in &rows {
+    for (t, c, said) in &rows {
         assert_eq!(*c, Some(0), "TMPDIR {t}: {said}");
-        assert!(*w, "a debug sweep with TMPDIR {t} touched a folder in /private/tmp: {said}");
+        assert!(!said.contains("registration folder"), "TMPDIR {t} (not marked as the cell's): {said}");
     }
+    assert!(whole(&in_unmarked), "a debug sweep reaped a folder not marked as the cell's");
+    assert!(whole(&in_linked), "a debug sweep took a symlink for the mark");
     assert_eq!(code, Some(0), "{said}");
-    assert!(!ctl.exists() && whole(), "control: the cell's own TMPDIR folder is removed, the /tmp one is not: {said}");
+    assert!(!ctl.exists() && said.contains("removed 1 registration folder"), "control: the marked folder's dead folder is removed: {said}");
     let _ = std::fs::remove_dir_all(&d);
 }

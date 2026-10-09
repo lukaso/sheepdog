@@ -39,8 +39,13 @@ dead_folder() { # dir: a registration folder whose owner is gone (0700, an owner
 TD=$(mktemp -d /private/tmp/sr-XXXXXXXX) && dead_folder "$TD" || { fail "a /tmp decoy"; finish; }
 OD=$(mktemp -d "$FX/h/sr-XXXXXXXX") && dead_folder "$OD" || { fail "a TMPDIR folder"; finish; }
 sr sweep; r=$?
-[ "$r" = 0 ] && [ ! -e "$OD" ] && [ -S "$TD/s" ] && [ -f "$TD/owner" ] && grep -q 'removed 1 registration folder' "$FX/err" \
-  && pass "a release sweep removes a dead registration folder in its TMPDIR, and leaves /private/tmp's" || fail "rc=$r, TMPDIR folder $( [ -e "$OD" ] && echo kept || echo removed), /tmp folder $( [ -S "$TD/s" ] && echo whole || echo touched): $(tr '\n' ' ' < "$FX/err")"
+# the verdict is the sweep's own count (one folder: the one in its TMPDIR); the /tmp decoy also
+# shows it, but another sheepr on this host whose folder is /tmp may remove it meanwhile, and then
+# the row says so instead of failing
+if [ "$r" = 0 ] && [ ! -e "$OD" ] && grep -q 'removed 1 registration folder of a sheepr that is gone' "$FX/err"; then
+  if [ -S "$TD/s" ] && [ -f "$TD/owner" ]; then pass "a release sweep removes a dead registration folder in its TMPDIR, and leaves /private/tmp's"
+  else echo "inconclusive: the sweep removed one folder (its TMPDIR's), but the /tmp decoy went too: another sheepr on this host swept /tmp meanwhile"; fi
+else fail "rc=$r, TMPDIR folder $( [ -e "$OD" ] && echo kept || echo removed), /tmp folder $( [ -S "$TD/s" ] && echo whole || echo touched): $(tr '\n' ' ' < "$FX/err")"; fi
 rm -rf "$TD"; TD=""
 # control 1: a dead job's readable journal (its supervisor SIGKILLed): read, swept, not named
 # (env, not the renv function: a function in the background is a subshell, and $! must be sheepr)

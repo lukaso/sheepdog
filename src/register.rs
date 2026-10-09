@@ -358,6 +358,19 @@ mod base_tests {
         assert_eq!(base_for(None), PathBuf::from("/tmp"));
         assert_eq!(base_for(Some("relative".into())), PathBuf::from("/tmp"));
     }
+
+    /// The /tmp check compares the folder (device and inode), not its spelling: /private/tmp and
+    /// the Data volume's path of it are /tmp; another folder, and a path that is not there, are not.
+    #[test]
+    fn the_tmp_check_compares_the_folder_not_its_spelling() {
+        assert!(is_slash_tmp(Path::new("/tmp")) && is_slash_tmp(Path::new("/private/tmp/")));
+        let data = Path::new("/System/Volumes/Data/private/tmp");
+        if data.exists() {
+            assert!(is_slash_tmp(data), "the Data volume's path of /tmp");
+        }
+        assert!(!is_slash_tmp(Path::new("/")) && !is_slash_tmp(Path::new("/private/var/tmp")));
+        assert!(!is_slash_tmp(Path::new("/no/such/folder")));
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +504,16 @@ fn gone(f: &Path) -> bool {
     let old = m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(86400));
     // an older sheepr's folder: nothing listens on its socket (or it never got one)
     old && (!sock || std::os::unix::net::UnixStream::connect(f.join("s")).is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused))
+}
+
+/// Is `p` the folder /tmp is (the same device and inode: /private/tmp, or the Data volume's path of
+/// it, whatever the spelling)? False when either cannot be read.
+pub fn is_slash_tmp(p: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(p), std::fs::metadata("/tmp")) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
 }
 
 /// Is the owner `p` (identity `i`) gone? Only on positive evidence: its identity read and another,
