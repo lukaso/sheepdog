@@ -118,7 +118,9 @@ fn the_runner_sets_the_test_environment() {
 /// PHASE2.md §0.4 (issue #20): the runner gives each test binary its own temp folder (TMPDIR, a
 /// new folder under the runner's own), and removes it after the binary, a failed one too, with
 /// what it left: a registration folder of a sheepr it killed, a cell's scratch, a folder it made
-/// read-only. The control: with SR_TEST_KEEP_TMP=1 the folder stays, and the runner names it.
+/// read-only. The control: with SR_TEST_KEEP_TMP=1 the folder stays, and the runner names it. The
+/// folder is 0755, as /tmp let other users through to a cell's scratch: the Linux cells that run a
+/// fixture as another uid (as root) write into their scratch inside it.
 #[test]
 fn the_runner_gives_each_test_binary_its_own_temp_folder_and_removes_it() {
     let d = scratch("tmp");
@@ -154,6 +156,8 @@ fn the_runner_gives_each_test_binary_its_own_temp_folder_and_removes_it() {
     let (code, t, err) = run(true);
     assert_eq!(code, Some(101), "{err}");
     assert!(t.join("sr-ABCDEFGH/owner").exists() && err.contains(&t.display().to_string()), "control: kept and named with SR_TEST_KEEP_TMP=1: {err}");
+    let m = std::fs::metadata(&t).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(m, 0o755, "the test binary's temp folder lets other users through, as /tmp did: {m:o}");
     let _ = std::fs::set_permissions(t.join("sr-sw-cell-1/ro"), std::fs::Permissions::from_mode(0o700));
     let _ = std::fs::remove_dir_all(&d);
 }

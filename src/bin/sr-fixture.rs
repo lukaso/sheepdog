@@ -29,8 +29,8 @@
 //!   bits) in `SHEEPR_TEST_TAG`, a canary `SHEEPR_TEST_STATE` without the sentinel, a
 //!   withheld sink in `SHEEPR_TEST_SINK`, and first on PATH a directory whose `sheepr` is a
 //!   symlink to the debug binary next to TESTBIN's `deps` directory; every other inherited
-//!   `SHEEPR_*` and `XDG_STATE_HOME` removed, and TMPDIR a new folder `srt.XXXXXX` under the
-//!   runner's own. It forwards TERM and INT, waits, passes the exit status on, and fails the run
+//!   `SHEEPR_*` and `XDG_STATE_HOME` removed, and TMPDIR a new folder `srt.XXXXXX` (0755, as /tmp
+//!   let other users through) under the runner's own. It forwards TERM and INT, waits, passes the exit status on, and fails the run
 //!   if anything was written to the canary or the sink. It then removes the temp folder, a failed
 //!   run's too, with what the binary left in it (a killed sheepr's registration folder, a failed
 //!   cell's scratch: issue #20); with SR_TEST_KEEP_TMP=1 it keeps it and names it.
@@ -755,7 +755,15 @@ fn test_env(argv: &[String]) -> ! {
             std::process::exit(125);
         }
         raw.pop();
-        PathBuf::from(std::ffi::OsString::from_vec(raw))
+        let t = PathBuf::from(std::ffi::OsString::from_vec(raw));
+        // 0755, as /tmp let other users through to a cell's scratch (mkdtemp makes it 0700): the
+        // Linux cells that run a fixture as another uid write into their scratch inside it
+        if let Err(e) = std::fs::set_permissions(&t, std::os::unix::fs::PermissionsExt::from_mode(0o755)) {
+            eprintln!("sr-test-env: cannot open {} to other users: {e}", t.display());
+            let _ = std::fs::remove_dir(&t);
+            std::process::exit(125);
+        }
+        t
     };
     let end_tmp = || {
         if std::env::var("SR_TEST_KEEP_TMP").as_deref() == Ok("1") {
