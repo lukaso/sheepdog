@@ -68,7 +68,12 @@ case "\$*" in
     cat "$FX/draftafter" 2>/dev/null || echo false
     i=0; for f in \$(ls "$FX/up"); do i=\$((i+1)); [ "\$f" = sheepr-macos-universal.tar.gz ] && echo \$i; done ;;
   *"releases --paginate"*) cat "$FX/existing" 2>/dev/null ;;
-  "api -X POST repos/lukaso/sheepr/releases "*) echo 4242 ;;
+  "api -X POST repos/lukaso/sheepr/releases "*)
+    # the archive and its manifest entry replaced together after the planner (at the POST)
+    if [ -e "$FX/swaparchive" ]; then a="$FX/out/v0.1.0/sheepr-macos-universal.tar.gz"; echo swapped > "\$a"
+      h=\$(shasum -a 256 "\$a" | cut -d' ' -f1)
+      sed -i.bak "s/\"sheepr-macos-universal.tar.gz\", \"sha256\": \"[0-9a-f]*\"/\"sheepr-macos-universal.tar.gz\", \"sha256\": \"\$h\"/" "$FX/out/v0.1.0/MANIFEST.json" && rm -f "$FX/out/v0.1.0/MANIFEST.json.bak"; fi
+    echo 4242 ;;
   *"uploads.github.com"*) prev=""; for a; do case \$a in *assets\\?name=*) nm=\${a##*name=} ;; esac; [ "\$prev" = --input ] && in=\$a; prev=\$a; done
     [ -e "$FX/mutate" ] && [ "\$nm" = "\$(cat "$FX/mutate")" ] && echo changed >> "\$in"
     mkdir -p "$FX/up"; cp "\$in" "$FX/up/\$nm"; echo 1 ;;
@@ -184,6 +189,14 @@ for x in change rm; do
   pub v0.1.0 v0.1.0; r=$?
   [ $r = 1 ] && [ ! -s "$FX/calls" ] && pass "an npm package $( [ $x = change ] && echo changed || echo removed) after npm-check: refused before any call" || fail "npm package $x: rc=$r calls=$(seq)"
 done
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"
+
+# the hashes publish checks against are the stamped manifest's, copied before the first call: an
+# archive and its manifest entry replaced together after the planner (at the POST) do not match it,
+# so the draft stays a draft
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; touch "$FX/swaparchive"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/swaparchive"
+[ $r = 1 ] && grep -q POST "$FX/calls" && ! grep -q PATCH "$FX/calls" && grep -q 'manifest' "$FX/o" \
+  && pass "an archive and its manifest entry replaced together after the planner: no PATCH, the manifest named (1)" || fail "swapped pair: rc=$r $(seq) $(tail -1 "$FX/o")"
 mkout "$FX/out/v0.1.0" v0.1.0 "$C"
 
 # npm-check comes first: without its stamp for this manifest, nothing reaches GitHub

@@ -240,6 +240,17 @@ h0=$(sed -n 's/.*"sheepr-darwin-universal-0.1.0.tgz", "sha256": "\([0-9a-f]*\)".
 pub v0.1.0; r=$?; rm -f "$FX/onview.sheepr-darwin-universal"
 [ $r = 0 ] && [ "$(awk '$1 == "sheepr-darwin-universal" {print $2}' "$FX/pubsha")" = "$h0" ] \
   && pass "a source changed between its check and its upload: npm got the checked bytes" || fail "changed after the check: rc=$r $(cat "$FX/pubsha" 2>/dev/null | tr '\n' ' ')"
+# the hashes publish-npm checks against are the stamped manifest's, copied before the first call:
+# a later package and its manifest entry replaced together (at the first view) do not match it
+mkout "$D" v0.1.0
+cat > "$FX/onview.sheepr-linux-arm64" <<EOF
+f='$D/sheepr-linux-x64-0.1.0.tgz'; echo swapped >> "\$f"; h=\$(shasum -a 256 "\$f" | cut -d' ' -f1)
+sed -i.bak "s/\\"sheepr-linux-x64-0.1.0.tgz\\", \\"sha256\\": \\"[0-9a-f]*\\"/\\"sheepr-linux-x64-0.1.0.tgz\\", \\"sha256\\": \\"\$h\\"/" '$D/MANIFEST.json' && rm -f '$D/MANIFEST.json.bak'
+EOF
+pub v0.1.0; r=$?; rm -f "$FX/onview.sheepr-linux-arm64"
+case "$(order)" in *"publish sheepr-linux-x64"*) swapped=published ;; *) swapped=kept ;; esac
+[ $r = 1 ] && [ $swapped = kept ] && grep -q 'manifest hash' "$FX/o" && grep -q "x64-0.1.0.tgz" "$D/MANIFEST.json" \
+  && pass "a package and its manifest entry replaced together during the run: refused at it, not published (1)" || fail "swapped package: rc=$r $(order) $(tail -1 "$FX/o")"
 # a view that fails for another reason than E404 cannot say the version is absent: refused there
 mkout "$D" v0.1.0; : > "$FX/viewfail.sheepr-darwin-universal"; pub v0.1.0; r=$?; rm -f "$FX/viewfail.sheepr-darwin-universal"
 [ $r = 1 ] && [ "$(order)" = "view sheepr-linux-arm64,publish sheepr-linux-arm64,view sheepr-linux-arm64,view sheepr-linux-x64,publish sheepr-linux-x64,view sheepr-linux-x64,view sheepr-darwin-universal," ] && grep -q 'cannot tell' "$FX/o" \

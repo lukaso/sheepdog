@@ -323,15 +323,25 @@ confirm() { # prompt -> 0 on the tag typed back
 }
 # npm-check's stamp (NPM-CHECKED in the output dir): the tag and the sha256 of the MANIFEST.json it
 # passed on. npm is the last one-way step, so its check must pass before anything is public.
-stamp_line() { printf '%s %s' "$tag" "$(shasum -a 256 "$1/MANIFEST.json" | cut -d' ' -f1)"; }
+# MAN: the manifest these read. Empty (npm-check, which writes the stamp): the output dir's. A
+# publishing entry sets it to its private copy, taken before its first check, so every later hash
+# is the stamped manifest's: an archive and its manifest entry replaced together during the run do
+# not match it.
+MAN=""
+verified_ah=""   # the sha256 of the archive `verify` judged (empty in the dry entries, which skip verify)
+stamp_line() { printf '%s %s' "$tag" "$(shasum -a 256 "${MAN:-$1/MANIFEST.json}" | cut -d' ' -f1)"; }
 stamp_ok() { # dir -> 0 if npm-check passed on this tag and this manifest
-  [ -f "$1/NPM-CHECKED" ] && [ -f "$1/MANIFEST.json" ] && [ "$(cat "$1/NPM-CHECKED")" = "$(stamp_line "$1")" ]
+  [ -f "$1/NPM-CHECKED" ] && [ -f "${MAN:-$1/MANIFEST.json}" ] && [ "$(cat "$1/NPM-CHECKED")" = "$(stamp_line "$1")" ]
 }
 man_hash() { # dir file -> the file's sha256 in MANIFEST.json (empty if it is not listed)
-  sed -n "s/.*\"name\": \"$2\", \"sha256\": \"\([0-9a-f]\{64\}\)\".*/\1/p" "$1/MANIFEST.json" | head -1
+  sed -n "s/.*\"name\": \"$2\", \"sha256\": \"\([0-9a-f]\{64\}\)\".*/\1/p" "${MAN:-$1/MANIFEST.json}" | head -1
+}
+private_manifest() { # dir tmp: copy the output dir's MANIFEST.json into tmp (0700) and read it from there on
+  cp "$1/MANIFEST.json" "$2/MANIFEST.json" 2>/dev/null || die "no MANIFEST.json in $1"
+  MAN=$2/MANIFEST.json
 }
 files_ok() { # dir -> 0 if every file MANIFEST.json lists is there and is its hash (npm-check's files)
-  fs=$(sed -n 's/.*"name": "\([^"]*\)", "sha256": "[0-9a-f]\{64\}".*/\1/p' "$1/MANIFEST.json")
+  fs=$(sed -n 's/.*"name": "\([^"]*\)", "sha256": "[0-9a-f]\{64\}".*/\1/p' "${MAN:-$1/MANIFEST.json}")
   [ -n "$fs" ] || return 1
   for f in $fs; do
     [ -f "$1/$f" ] && [ "$(shasum -a 256 "$1/$f" | cut -d' ' -f1)" = "$(man_hash "$1" "$f")" ] || { echo "release: $f is missing or not its manifest hash" >&2; return 1; }
@@ -341,8 +351,11 @@ publish_exec() { # dir
   d=$1
   pt=$(mktemp -d /private/tmp/sr-publish.XXXXXX) || die "no temp dir"
   trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  private_manifest "$d" "$pt"
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   files_ok "$d" || die "a file npm-check checked has changed since (above); run release.sh npm-check $tag again"
+  [ -z "$verified_ah" ] || [ "$verified_ah" = "$(man_hash "$d" sheepr-macos-universal.tar.gz)" ] \
+    || die "the archive verify judged is not the stamped manifest's (it changed since); nothing is published"
   # SHA256SUMS is not in the manifest: the build wrote it from those four files, in this order, so
   # its bytes follow from the manifest's hashes; nothing else is published, at any time
   for x in sheepr-macos-universal.tar.gz sheepr-linux-aarch64 sheepr-linux-x86_64 install.sh; do
@@ -516,17 +529,19 @@ cask_post() { # dir tmp release-path fail: the release is public; the cask put a
   echo "release: $TAP's $CASK is $xyz"
 }
 publish_cask_exec() { # dir: the cask step alone, for a release that is already public
-  d=$1 m=$1/MANIFEST.json
+  d=$1
   case $tag in *-rc.*) die "an rc: the Homebrew cask follows final releases only" ;; esac
-  [ -f "$m" ] || die "no MANIFEST.json in $d"
+  pt=$(mktemp -d /private/tmp/sr-publish.XXXXXX) || die "no temp dir"
+  trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  private_manifest "$d" "$pt"; m=$MAN
   mf() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -1; }
   [ "$(mf tag)" = "$tag" ] && [ "$(mf mode)" = signed ] && [ "$(mf control)" = false ] \
     || die "the manifest is not $tag's signed build, or it is a control build"
   lc=$(git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}") || die "no local tag $tag"
   [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
   files_ok "$d" || die "a file the manifest lists is missing or changed"
-  pt=$(mktemp -d /private/tmp/sr-publish.XXXXXX) || die "no temp dir"
-  trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pt" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
+  [ -z "$verified_ah" ] || [ "$verified_ah" = "$(man_hash "$d" sheepr-macos-universal.tar.gz)" ] \
+    || die "the archive verify judged is not the manifest's (it changed since); nothing is written"
   cask_pre "$d" "$pt"
   [ "$cask_put" = older ] && die "$TAP's cask is $cask_tap, newer than $tag: the cask is never moved back; nothing to do"
   cask_post "$d" "$pt" "releases/tags/$tag" die
@@ -606,6 +621,7 @@ publish_npm_exec() { # dir
   pc=$(mktemp -d /private/tmp/sr-npmpub.XXXXXX) || die "no temp dir"   # the private copies npm gets
   trap 'rm -rf "$pc" ${DRYHOME:+"$DRYHOME"}' EXIT; trap 'rm -rf "$pc" ${DRYHOME:+"$DRYHOME"}; exit 1' HUP INT TERM
   chmod 700 "$pc" || die "cannot make $pc private"
+  private_manifest "$d" "$pc"; m=$MAN
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   mf() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -1; }
   [ "$(mf tag)" = "$tag" ] && [ "$(mf mode)" = signed ] && [ "$(mf control)" = false ] \
@@ -714,7 +730,10 @@ verify() { # dir -> exit 1 naming the tool that refused
   [ -f "$arc" ] || die "no $arc"
   vt=/private/tmp/sr-verify.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
   trap 'rm -rf "$vt"' EXIT; trap 'rm -rf "$vt"; exit 1' HUP INT TERM
-  mkdir -m 700 "$vt" && /usr/bin/tar -xzf "$arc" -C "$vt" || die "cannot unpack $arc"   # the bundle the real tools judge
+  # the bundle the real tools judge, from a private copy whose hash publish then binds to the
+  # stamped manifest (an archive replaced after this check is not the one judged)
+  mkdir -m 700 "$vt" && cp "$arc" "$vt/a.tgz" && verified_ah=$(shasum -a 256 "$vt/a.tgz" | cut -d' ' -f1) \
+    && /usr/bin/tar -xzf "$vt/a.tgz" -C "$vt" && rm -f "$vt/a.tgz" || die "cannot unpack $arc"
   a=$vt/Sheepr.app
   # a control build's bundle carries the control marker (bundle.sh --control): never a release
   /usr/bin/plutil -extract SheeprControlBuild raw -o - "$a/Contents/Info.plist" >/dev/null 2>&1 && die "the archive holds a control build (SheeprControlBuild in its Info.plist)"
