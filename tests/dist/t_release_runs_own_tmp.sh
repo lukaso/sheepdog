@@ -5,27 +5,41 @@
 # with the code under test. So every hand-run of a sheepr binary in a test leg (`env -i` with
 # SHEEPR_STATE=, the convention for one) names its own TMPDIR or passes --no-sweep, on the same
 # logical line (backslash continuations joined; comment lines skipped). The control: a line with
-# neither is caught, the two forms that pass pass. Bounds: a hand-run spelled without `env -i` and
+# neither is caught, the two forms that pass pass, and a path the scan cannot read fails it. The
+# real scan must read every path it names (each pattern matches a file, awk exits 0) and see the
+# two hand-runs it caught before their fix (release-refusal.sh, t_npm_install.sh's `job`), so a
+# scan that read nothing never passes. Bounds: a hand-run spelled without `env -i` and
 # SHEEPR_STATE= is not seen; a TMPDIR too long for a socket path would still mean /tmp.
 set -u
 . "$(dirname "$0")/lib.sh"
 fx_dir
-scan() { # file... -> each logical line that breaks the rule, as file:line
+scan() { # file... -> "SEEN file:line" for each hand-run, "BAD file:line" for each that breaks the
+  # rule; awk's exit status (not 0 when a file cannot be read)
   awk 'FNR == 1 { buf = "" }
     { if (buf == "") start = FNR
       if ($0 ~ /\\$/) { buf = buf substr($0, 1, length($0) - 1) " "; next }
       buf = buf $0
-      if (buf !~ /^[ \t]*#/ && buf ~ /env -i/ && buf ~ /SHEEPR_STATE=/ && buf !~ /TMPDIR=/ && buf !~ /--no-sweep/) print FILENAME ":" start
+      if (buf !~ /^[ \t]*#/ && buf ~ /env [-]i/ && buf ~ /SHEEPR_STATE[=]/) {
+        print "SEEN " FILENAME ":" start
+        if (buf !~ /TMPDIR[=]/ && buf !~ /--no-sweep/) print "BAD " FILENAME ":" start }
       buf = "" }' "$@"
 }
-# the control (built from pieces, so this file holds no line of the shape it looks for)
+# the control (built from pieces, so no line of this file breaks the rule)
 ei="env -i" st="SHEEPR_STATE"
 { printf '%s\n' "# $ei PATH=/x $st=/s \"\$b\" run -- true"
   printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" \"\$b\" run -- true"
   printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" TMPDIR=\"\$h/t\" \"\$b\" run -- true"
   printf '%s\n' "$ei PATH=/usr/bin:/bin HOME=\"\$h\" $st=\"\$h/s\" \\" "  \"\$b\" run --no-sweep -- true"; } > "$FX/control.sh"
-got=$(scan "$FX/control.sh")
+got=$(scan "$FX/control.sh" | sed -n 's/^BAD //p')
 [ "$got" = "$FX/control.sh:2" ] && pass "control: a hand-run with neither TMPDIR nor --no-sweep is caught, the others pass" || fail "control: '$got'"
-found=$(cd "$SR_ROOT" && scan tests/dist/*.sh tests/rc/*.sh scripts/*.sh scripts/lib/*.sh test-all)
-[ -z "$found" ] && pass "every hand-run of a sheepr binary in a test leg names its own TMPDIR or passes --no-sweep" || fail "a hand-run that may sweep the operator's /tmp: $(echo $found)"
+scan "$FX/missing.sh" "$FX/control.sh" > /dev/null 2>&1 && fail "control: a path the scan cannot read passed" || pass "control: a path the scan cannot read fails the scan"
+cd "$SR_ROOT" || { fail "cd $SR_ROOT"; finish; }
+for g in 'tests/dist/*.sh' 'tests/rc/*.sh' 'scripts/*.sh' 'scripts/lib/*.sh' 'test-all'; do
+  set -- $g; [ -e "$1" ] || fail "the scan's path $g matches nothing"
+done
+out=$(scan tests/dist/*.sh tests/rc/*.sh scripts/*.sh scripts/lib/*.sh test-all 2>&1); rc=$?
+seen=$(printf '%s\n' "$out" | grep -c '^SEEN ') bad=$(printf '%s\n' "$out" | sed -n 's/^BAD //p')
+[ $rc = 0 ] && printf '%s\n' "$out" | grep -q '^SEEN scripts/release-refusal\.sh:' && printf '%s\n' "$out" | grep -q '^SEEN tests/dist/t_npm_install\.sh:' \
+  && pass "the scan read the test legs ($seen hand-runs, the two caught before among them)" || fail "the scan did not read the test legs: rc=$rc, $seen seen: $(printf '%s\n' "$out" | grep -v '^SEEN ' | head -3 | tr '\n' ' ')"
+[ -z "$bad" ] && pass "every hand-run of a sheepr binary in a test leg names its own TMPDIR or passes --no-sweep" || fail "a hand-run that may sweep the operator's /tmp: $(echo $bad)"
 finish
