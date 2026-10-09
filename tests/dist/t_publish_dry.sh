@@ -92,6 +92,8 @@ cat > "$FX/git" <<EOF
 #!/bin/sh
 n=\$(ls "$FX" | grep -c '^env\\.git\\.'); env > "$FX/env.git.\$n"
 echo "git \$*" >> "$FX/calls"
+# the output dir's manifest replaced after publish copied it (at the first git call)
+[ -e "$FX/fixman" ] && cp "$FX/fixedman" "$FX/out/v0.1.0/MANIFEST.json"
 if [ \$n -ge 1 ] && [ -e "$FX/moved" ]; then cat "$FX/moved"; else cat "$FX/remote"; fi
 EOF
 cat > "$FX/npm" <<EOF
@@ -436,4 +438,30 @@ echo stranger > "$FX/owner.sheepr"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/owner.sh
 [ $r = 1 ] && nogh && grep -q 'sheepr-linux-arm64 is not on npm yet' "$FX/o" && pass "an npm name not on npm yet: refused before any git or gh call" || fail "npm absent: rc=$r $(seq) $(tail -1 "$FX/o")"
 n=$(ls -d /private/tmp/sr-dryhome.* 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" = 0 ] && pass "no dry HOME is left, after the refused runs too" || fail "$n dry HOME dirs left"
+# the planner judges the stamped manifest (the run's private copy), not the output dir's read
+# again: a stamped manifest naming another commit, the output dir's file corrected after the copy
+# (at the first git call), is refused by the planner
+mkout "$FX/out/v0.1.0" v0.1.0 0000000000000000000000000000000000000000
+sed "s/\"commit\": \"0*\"/\"commit\": \"$C\"/" "$FX/out/v0.1.0/MANIFEST.json" > "$FX/fixedman"
+touch "$FX/fixman"; pub v0.1.0 v0.1.0; r=$?; rm -f "$FX/fixman"
+[ $r = 1 ] && nopublic && grep -q "planner refused" "$FX/o" && grep -q "commit 0000" "$FX/o" \
+  && pass "a stamped manifest of another commit, the output dir's corrected after the copy: the planner refuses (1)" || fail "planner on the copy: rc=$r $(seq) $(tail -2 "$FX/o" | tr '\n' ' ')"
+# publish and publish-cask bind the archive verify judged to the stamped manifest. The dry entries
+# skip verify; SR_PUBLISH_DRY_VERIFIED stands in for the hash it judged: another is refused before
+# any call, the manifest's goes on (the controls)
+mkout "$FX/out/v0.1.0" v0.1.0 "$C"; AH=$(shasum -a 256 "$FX/out/v0.1.0/sheepr-macos-universal.tar.gz" | cut -d' ' -f1)
+export SR_PUBLISH_DRY_VERIFIED=0000000000000000000000000000000000000000000000000000000000000000
+pub v0.1.0 v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'verify judged' "$FX/o" \
+  && pass "publish: the archive verify judged is not the stamped manifest's: refused before any call (1)" || fail "verify binding (publish): rc=$r $(seq) $(tail -1 "$FX/o")"
+cask v0.1.0; r=$?
+[ $r = 1 ] && [ ! -s "$FX/calls" ] && grep -q 'verify judged' "$FX/o" \
+  && pass "publish-cask: the same, refused before any call (1)" || fail "verify binding (publish-cask): rc=$r $(seq) $(tail -1 "$FX/o")"
+SR_PUBLISH_DRY_VERIFIED=$AH
+pub v0.1.0 v0.1.0; r=$?
+[ $r = 0 ] && grep -q PATCH "$FX/calls" && pass "control: the archive verify judged is the manifest's: publish goes on (0)" || fail "verify binding control (publish): rc=$r $(seq) $(tail -1 "$FX/o")"
+tapset 0.0.9; cask v0.1.0; r=$?
+[ $r = 0 ] && grep -q '^gh api -X PUT' "$FX/calls" && pass "control: publish-cask goes on (0)" || fail "verify binding control (publish-cask): rc=$r $(seq) $(tail -1 "$FX/o")"
+unset SR_PUBLISH_DRY_VERIFIED
+
 finish

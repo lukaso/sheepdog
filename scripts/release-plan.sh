@@ -2,9 +2,11 @@
 # The publish planner (PHASE3.md §1.2). Pure: it reads files and the local git, and prints the
 # exact GitHub calls `release.sh publish` makes, or refuses.
 #
-#   release-plan.sh --out DIR --tag vTAG --remote LSREMOTE --releases RELEASES
+#   release-plan.sh --out DIR [--manifest FILE] --tag vTAG --remote LSREMOTE --releases RELEASES
 #   release-plan.sh --validate PLAN
 #
+# FILE is the manifest to judge (default DIR/MANIFEST.json; `publish` passes its private copy of the
+# stamped one, so the planner judges the manifest the uploads are bound to).
 # LSREMOTE is `git ls-remote origin refs/tags/vTAG*` output; RELEASES the tag names of the
 # repository's releases and drafts, one per line. Refused (exit 1):
 #   - a manifest that is not this tag's signed, non-control build;
@@ -26,7 +28,7 @@ set -u
 PATH=/usr/bin:/bin:$PATH
 LC_ALL=C; export LC_ALL
 die() { echo "release-plan: $*" >&2; exit 1; }
-usage() { echo "usage: release-plan.sh --out DIR --tag vTAG --remote FILE --releases FILE | --validate PLAN" >&2; exit 2; }
+usage() { echo "usage: release-plan.sh --out DIR [--manifest FILE] --tag vTAG --remote FILE --releases FILE | --validate PLAN" >&2; exit 2; }
 FIVE="sheepr-macos-universal.tar.gz sheepr-linux-aarch64 sheepr-linux-x86_64 install.sh SHA256SUMS"
 REPO=lukaso/sheepr
 
@@ -43,18 +45,18 @@ PATCH -F draft=false"
   [ "$(cat "$f")" = "$exp" ] || die "the plan is not of the one shape"
 }
 
-out="" tag="" remote="" releases=""
+out="" man="" tag="" remote="" releases=""
 case ${1:-} in
   --validate) [ $# -eq 2 ] || usage; validate "$2"; exit 0 ;;
 esac
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || usage
-  case $1 in --out) out=$2 ;; --tag) tag=$2 ;; --remote) remote=$2 ;; --releases) releases=$2 ;; *) usage ;; esac
+  case $1 in --out) out=$2 ;; --manifest) man=$2 ;; --tag) tag=$2 ;; --remote) remote=$2 ;; --releases) releases=$2 ;; *) usage ;; esac
   shift 2
 done
 [ -n "$out" ] && [ -n "$tag" ] && [ -f "$remote" ] && [ -f "$releases" ] || usage
 [ -d "$out" ] || die "no directory $out"
-m=$out/MANIFEST.json
+m=${man:-$out/MANIFEST.json}
 [ -f "$m" ] || die "no MANIFEST.json"
 mv_() { sed -n "s/^ *\"$1\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}$/\1/p" "$m" | head -1; }
 [ "$(mv_ tag)" = "$tag" ] || die "the manifest is for $(mv_ tag), not $tag"

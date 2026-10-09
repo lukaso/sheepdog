@@ -141,4 +141,24 @@ mk signed false; python3 "$NS" packages "$D" "$nv" "$R" "sheepr sheepr-linux-arm
 python3 "$E" "$D/sheepr-$nv.tgz" "$FX/e.tgz" json-set package/package.json "optionalDependencies={\"sheepr-linux-arm64\": \"$nv\", \"sheepr-linux-x64\": \"$nv\", \"sheepr-darwin-universal\": \"$nv\", \"sheepr-extra\": \"$nv\"}" && mv "$FX/e.tgz" "$D/sheepr-$nv.tgz" || fail "could not make the optionalDependencies variant"
 python3 "$NS" packages "$D" "$nv" "$R" "$L" > "$FX/o" 2>&1; r=$?
 [ $r != 0 ] && grep -q 'optionalDependencies' "$FX/o" && grep -q 'SR_NPM_PKGS' "$FX/o" && pass "npm-same.py: optional dependencies that are not the list's other names are refused, the list named" || fail "npm-same optionalDependencies: rc=$r $(tail -1 "$FX/o")"
+# the stamp names the manifest npm-check copied at its start, not the output dir's read again at
+# the end: a manifest replaced during the check (here at the last real-tool check) gets no stamp
+# publish accepts. Stand-in real tools and archive check, in the fixture repo only, so the check
+# can pass; the control: nothing replaced, the stamp is the manifest's
+cp "$REPO/scripts/lib/realtools.sh" "$FX/rt.real" && cp "$REPO/scripts/lib/archive.sh" "$FX/ar.real" || exit 3
+cat > "$REPO/scripts/lib/realtools.sh" <<EOF
+rt_meets() { return 0; }
+rt_staple_ok() { return 0; }
+rt_spctl_ok() { [ -e "$FX/swapman" ] && printf ' ' >> "$D/MANIFEST.json"; return 0; }
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$REPO/scripts/lib/archive.sh"
+mk signed false; h0=$(shasum -a 256 "$D/MANIFEST.json" | cut -d' ' -f1); nc; r=$?
+[ $r = 0 ] && [ "$(cat "$D/NPM-CHECKED" 2>/dev/null)" = "v0.1.0 $h0" ] \
+  && pass "control: with stand-in real tools, npm-check stamps the manifest it checked" || fail "stand-in pass: rc=$r $(tail -1 "$FX/o")"
+mk signed false; h0=$(shasum -a 256 "$D/MANIFEST.json" | cut -d' ' -f1); touch "$FX/swapman"; nc; r=$?; rm -f "$FX/swapman"
+h1=$(shasum -a 256 "$D/MANIFEST.json" | cut -d' ' -f1)
+[ $r = 0 ] && [ "$h1" != "$h0" ] && [ "$(cat "$D/NPM-CHECKED" 2>/dev/null)" = "v0.1.0 $h0" ] \
+  && pass "a manifest replaced during npm-check: the stamp names the one checked, so publish refuses the replaced one" || fail "replaced during the check: rc=$r stamp '$(cat "$D/NPM-CHECKED" 2>/dev/null)' checked $h0 now $h1"
+cp "$FX/rt.real" "$REPO/scripts/lib/realtools.sh" && cp "$FX/ar.real" "$REPO/scripts/lib/archive.sh" || exit 3
+
 finish

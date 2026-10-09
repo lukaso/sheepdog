@@ -323,12 +323,15 @@ confirm() { # prompt -> 0 on the tag typed back
 }
 # npm-check's stamp (NPM-CHECKED in the output dir): the tag and the sha256 of the MANIFEST.json it
 # passed on. npm is the last one-way step, so its check must pass before anything is public.
-# MAN: the manifest these read. Empty (npm-check, which writes the stamp): the output dir's. A
-# publishing entry sets it to its private copy, taken before its first check, so every later hash
-# is the stamped manifest's: an archive and its manifest entry replaced together during the run do
-# not match it.
+# MAN: the manifest these read: each entry's own private copy, taken before its first check (npm-check
+# stamps that copy's hash; publish, publish-cask and publish-npm read their copy for every later
+# hash, and publish's planner reads it too), so an archive and its manifest entry replaced together
+# during a run do not match it. Empty: the output dir's.
 MAN=""
-verified_ah=""   # the sha256 of the archive `verify` judged (empty in the dry entries, which skip verify)
+# `verify`'s archive: verified=yes once it judged one, verified_ah that archive's sha256. publish and
+# publish-cask then refuse a stamped manifest that names another hash for it. The dry entries skip
+# verify; SR_PUBLISH_DRY_VERIFIED (a hash) stands in for it there, for the cells.
+verified=no verified_ah=""
 stamp_line() { printf '%s %s' "$tag" "$(shasum -a 256 "${MAN:-$1/MANIFEST.json}" | cut -d' ' -f1)"; }
 stamp_ok() { # dir -> 0 if npm-check passed on this tag and this manifest
   [ -f "$1/NPM-CHECKED" ] && [ -f "${MAN:-$1/MANIFEST.json}" ] && [ "$(cat "$1/NPM-CHECKED")" = "$(stamp_line "$1")" ]
@@ -354,7 +357,7 @@ publish_exec() { # dir
   private_manifest "$d" "$pt"
   stamp_ok "$d" || die "npm-check has not passed on $d for this manifest; run release.sh npm-check $tag first"
   files_ok "$d" || die "a file npm-check checked has changed since (above); run release.sh npm-check $tag again"
-  [ -z "$verified_ah" ] || [ "$verified_ah" = "$(man_hash "$d" sheepr-macos-universal.tar.gz)" ] \
+  [ "$verified" = no ] || [ "$verified_ah" = "$(man_hash "$d" "$ARCHIVE")" ] \
     || die "the archive verify judged is not the stamped manifest's (it changed since); nothing is published"
   # SHA256SUMS is not in the manifest: the build wrote it from those four files, in this order, so
   # its bytes follow from the manifest's hashes; nothing else is published, at any time
@@ -376,7 +379,7 @@ publish_exec() { # dir
   esac
   tool "$NETC" "$GITCMD" ls-remote "$UPSTREAM" "refs/tags/$tag*" > "$pt/remote" || die "git ls-remote $UPSTREAM"
   tool "$NETC" "$GH" api "repos/lukaso/sheepr/releases" --paginate --jq '.[].tag_name' > "$pt/releases" || die "gh: cannot list the releases"
-  (cd "$root" && sh scripts/release-plan.sh --out "$d" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
+  (cd "$root" && sh scripts/release-plan.sh --out "$d" --manifest "$MAN" --tag "$tag" --remote "$pt/remote" --releases "$pt/releases") > "$pt/plan" || die "the planner refused"
   sh "$root/scripts/release-plan.sh" --validate "$pt/plan" || die "the plan does not validate"
   echo "release: the plan:"; sed 's/^/  /' "$pt/plan"
   set -- $(sed -n 's/^POST [^ ]* //p' "$pt/plan")
@@ -449,6 +452,7 @@ publish_dry() { # the cells' entry: stand-ins by path only, never the real gh; v
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
   trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM   # right after mktemp: a death before the run's own trap leaves no temp HOME (a signal in between still can)
   echo "release: __publish-dry (stand-ins; verify not run; a temp HOME)"
+  [ -z "${SR_PUBLISH_DRY_VERIFIED:-}" ] || verified=yes verified_ah=$SR_PUBLISH_DRY_VERIFIED
   GH=$SR_PUBLISH_DRY_GH GITCMD=$SR_PUBLISH_DRY_GIT NPM=$SR_PUBLISH_DRY_NPM NPMC=npmdry DRY=yes NETC=dry \
     CURL=$SR_PUBLISH_DRY_CURL CURLC=dry publish_exec "$out/$tag"
   rm -rf "$DRYHOME"
@@ -540,7 +544,7 @@ publish_cask_exec() { # dir: the cask step alone, for a release that is already 
   lc=$(git -C "$root" rev-parse -q --verify "refs/tags/$tag^{commit}") || die "no local tag $tag"
   [ "$(mf commit)" = "$lc" ] || die "the manifest's commit $(mf commit) is not $tag's ($lc)"
   files_ok "$d" || die "a file the manifest lists is missing or changed"
-  [ -z "$verified_ah" ] || [ "$verified_ah" = "$(man_hash "$d" sheepr-macos-universal.tar.gz)" ] \
+  [ "$verified" = no ] || [ "$verified_ah" = "$(man_hash "$d" "$ARCHIVE")" ] \
     || die "the archive verify judged is not the manifest's (it changed since); nothing is written"
   cask_pre "$d" "$pt"
   [ "$cask_put" = older ] && die "$TAP's cask is $cask_tap, newer than $tag: the cask is never moved back; nothing to do"
@@ -556,6 +560,7 @@ publish_cask_dry() { # the cells' entry: stand-ins by path only, never the real 
   DRYHOME=$(mktemp -d /private/tmp/sr-dryhome.XXXXXX) || die "no temp HOME"
   trap 'rm -rf "$DRYHOME"' EXIT; trap 'rm -rf "$DRYHOME"; exit 1' HUP INT TERM
   echo "release: __publish-cask-dry (stand-ins; a temp HOME)"
+  [ -z "${SR_PUBLISH_DRY_VERIFIED:-}" ] || verified=yes verified_ah=$SR_PUBLISH_DRY_VERIFIED
   GH=$SR_PUBLISH_DRY_GH NETC=dry CURL=$SR_PUBLISH_DRY_CURL CURLC=dry publish_cask_exec "$out/$tag"
   rm -rf "$DRYHOME"
 }
@@ -680,10 +685,16 @@ publish_npm_dry() { # the cells' entry: a stand-in npm by path only, never the r
 npm_check() { # dir
   . "$root/scripts/release.conf" || die "cannot read scripts/release.conf"
   . "$root/scripts/lib/realtools.sh" || die "cannot read realtools.sh"
-  d=$1 m=$1/MANIFEST.json nv=${tag#v}
-  [ -f "$m" ] || die "no $m"
+  d=$1 nv=${tag#v}
+  [ -f "$d/MANIFEST.json" ] || die "no $d/MANIFEST.json"
   # a stamp from an earlier pass never outlives a check that does not pass
   rm -f "$d/NPM-CHECKED" || die "cannot remove $d/NPM-CHECKED"
+  nt=/private/tmp/sr-npmcheck.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
+  trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
+  mkdir -m 700 "$nt" "$nt/p" "$nt/ref" || die "no temp dir"
+  # the manifest every check reads, and the stamp names: a private copy, taken first (a manifest
+  # replaced during the check gets no stamp that publish accepts)
+  private_manifest "$d" "$nt"; m=$MAN
   mode=$(sed -n 's/^ *"mode": *"\([^"]*\)",*$/\1/p' "$m"); ctl=$(sed -n 's/^ *"control": *\([a-z]*\),*$/\1/p' "$m")
   mtag=$(sed -n 's/^ *"tag": *"\([^"]*\)",*$/\1/p' "$m")
   [ "$mtag" = "$tag" ] || die "the manifest is for $mtag, not $tag"
@@ -695,9 +706,6 @@ npm_check() { # dir
     h=$(shasum -a 256 "$d/$f" | cut -d' ' -f1)
     grep -q "\"name\": \"$f\", \"sha256\": \"$h\"" "$m" || die "$f does not match its manifest hash"
   done
-  nt=/private/tmp/sr-npmcheck.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')
-  trap 'rm -rf "$nt"' EXIT; trap 'rm -rf "$nt"; exit 1' HUP INT TERM
-  mkdir -m 700 "$nt" "$nt/p" "$nt/ref" || die "no temp dir"
   # the four packages, read raw, before anything unpacks them (npm-same.py says why), against the
   # tag's license texts, README and launcher
   for x in LICENSE-MIT LICENSE-APACHE README.md npm/sheepr/bin/sheepr; do
@@ -717,8 +725,8 @@ npm_check() { # dir
   # read from the embedded signature, not recomputed, so equal CDHashes prove nothing)
   "$root/scripts/lib/archive.sh" check "$d/sheepr-macos-universal.tar.gz" --signed || die "the release archive fails its check (above)"
   npy same "$dt" "$d/sheepr-macos-universal.tar.gz" || die "the darwin package's bundle is not the release archive's bundle (above)"
-  rm -rf "$nt"; trap - EXIT
   stamp_line "$d" > "$d/NPM-CHECKED" || die "cannot write $d/NPM-CHECKED"
+  rm -rf "$nt"; trap - EXIT
   echo "release: the npm tarballs of $tag check out (NPM-CHECKED written); publish comes next, then publish-npm"
 }
 
@@ -733,7 +741,7 @@ verify() { # dir -> exit 1 naming the tool that refused
   # the bundle the real tools judge, from a private copy whose hash publish then binds to the
   # stamped manifest (an archive replaced after this check is not the one judged)
   mkdir -m 700 "$vt" && cp "$arc" "$vt/a.tgz" && verified_ah=$(shasum -a 256 "$vt/a.tgz" | cut -d' ' -f1) \
-    && /usr/bin/tar -xzf "$vt/a.tgz" -C "$vt" && rm -f "$vt/a.tgz" || die "cannot unpack $arc"
+    && [ -n "$verified_ah" ] && /usr/bin/tar -xzf "$vt/a.tgz" -C "$vt" && rm -f "$vt/a.tgz" || die "cannot unpack $arc"
   a=$vt/Sheepr.app
   # a control build's bundle carries the control marker (bundle.sh --control): never a release
   /usr/bin/plutil -extract SheeprControlBuild raw -o - "$a/Contents/Info.plist" >/dev/null 2>&1 && die "the archive holds a control build (SheeprControlBuild in its Info.plist)"
@@ -741,6 +749,7 @@ verify() { # dir -> exit 1 naming the tool that refused
   rt_staple_ok "$a" || die "stapler: no valid staple ticket"
   rt_spctl_ok "$a" || die "spctl: Gatekeeper rejects the bundle"
   rm -rf "$vt"; trap - EXIT
+  verified=yes
   echo "release: $d: signed, notarized and stapled (checked from the archive)"
 }
 
