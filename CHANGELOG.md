@@ -6,7 +6,7 @@ schemas (`"v": 1`, additive changes only) and the `sheepr:` at the start of the 
 each message sheepr itself writes to stderr (for a usage error, that line says what was wrong;
 `sheepr` alone prints the overview and exits 2).
 
-## Unreleased
+## 0.1.3 (2026-10-10)
 
 - `sweep` and the auto-sweep before each `run` (macOS): they remove the registration folders
   (`$TMPDIR/sr-XXXXXXXX`, or under `/tmp`) that a sheepr killed with SIGKILL leaves behind. Each
